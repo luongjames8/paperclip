@@ -96,10 +96,10 @@ export function extractSecretRefsFromConfig(
 
   /** Extract UUIDs from a string — bare UUID or embedded ${secret:UUID} tokens. */
   function extractFromString(s: string): void {
-    if (isUuid(s)) refs.add(s);
+    if (isUuidSecretRef(s)) refs.add(s);
     const matches = s.matchAll(SECRET_INTERP_RE);
     for (const m of matches) {
-      if (isUuid(m[1])) refs.add(m[1]);
+      if (isUuidSecretRef(m[1])) refs.add(m[1]);
     }
   }
 
