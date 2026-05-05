@@ -110,10 +110,39 @@ export async function logActivity(db: Db, input: LogActivityInput) {
       companyId: input.companyId,
       payload: {
         ...redactedDetails,
+        action: input.action,
         agentId: input.agentId ?? null,
         runId: input.runId ?? null,
       },
     };
     publishPluginDomainEvent(event);
+  }
+
+  // For actions in PLUGIN_EVENT_SET, this emits a SECOND event with eventType "activity.logged"
+  // (in addition to the typed event above). Plugins that subscribe to both will receive
+  // duplicates and must dedupe by checking eventType. Plugins should generally subscribe to
+  // EITHER typed events OR activity.logged (with action-string demux), not both.
+  if (_pluginEventBus) {
+    const catchAllEvent: PluginEvent = {
+      eventId: randomUUID(),
+      eventType: "activity.logged" as PluginEventType,
+      occurredAt: new Date().toISOString(),
+      actorId: input.actorId,
+      actorType: input.actorType,
+      entityId: input.entityId,
+      entityType: input.entityType,
+      companyId: input.companyId,
+      payload: {
+        ...(redactedDetails ?? {}),
+        action: input.action,
+        agentId: input.agentId ?? null,
+        runId: input.runId ?? null,
+      },
+    };
+    void _pluginEventBus.emit(catchAllEvent).then(({ errors }) => {
+      for (const { pluginId, error } of errors) {
+        logger.warn({ pluginId, eventType: catchAllEvent.eventType, err: error }, "plugin event handler failed");
+      }
+    }).catch(() => {});
   }
 }

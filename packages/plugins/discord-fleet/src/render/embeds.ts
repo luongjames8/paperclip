@@ -1,0 +1,105 @@
+import type { APIEmbed } from "discord.js";
+import { stripSecrets } from "./secrets.js";
+import { truncate } from "./plain.js";
+
+function safe(text: string, max = 1900): string {
+  return stripSecrets(truncate(text, max));
+}
+
+const EMBED_TOTAL_MAX = 6000;
+const DESC_MAX = 4096;
+const TITLE_MAX = 256;
+
+export function enforceEmbedLimits(embed: APIEmbed): APIEmbed {
+  const title = embed.title ? embed.title.slice(0, TITLE_MAX) : embed.title;
+  let description = embed.description;
+
+  const titleLen = title?.length ?? 0;
+  const footerLen = embed.footer?.text?.length ?? 0;
+  const authorLen = embed.author?.name?.length ?? 0;
+  const fieldsLen = (embed.fields ?? []).reduce((sum, f) => sum + (f.name?.length ?? 0) + (f.value?.length ?? 0), 0);
+  const descAllowed = EMBED_TOTAL_MAX - titleLen - footerLen - authorLen - fieldsLen;
+
+  if (description && description.length > Math.min(DESC_MAX, descAllowed)) {
+    const cap = Math.min(DESC_MAX, descAllowed) - 1;
+    description = cap > 0 ? description.slice(0, cap) + "…" : "…";
+  }
+
+  return { ...embed, title, description };
+}
+
+export function buildSeedIssueEmbed(opts: {
+  identifier: string;
+  title: string;
+  assignee?: string;
+  projectName?: string;
+  issueUrl: string;
+}): APIEmbed {
+  return enforceEmbedLimits({
+    color: 0x5865f2,
+    title: safe(`🌱 ${opts.identifier} — ${opts.title}`, 256),
+    description: safe([opts.projectName && `**Project**: ${opts.projectName}`, opts.assignee && `**Assignee**: ${opts.assignee}`, `[View in Paperclip](${opts.issueUrl})`].filter(Boolean).join("\n")),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function buildBlockedEmbed(opts: {
+  identifier: string;
+  title: string;
+  reason?: string;
+  issueUrl: string;
+}): APIEmbed {
+  return enforceEmbedLimits({
+    color: 0xed4245,
+    title: safe(`⛔ ${opts.identifier} → blocked`, 256),
+    description: safe([opts.reason && `**Reason**: ${opts.reason}`, `[View in Paperclip](${opts.issueUrl})`].filter(Boolean).join("\n")),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function buildApprovalEmbed(opts: {
+  identifier: string;
+  approvalId: string;
+  approvalType: string;
+  title?: string;
+  issueUrl: string;
+}): APIEmbed {
+  const shortId = opts.approvalId.slice(0, 8);
+  const headline = opts.title ? safe(opts.title, 220) : `${opts.identifier} — needs approval`;
+  return enforceEmbedLimits({
+    color: 0xfee75c,
+    title: safe(`🟡 ${headline}`, 256),
+    url: opts.issueUrl,
+    description: safe(`**Type**: ${opts.approvalType}\n**ID**: ${shortId}...\n\n[View & Approve in Paperclip](${opts.issueUrl})\n\n_Content batch in thread below ↓_`),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function buildStuckIssueEmbed(opts: {
+  identifier: string;
+  title: string;
+  hoursStuck: number;
+  assignee?: string;
+  issueUrl: string;
+}): APIEmbed {
+  return enforceEmbedLimits({
+    color: 0xffa500,
+    title: safe(`⚠️ Stuck: ${opts.identifier}`, 256),
+    description: safe([`**In progress for**: ${opts.hoursStuck}h`, opts.assignee && `**Assignee**: ${opts.assignee}`, `> ${opts.title.slice(0, 80)}`, `[View in Paperclip](${opts.issueUrl})`].filter(Boolean).join("\n")),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function buildRoutineHealthEmbed(opts: {
+  routineName: string;
+  expectedLastFire: Date;
+  actualLastFire: Date | null;
+}): APIEmbed {
+  const overdue = Math.round((Date.now() - (opts.expectedLastFire?.getTime() ?? 0)) / 3600_000);
+  return enforceEmbedLimits({
+    color: 0xffa500,
+    title: safe(`⚠️ Routine missed: ${opts.routineName}`, 256),
+    description: safe([`Expected last fire: ${opts.expectedLastFire.toISOString()}`, opts.actualLastFire ? `Actual last fire: ${opts.actualLastFire.toISOString()}` : "Never fired", `Overdue by: ~${overdue}h`].join("\n")),
+    timestamp: new Date().toISOString(),
+  });
+}

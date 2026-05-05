@@ -91,12 +91,24 @@ export function extractSecretRefsFromConfig(
 
   const secretPaths = collectSecretRefPaths(schema);
 
+  /** Regex matching ${secret:UUID} interpolation tokens inside strings. */
+  const SECRET_INTERP_RE = /\$\{secret:([0-9a-f-]{36})\}/gi;
+
+  /** Extract UUIDs from a string — bare UUID or embedded ${secret:UUID} tokens. */
+  function extractFromString(s: string): void {
+    if (isUuid(s)) refs.add(s);
+    const matches = s.matchAll(SECRET_INTERP_RE);
+    for (const m of matches) {
+      if (isUuid(m[1])) refs.add(m[1]);
+    }
+  }
+
   // If schema declares secret-ref paths, extract only those values.
   if (secretPaths.size > 0) {
     for (const dotPath of secretPaths) {
       const current = readConfigValueAtPath(configJson as Record<string, unknown>, dotPath);
-      if (typeof current === "string" && isUuidSecretRef(current)) {
-        refs.add(current);
+      if (typeof current === "string") {
+        extractFromString(current);
       }
     }
     return refs;
@@ -107,7 +119,7 @@ export function extractSecretRefsFromConfig(
   // instanceConfigSchema.
   function walkAll(value: unknown): void {
     if (typeof value === "string") {
-      if (isUuidSecretRef(value)) refs.add(value);
+      extractFromString(value);
     } else if (Array.isArray(value)) {
       for (const item of value) walkAll(item);
     } else if (value !== null && typeof value === "object") {

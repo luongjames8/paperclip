@@ -1837,6 +1837,10 @@ export function issueRoutes(
       details: {
         title: issue.title,
         identifier: issue.identifier,
+        projectId: issue.projectId ?? null,
+        parentId: issue.parentId ?? null,
+        originKind: issue.originKind ?? "manual",
+        assigneeAgentId: issue.assigneeAgentId ?? null,
         ...(Array.isArray(req.body.blockedByIssueIds) ? { blockedByIssueIds: req.body.blockedByIssueIds } : {}),
         ...summarizeIssueReferenceActivityDetails({
           addedReferencedIssues: referenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
