@@ -169,7 +169,10 @@ export class ApprovalDecidedHandler {
             `helper "${helper.name}" failed: exitCode=${result.exitCode} timedOut=${result.timedOut}\nstderr:\n${result.stderr.slice(0, 2000)}`,
             client
           );
-          await applyErrorPolicy(helper, vars.issueId, result, client);
+          const policy = result.timedOut
+            ? (helper.errorHandling?.onTimeout ?? "noop")
+            : (helper.errorHandling?.onFailure ?? "noop");
+          await applyErrorPolicy(vars.issueId, policy, client);
         }
       } else {
         // No linked issue — log to plugin log only.
