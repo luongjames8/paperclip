@@ -60,7 +60,8 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /paperclip \
   && chown node:node /paperclip \
-  && ln -s /app/cli/dist/index.js /usr/local/bin/paperclipai
+  && printf '#!/bin/sh\nexec env NODE_PATH=/app/server/node_modules:/app/node_modules node /app/cli/dist/index.js "$@"\n' > /usr/local/bin/paperclipai \
+  && chmod +x /usr/local/bin/paperclipai
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
