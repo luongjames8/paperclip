@@ -45,7 +45,9 @@ COPY . .
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/server build
+RUN pnpm --filter paperclipai build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+RUN test -f cli/dist/index.js || (echo "ERROR: cli build output missing" && exit 1)
 
 FROM base AS production
 ARG USER_UID=1000
@@ -57,7 +59,8 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
   && apt-get install -y --no-install-recommends openssh-client jq \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /paperclip \
-  && chown node:node /paperclip
+  && chown node:node /paperclip \
+  && ln -s /app/cli/dist/index.js /usr/local/bin/paperclipai
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
