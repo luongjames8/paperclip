@@ -1,6 +1,6 @@
 import type { ButtonInteraction } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import type { CompanyConfig, DiscordFleetConfig } from "../config/schema.js";
+import type { CompanyConfig, DiscordFleetConfig, UserMapping } from "../config/schema.js";
 import { PaperclipClient } from "../api/paperclip.js";
 import { APPROVAL_BUTTON_PREFIX } from "../render/embeds.js";
 
@@ -30,13 +30,31 @@ export async function handleApprovalButton(
     return;
   }
 
+  // Authorization: the clicker must be in company.userMappings. Discord channel
+  // access alone is too coarse a gate — paperclip natively models per-user
+  // approver identity via UserMapping + optional per-user boardApiKeySecretRef.
+  const mapping = resolveUserMapping(company, interaction.user.id);
+  if (!mapping) {
+    await interaction.reply({
+      content:
+        "You're not authorized to act on this approval. Ask an operator to add your Discord user ID to the company's userMappings.",
+      ephemeral: true,
+    });
+    return;
+  }
+
   await interaction.deferUpdate();
 
-  const apiKey = await ctx.secrets.resolve(company.paperclipApiKeySecretRef);
-  const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
+  // Per-user board key when present makes paperclip record decidedByUserId as
+  // the mapped paperclip user (not "board"). Fall back to the company-wide key
+  // for mappings that don't have a personal board key configured.
   const note = `discord:${interaction.user.username}`;
 
   try {
+    const apiKey = await ctx.secrets.resolve(
+      mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef,
+    );
+    const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
     if (parsed.action === "approve") {
       await paperclip.approveApproval(parsed.approvalId, note);
     } else {
@@ -56,6 +74,10 @@ export async function handleApprovalButton(
   }
 
   await renderResolved(interaction, parsed.action);
+}
+
+function resolveUserMapping(company: CompanyConfig, discordUserId: string): UserMapping | undefined {
+  return company.userMappings?.find((m) => m.discordUserId === discordUserId);
 }
 
 function resolveCompany(config: DiscordFleetConfig, guildId: string | null): CompanyConfig | undefined {

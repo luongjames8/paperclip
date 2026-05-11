@@ -28,7 +28,11 @@ describe("plugin worker", () => {
             guildId: "guild-1",
             channels: { digest: "ch-digest", errors: "ch-errors", orphan: "ch-orphan" },
             projectRouting: {},
-            digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
+            // Cron Feb 29 00:00 — rarely lands within the 15-min fire window the
+            // digest job uses to detect a missed slot, so this test is deterministic
+            // regardless of wall clock. (Previous "0 7 * * *" intermittently fired
+            // around 23:00-23:15 UTC when the prior 7am Taipei slot was <15min old.)
+            digest: { cronExpression: "0 0 29 2 *", timezone: "Asia/Taipei" },
             stuckIssueThresholdHours: 6,
             paperclipApiKeySecretRef: "paperclip/api-key",
             paperclipApiUrl: "http://localhost:3000",
