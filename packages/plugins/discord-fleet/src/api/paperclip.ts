@@ -74,4 +74,29 @@ export class PaperclipClient {
     const body = (await res.json()) as { data: PaperclipIssue };
     return body.data;
   }
+
+  async approveApproval(approvalId: string, decisionNote?: string): Promise<void> {
+    await this.resolveApproval(approvalId, "approve", decisionNote);
+  }
+
+  async rejectApproval(approvalId: string, decisionNote?: string): Promise<void> {
+    await this.resolveApproval(approvalId, "reject", decisionNote);
+  }
+
+  private async resolveApproval(approvalId: string, action: "approve" | "reject", decisionNote?: string): Promise<void> {
+    const url = `${this.baseUrl}/api/approvals/${approvalId}/${action}`;
+    const body = decisionNote ? JSON.stringify({ decisionNote }) : "{}";
+    const res = await this.ctx.http.fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body,
+    });
+    if (res.status >= 400) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`paperclip API ${action} error: ${res.status} ${url} ${text}`);
+    }
+  }
 }

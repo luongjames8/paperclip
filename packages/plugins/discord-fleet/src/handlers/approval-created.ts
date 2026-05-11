@@ -3,7 +3,7 @@ import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import type { DiscordFleetConfig } from "../config/schema.js";
 import { routeIssue } from "../routing/route.js";
 import { postEmbedToChannel } from "../discord/rest.js";
-import { buildApprovalEmbed } from "../render/embeds.js";
+import { buildApprovalActionRow, buildApprovalEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 
@@ -64,9 +64,10 @@ export async function handleApprovalCreated(
   // B1 fix: link to /:companyPrefix/approvals/<id> (board canonical route)
   const url = `${companyConfig.paperclipApiUrl}/${companyConfig.companyPrefix}/approvals/${approvalId}`;
   const embed = buildApprovalEmbed({ identifier, approvalId, approvalType, title: approvalTitle, issueUrl: url });
+  const actionRow = buildApprovalActionRow({ approvalId, issueUrl: url });
 
   const { channelId } = routeIssue(config, companyId, payload.projectId);
-  const messageId = await postEmbedToChannel(client, channelId, embed);
+  const messageId = await postEmbedToChannel(client, channelId, embed, [actionRow]);
 
   // Problem 3: create thread with proposedComment content when present
   if (proposedComment.length > 200 && messageId) {

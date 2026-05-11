@@ -1,6 +1,40 @@
-import type { APIEmbed } from "discord.js";
+import type { APIActionRowComponent, APIButtonComponent, APIEmbed, APIComponentInMessageActionRow } from "discord.js";
+import { ButtonStyle, ComponentType } from "discord.js";
 import { stripSecrets } from "./secrets.js";
 import { truncate } from "./plain.js";
+
+export const APPROVAL_BUTTON_PREFIX = {
+  approve: "approval-approve:",
+  reject: "approval-reject:",
+} as const;
+
+export function buildApprovalActionRow(opts: {
+  approvalId: string;
+  issueUrl: string;
+}): APIActionRowComponent<APIComponentInMessageActionRow> {
+  const approve: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Success,
+    label: "✅ Approve",
+    custom_id: `${APPROVAL_BUTTON_PREFIX.approve}${opts.approvalId}`,
+  };
+  const reject: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Danger,
+    label: "❌ Reject",
+    custom_id: `${APPROVAL_BUTTON_PREFIX.reject}${opts.approvalId}`,
+  };
+  const view: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Link,
+    label: "View",
+    url: opts.issueUrl,
+  };
+  return {
+    type: ComponentType.ActionRow,
+    components: [approve, reject, view],
+  };
+}
 
 function safe(text: string, max = 1900): string {
   return stripSecrets(truncate(text, max));
