@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { truncate } from "../src/render/plain.js";
-import { enforceEmbedLimits } from "../src/render/embeds.js";
+import { enforceEmbedLimits, buildApprovalActionRow, APPROVAL_BUTTON_PREFIX } from "../src/render/embeds.js";
+import { ButtonStyle, ComponentType } from "discord.js";
 
 describe("render helpers", () => {
   it("truncate: message ≤1900 chars passes through unchanged", () => {
@@ -54,5 +55,53 @@ describe("render helpers", () => {
       (result.author?.name?.length ?? 0);
     expect(totalLen).toBeLessThanOrEqual(6000);
     expect(result.description?.endsWith("…")).toBe(true);
+  });
+});
+
+describe("buildApprovalActionRow", () => {
+  const ROW = buildApprovalActionRow({
+    approvalId: "appr-test-123",
+    issueUrl: "https://paperclip.example.com/issues/appr-test-123",
+  });
+
+  it("returns exactly 3 components", () => {
+    expect(ROW.components).toHaveLength(3);
+  });
+
+  it("first component is ✅ Approve button with style=Success", () => {
+    const btn = ROW.components[0] as any;
+    expect(btn.type).toBe(ComponentType.Button);
+    expect(btn.style).toBe(ButtonStyle.Success);
+    expect(btn.label).toBe("✅ Approve");
+  });
+
+  it("second component is ❌ Reject button with style=Danger", () => {
+    const btn = ROW.components[1] as any;
+    expect(btn.type).toBe(ComponentType.Button);
+    expect(btn.style).toBe(ButtonStyle.Danger);
+    expect(btn.label).toBe("❌ Reject");
+  });
+
+  it("third component is View button with style=Link and url set", () => {
+    const btn = ROW.components[2] as any;
+    expect(btn.type).toBe(ComponentType.Button);
+    expect(btn.style).toBe(ButtonStyle.Link);
+    expect(btn.label).toBe("View");
+    expect(btn.url).toBe("https://paperclip.example.com/issues/appr-test-123");
+  });
+
+  it("Approve custom_id uses APPROVAL_BUTTON_PREFIX.approve + approvalId", () => {
+    const btn = ROW.components[0] as any;
+    expect(btn.custom_id).toBe(`${APPROVAL_BUTTON_PREFIX.approve}appr-test-123`);
+  });
+
+  it("Reject custom_id uses APPROVAL_BUTTON_PREFIX.reject + approvalId", () => {
+    const btn = ROW.components[1] as any;
+    expect(btn.custom_id).toBe(`${APPROVAL_BUTTON_PREFIX.reject}appr-test-123`);
+  });
+
+  it("Link button has no custom_id (Discord Link buttons must not have custom_id)", () => {
+    const btn = ROW.components[2] as any;
+    expect(btn.custom_id).toBeUndefined();
   });
 });
