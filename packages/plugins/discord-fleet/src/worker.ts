@@ -7,6 +7,7 @@ import { registerSlashCommands, setupInteractionHandler } from "./discord/slash.
 import { handleIssueCreated } from "./handlers/issue-created.js";
 import { handleIssueUpdated } from "./handlers/issue-updated.js";
 import { handleApprovalCreated } from "./handlers/approval-created.js";
+import { handleApprovalButton } from "./handlers/approval-button.js";
 import { runDigest } from "./jobs/digest.js";
 import { runStuckDetector } from "./jobs/stuck-detector.js";
 import { runRoutineHealth } from "./jobs/routine-health.js";
@@ -64,13 +65,20 @@ const plugin = definePlugin({
       }
     }
 
-    setupInteractionHandler(discordClient, config, async (interaction, companyId) => {
-      const companyConfig = config.companies.find((c) => c.companyId === companyId);
-      if (!companyConfig) return;
-      const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
-      const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
-      await handleStatusCommand(interaction, ctx, companyConfig, paperclip);
-    });
+    setupInteractionHandler(
+      discordClient,
+      config,
+      async (interaction, companyId) => {
+        const companyConfig = config.companies.find((c) => c.companyId === companyId);
+        if (!companyConfig) return;
+        const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
+        const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
+        await handleStatusCommand(interaction, ctx, companyConfig, paperclip);
+      },
+      async (interaction) => {
+        await handleApprovalButton(ctx, interaction, config);
+      },
+    );
 
     eventUnsubscribers = bindEventHandlers(ctx, discordClient, config);
 

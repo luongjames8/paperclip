@@ -1,5 +1,5 @@
 import { REST, Routes, SlashCommandBuilder } from "discord.js";
-import type { Client, ChatInputCommandInteraction } from "discord.js";
+import type { ButtonInteraction, ChatInputCommandInteraction, Client } from "discord.js";
 import type { DiscordFleetConfig } from "../config/schema.js";
 
 const STATUS_COMMAND = new SlashCommandBuilder()
@@ -21,8 +21,14 @@ export function setupInteractionHandler(
   client: Client,
   config: DiscordFleetConfig,
   statusHandler: (interaction: ChatInputCommandInteraction, companyId: string) => Promise<void>,
+  buttonHandler: (interaction: ButtonInteraction) => Promise<void>,
 ): void {
   client.on("interactionCreate", async (interaction) => {
+    if (interaction.isButton()) {
+      await buttonHandler(interaction);
+      return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
     if (interaction.commandName !== "status") return;
 

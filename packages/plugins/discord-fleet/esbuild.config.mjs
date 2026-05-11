@@ -8,7 +8,14 @@ const workerCtx = await esbuild.context({
   ...presets.esbuild.worker,
   packages: "external",
 });
-const manifestCtx = await esbuild.context(presets.esbuild.manifest);
+// SDK preset has bundle:false, which leaves relative imports like
+// `./config/validate.js` unresolved at runtime (dist/config/ never gets emitted).
+// Override to bundle the manifest so all its imports are inlined.
+const manifestCtx = await esbuild.context({
+  ...presets.esbuild.manifest,
+  bundle: true,
+  packages: "external",
+});
 const uiCtx = await esbuild.context(presets.esbuild.ui);
 
 if (watch) {

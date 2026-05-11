@@ -34,6 +34,8 @@ vi.mock("../src/render/embeds.js", () => ({
   buildApprovalEmbed: vi.fn().mockReturnValue({ title: "approval embed" }),
   buildSeedIssueEmbed: vi.fn().mockReturnValue({ title: "seed embed" }),
   buildBlockedEmbed: vi.fn().mockReturnValue({ title: "blocked embed" }),
+  buildApprovalActionRow: vi.fn().mockReturnValue({ type: 1, components: [] }),
+  APPROVAL_BUTTON_PREFIX: { approve: "approval-approve:", reject: "approval-reject:" },
 }));
 
 // Canonical pattern derived from App.tsx board route tree

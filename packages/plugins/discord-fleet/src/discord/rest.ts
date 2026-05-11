@@ -1,5 +1,5 @@
 import type { Client, TextChannel, ThreadChannel } from "discord.js";
-import type { APIEmbed } from "discord.js";
+import type { APIActionRowComponent, APIEmbed, APIComponentInMessageActionRow } from "discord.js";
 import { stripSecrets } from "../render/secrets.js";
 import { truncate } from "../render/plain.js";
 import { ChannelRateLimit } from "../util/ratelimit.js";
@@ -26,10 +26,15 @@ export async function postToChannel(client: Client, channelId: string, text: str
   });
 }
 
-export async function postEmbedToChannel(client: Client, channelId: string, embed: APIEmbed): Promise<string> {
+export async function postEmbedToChannel(
+  client: Client,
+  channelId: string,
+  embed: APIEmbed,
+  components?: Array<APIActionRowComponent<APIComponentInMessageActionRow>>,
+): Promise<string> {
   return rateLimit.enqueue(channelId, async () => {
     const channel = await fetchTextChannel(client, channelId);
-    const msg = await channel.send({ embeds: [embed] });
+    const msg = await channel.send({ embeds: [embed], components });
     return msg.id;
   });
 }
@@ -42,10 +47,15 @@ export async function postToThread(client: Client, threadId: string, text: strin
   });
 }
 
-export async function postEmbedToThread(client: Client, threadId: string, embed: APIEmbed): Promise<string> {
+export async function postEmbedToThread(
+  client: Client,
+  threadId: string,
+  embed: APIEmbed,
+  components?: Array<APIActionRowComponent<APIComponentInMessageActionRow>>,
+): Promise<string> {
   return rateLimit.enqueue(threadId, async () => {
     const thread = await fetchThreadChannel(client, threadId);
-    const msg = await thread.send({ embeds: [embed] });
+    const msg = await thread.send({ embeds: [embed], components });
     return msg.id;
   });
 }

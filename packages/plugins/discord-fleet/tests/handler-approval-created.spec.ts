@@ -16,6 +16,8 @@ vi.mock("../src/render/embeds.js", () => ({
   buildApprovalEmbed: vi.fn().mockReturnValue({ title: "approval embed" }),
   buildSeedIssueEmbed: vi.fn().mockReturnValue({ title: "seed embed" }),
   buildBlockedEmbed: vi.fn().mockReturnValue({ title: "blocked embed" }),
+  buildApprovalActionRow: vi.fn().mockReturnValue({ type: 1, components: [] }),
+  APPROVAL_BUTTON_PREFIX: { approve: "approval-approve:", reject: "approval-reject:" },
 }));
 
 function makeConfig(): DiscordFleetConfig {
@@ -79,7 +81,7 @@ describe("handleApprovalCreated", () => {
     const event = makeApprovalCreatedEvent();
     await handleApprovalCreated(harness.ctx, event, client, config);
 
-    expect(postEmbedToChannel).toHaveBeenCalledWith(client, "o1", expect.anything());
+    expect(postEmbedToChannel).toHaveBeenCalledWith(client, "o1", expect.anything(), expect.anything());
 
     const pending = await harness.ctx.state.get({
       scopeKind: "company",
@@ -104,7 +106,7 @@ describe("handleApprovalCreated", () => {
     });
     await handleApprovalCreated(harness.ctx, event, client, config);
 
-    expect(postEmbedToChannel).toHaveBeenCalledWith(client, "o1", expect.anything());
+    expect(postEmbedToChannel).toHaveBeenCalledWith(client, "o1", expect.anything(), expect.anything());
 
     const pending = await harness.ctx.state.get({
       scopeKind: "company",
