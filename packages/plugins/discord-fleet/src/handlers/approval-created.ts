@@ -1,11 +1,12 @@
-import type { Client, TextChannel } from "discord.js";
+import type { Client, TextChannel, ThreadChannel } from "discord.js";
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import type { DiscordFleetConfig } from "../config/schema.js";
 import { routeIssue } from "../routing/route.js";
-import { postEmbedToChannel } from "../discord/rest.js";
+import { postEmbedToChannel, postEmbedToThread } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
+import { getThreadForIssue } from "../routing/thread-state.js";
 
 interface ApprovalCreatedPayload {
   approvalId?: string;
@@ -66,24 +67,52 @@ export async function handleApprovalCreated(
   const embed = buildApprovalEmbed({ identifier, approvalId, approvalType, title: approvalTitle, issueUrl: url });
   const actionRow = buildApprovalActionRow({ approvalId, issueUrl: url });
 
-  const { channelId } = routeIssue(config, companyId, payload.projectId);
-  const messageId = await postEmbedToChannel(client, channelId, embed, [actionRow]);
+  // If the issue this approval belongs to has a registered Discord thread,
+  // post the approval embed + buttons directly into that thread so it appears
+  // alongside the work. Otherwise fall back to the routed channel and the
+  // legacy spawn-a-new-thread-for-long-comments behavior.
+  const existingThread = issueId
+    ? await getThreadForIssue(ctx, companyId, issueId)
+    : null;
 
-  // Problem 3: create thread with proposedComment content when present
-  if (proposedComment.length > 200 && messageId) {
-    try {
-      const channel = (await client.channels.fetch(channelId)) as TextChannel;
-      const thread = await channel.threads.create({
-        name: approvalTitle.slice(0, 100),
-        startMessage: messageId,
-        autoArchiveDuration: 1440,
-      });
-      const chunks = chunkBySection(stripSecrets(proposedComment));
-      for (const chunk of chunks) {
-        await thread.send({ content: truncate(chunk, THREAD_CHUNK_MAX) });
+  if (existingThread) {
+    await postEmbedToThread(client, existingThread.threadId, embed, [actionRow]);
+    if (proposedComment) {
+      try {
+        const thread = (await client.channels.fetch(existingThread.threadId)) as ThreadChannel;
+        const chunks = chunkBySection(stripSecrets(proposedComment));
+        for (const chunk of chunks) {
+          await thread.send({ content: truncate(chunk, THREAD_CHUNK_MAX) });
+        }
+      } catch (err) {
+        ctx.logger.warn("approval-created: posting proposedComment into work thread failed", {
+          threadId: existingThread.threadId,
+          error: String(err),
+        });
       }
-    } catch (err) {
-      ctx.logger.warn("approval-created: thread creation failed", { error: String(err) });
+    }
+  } else {
+    const { channelId } = routeIssue(config, companyId, payload.projectId);
+    const messageId = await postEmbedToChannel(client, channelId, embed, [actionRow]);
+
+    // Legacy fallback: spawn a thread off the approval message when no work
+    // thread exists yet and proposedComment is long enough to be unwieldy
+    // inline. Removable once seed-issue thread registration is universal.
+    if (proposedComment.length > 200 && messageId) {
+      try {
+        const channel = (await client.channels.fetch(channelId)) as TextChannel;
+        const thread = await channel.threads.create({
+          name: approvalTitle.slice(0, 100),
+          startMessage: messageId,
+          autoArchiveDuration: 1440,
+        });
+        const chunks = chunkBySection(stripSecrets(proposedComment));
+        for (const chunk of chunks) {
+          await thread.send({ content: truncate(chunk, THREAD_CHUNK_MAX) });
+        }
+      } catch (err) {
+        ctx.logger.warn("approval-created: thread creation failed", { error: String(err) });
+      }
     }
   }
 
