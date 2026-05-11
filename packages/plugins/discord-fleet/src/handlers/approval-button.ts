@@ -3,6 +3,7 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { CompanyConfig, DiscordFleetConfig, UserMapping } from "../config/schema.js";
 import { PaperclipClient } from "../api/paperclip.js";
 import { APPROVAL_BUTTON_PREFIX } from "../render/embeds.js";
+import { PENDING_APPROVALS_KEY } from "./approval-created.js";
 
 export type ApprovalAction = "approve" | "reject";
 
@@ -73,11 +74,29 @@ export async function handleApprovalButton(
     return;
   }
 
+  // Mirror approval-created's append: remove the resolved id from pending
+  // state so /status and the daily digest don't keep showing stale entries
+  // after operators act via the button.
+  await removeFromPending(ctx, company.companyId, parsed.approvalId);
+
   await renderResolved(interaction, parsed.action);
 }
 
 function resolveUserMapping(company: CompanyConfig, discordUserId: string): UserMapping | undefined {
   return company.userMappings?.find((m) => m.discordUserId === discordUserId);
+}
+
+async function removeFromPending(
+  ctx: PluginContext,
+  companyId: string,
+  approvalId: string,
+): Promise<void> {
+  const key = { scopeKind: "company" as const, scopeId: companyId, stateKey: PENDING_APPROVALS_KEY };
+  const current = ((await ctx.state.get(key)) as string[] | null) ?? [];
+  const next = current.filter((id) => id !== approvalId);
+  if (next.length !== current.length) {
+    await ctx.state.set(key, next);
+  }
 }
 
 function resolveCompany(config: DiscordFleetConfig, guildId: string | null): CompanyConfig | undefined {

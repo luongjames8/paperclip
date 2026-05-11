@@ -6,12 +6,17 @@ import { postEmbedToChannel, postEmbedToThread } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
-import { getThreadForIssue } from "../routing/thread-state.js";
+import { getThreadForAncestors } from "../routing/thread-state.js";
 
 interface ApprovalCreatedPayload {
   approvalId?: string;
   approvalType?: string;
+  // Paperclip's `POST /companies/:id/approvals` activity emit carries
+  // `issueIds: string[]` (server/src/routes/approvals.ts:118). The singular
+  // `issueId` is kept for legacy/test compatibility but should not be the
+  // primary lookup key.
   issueId?: string;
+  issueIds?: string[];
   identifier?: string;
   projectId?: string;
   title?: string;
@@ -19,7 +24,7 @@ interface ApprovalCreatedPayload {
   proposedComment?: string;
 }
 
-const PENDING_APPROVALS_KEY = "pending-approvals";
+export const PENDING_APPROVALS_KEY = "pending-approvals";
 const THREAD_CHUNK_MAX = 1990;
 
 function chunkBySection(text: string): string[] {
@@ -52,9 +57,18 @@ export async function handleApprovalCreated(
 ): Promise<void> {
   const companyId = event.companyId;
   const payload = event.payload as ApprovalCreatedPayload;
-  const issueId = payload.issueId ?? event.entityId ?? "";
+  // event.entityId IS the APPROVAL id (paperclip approval-created activity),
+  // not an issue id. Pull linked issues from the plural payload.issueIds
+  // first, falling back to legacy singular issueId for compat with older
+  // emissions / unit-test fixtures.
+  const candidateIssueIds = payload.issueIds && payload.issueIds.length > 0
+    ? payload.issueIds
+    : payload.issueId
+      ? [payload.issueId]
+      : [];
+  const primaryIssueId = candidateIssueIds[0] ?? "";
   const approvalId = payload.approvalId ?? event.entityId ?? "";
-  const identifier = payload.identifier ?? issueId.slice(0, 8);
+  const identifier = payload.identifier ?? (primaryIssueId || approvalId).slice(0, 8);
   const approvalType = payload.approvalType ?? "unknown";
   const approvalTitle = payload.title ?? `Approval ${approvalId.slice(0, 8)}`;
   const proposedComment = payload.proposedComment ?? "";
@@ -67,12 +81,12 @@ export async function handleApprovalCreated(
   const embed = buildApprovalEmbed({ identifier, approvalId, approvalType, title: approvalTitle, issueUrl: url });
   const actionRow = buildApprovalActionRow({ approvalId, issueUrl: url });
 
-  // If the issue this approval belongs to has a registered Discord thread,
-  // post the approval embed + buttons directly into that thread so it appears
-  // alongside the work. Otherwise fall back to the routed channel and the
-  // legacy spawn-a-new-thread-for-long-comments behavior.
-  const existingThread = issueId
-    ? await getThreadForIssue(ctx, companyId, issueId)
+  // If any linked issue has a registered Discord thread (or any ancestor in
+  // the chain does), post the approval embed + buttons directly into that
+  // thread so it appears alongside the work. getThreadForAncestors walks the
+  // array of candidate issue ids and returns the first matching thread.
+  const existingThread = candidateIssueIds.length
+    ? await getThreadForAncestors(ctx, companyId, candidateIssueIds)
     : null;
 
   if (existingThread) {
