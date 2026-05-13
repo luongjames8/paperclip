@@ -47,6 +47,19 @@ RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 
+# Workspace plugins. Without these the plugin loader cannot find
+# <package_path>/dist/worker.js at activation time, and registered plugins
+# fail to start (silently — paperclip marks them error but the container
+# stays healthy). discord-fleet provides Discord notification + approval
+# buttons for hinomaru. helper-runner bridges paperclip events into
+# external bash/python scripts.
+RUN pnpm --filter @openclaw/plugin-discord-fleet build
+RUN test -f packages/plugins/discord-fleet/dist/worker.js \
+    || (echo "ERROR: discord-fleet build output missing" && exit 1)
+RUN pnpm --filter @openclaw/plugin-helper-runner build
+RUN test -f packages/plugins/helper-runner/dist/worker.js \
+    || (echo "ERROR: helper-runner build output missing" && exit 1)
+
 FROM base AS production
 ARG USER_UID=1000
 ARG USER_GID=1000
