@@ -25,7 +25,14 @@ export function setupInteractionHandler(
 ): void {
   client.on("interactionCreate", async (interaction) => {
     if (interaction.isButton()) {
-      await buttonHandler(interaction);
+      try {
+        await buttonHandler(interaction);
+      } catch (err) {
+        // Defense-in-depth: any exception bubbling out of buttonHandler
+        // becomes an unhandledRejection on the async event listener and
+        // crashes the plugin worker. Log + swallow.
+        console.error("discord-fleet: button handler threw, swallowed to keep worker alive", err);
+      }
       return;
     }
 

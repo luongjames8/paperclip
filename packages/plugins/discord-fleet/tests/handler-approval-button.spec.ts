@@ -185,3 +185,56 @@ describe("handleApprovalButton — reject happy path", () => {
     expect(call.components).toEqual([]);
   });
 });
+
+// ─── deferUpdate failures — stale-interaction resilience ─────────────────────
+//
+// Repros the 16:57:51 crash: button clicked during plugin restart, the 3-second
+// interaction-token window expires before deferUpdate is called, Discord returns
+// DiscordAPIError[10062] "Unknown interaction", the handler must NOT crash the
+// worker. Non-10062 errors from deferUpdate must still rethrow so unexpected
+// failures aren't silently swallowed.
+
+describe("handleApprovalButton — deferUpdate failure handling", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("swallows DiscordAPIError[10062] from deferUpdate and returns early (no crash)", async () => {
+    const { handleApprovalButton } = await import("../src/handlers/approval-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const expired: any = new Error("Unknown interaction");
+    expired.code = 10062;
+    const interaction = makeButtonInteraction("approval-approve:appr-stale");
+    interaction.deferUpdate = vi.fn().mockRejectedValue(expired);
+
+    // Must not throw — the prior bug was an unhandledRejection killing the worker.
+    await expect(
+      handleApprovalButton(harness.ctx, interaction, makeConfig()),
+    ).resolves.toBeUndefined();
+
+    // Early return: no paperclip API call, no editReply.
+    expect(mockApproveApproval).not.toHaveBeenCalled();
+    expect(mockRejectApproval).not.toHaveBeenCalled();
+    expect(interaction.editReply).not.toHaveBeenCalled();
+  });
+
+  it("rethrows non-10062 errors from deferUpdate (unexpected failure must surface)", async () => {
+    const { handleApprovalButton } = await import("../src/handlers/approval-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const other: any = new Error("network down");
+    other.code = 50001; // arbitrary non-10062
+    const interaction = makeButtonInteraction("approval-approve:appr-other");
+    interaction.deferUpdate = vi.fn().mockRejectedValue(other);
+
+    await expect(
+      handleApprovalButton(harness.ctx, interaction, makeConfig()),
+    ).rejects.toThrow("network down");
+
+    expect(mockApproveApproval).not.toHaveBeenCalled();
+    expect(interaction.editReply).not.toHaveBeenCalled();
+  });
+});
