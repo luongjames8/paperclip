@@ -44,7 +44,22 @@ export async function handleApprovalButton(
     return;
   }
 
-  await interaction.deferUpdate();
+  try {
+    await interaction.deferUpdate();
+  } catch (err: any) {
+    if (err?.code === 10062) {
+      // 3s interaction-token window expired (commonly: button click during
+      // plugin restart / deploy downtime). Discord shows "This component is
+      // no longer valid" to the user. Nothing to do but return gracefully —
+      // throwing here crashes the worker via unhandledRejection.
+      ctx.logger.warn("approval-button: interaction expired before deferUpdate (3s window)", {
+        approvalId: parsed.approvalId,
+        action: parsed.action,
+      });
+      return;
+    }
+    throw err;
+  }
 
   // Per-user board key when present makes paperclip record decidedByUserId as
   // the mapped paperclip user (not "board"). Fall back to the company-wide key
