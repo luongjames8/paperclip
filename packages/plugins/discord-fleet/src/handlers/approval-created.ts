@@ -10,6 +10,10 @@ import { getThreadForAncestors } from "../routing/thread-state.js";
 
 interface ApprovalCreatedPayload {
   approvalId?: string;
+  // Canonical type field — set by server/src/routes/approvals.ts:118 as
+  // `details: { type: approval.type }`, spread into payload by activity-log.
+  type?: string;
+  // Legacy field name kept as fallback for older emitters / unit tests.
   approvalType?: string;
   // Paperclip's `POST /companies/:id/approvals` activity emit carries
   // `issueIds: string[]` (server/src/routes/approvals.ts:118). The singular
@@ -69,7 +73,12 @@ export async function handleApprovalCreated(
   const primaryIssueId = candidateIssueIds[0] ?? "";
   const approvalId = payload.approvalId ?? event.entityId ?? "";
   const identifier = payload.identifier ?? (primaryIssueId || approvalId).slice(0, 8);
-  const approvalType = payload.approvalType ?? "unknown";
+  // paperclip emits `details: { type: approval.type, issueIds }` from
+  // server/src/routes/approvals.ts; activity-log spreads `details` into
+  // `payload`, so the canonical field on the plugin side is `payload.type`.
+  // Keep `payload.approvalType` as fallback in case any other code path
+  // emits the legacy field name.
+  const approvalType = payload.type ?? payload.approvalType ?? "unknown";
   const approvalTitle = payload.title ?? `Approval ${approvalId.slice(0, 8)}`;
   const proposedComment = payload.proposedComment ?? "";
 

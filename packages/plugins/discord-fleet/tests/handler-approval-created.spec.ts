@@ -116,3 +116,80 @@ describe("handleApprovalCreated", () => {
     expect(pending).toContain("appr-002");
   });
 });
+
+// ─── approvalType field-read — paperclip canonical vs legacy ─────────────────
+//
+// server/src/routes/approvals.ts:118 emits `details: { type: approval.type }`,
+// which activity-log spreads into `payload`. The plugin previously read
+// `payload.approvalType` only and showed "unknown" on every real event.
+// Canonical field is `payload.type`; `payload.approvalType` kept as fallback.
+
+describe("handleApprovalCreated — approvalType field-read", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("prefers payload.type (canonical paperclip field) over fallback", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { buildApprovalEmbed } = await import("../src/render/embeds.js");
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      type: "request_board_approval",
+      approvalType: undefined, // explicit absence; the canonical field is what real paperclip events carry
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(buildApprovalEmbed).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalType: "request_board_approval" }),
+    );
+  });
+
+  it("falls back to payload.approvalType when payload.type is absent (legacy / unit-test fixtures)", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { buildApprovalEmbed } = await import("../src/render/embeds.js");
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      type: undefined,
+      approvalType: "legacy_budget",
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(buildApprovalEmbed).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalType: "legacy_budget" }),
+    );
+  });
+
+  it("prefers payload.type when BOTH are present (canonical wins)", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { buildApprovalEmbed } = await import("../src/render/embeds.js");
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      type: "request_board_approval",
+      approvalType: "should-not-be-used",
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(buildApprovalEmbed).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalType: "request_board_approval" }),
+    );
+  });
+
+  it("falls through to 'unknown' when neither field is set", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { buildApprovalEmbed } = await import("../src/render/embeds.js");
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      type: undefined,
+      approvalType: undefined,
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(buildApprovalEmbed).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalType: "unknown" }),
+    );
+  });
+});
