@@ -1,4 +1,4 @@
-import type { Client, TextChannel, ThreadChannel } from "discord.js";
+import type { Client, ThreadChannel } from "discord.js";
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import type { DiscordFleetConfig } from "../config/schema.js";
 import { routeIssue } from "../routing/route.js";
@@ -90,6 +90,10 @@ export async function handleApprovalCreated(
     : null;
 
   if (existingThread) {
+    // Approval embed + buttons go INTO the work's existing thread, alongside
+    // the work that produced them. proposedComment posted as follow-up
+    // messages in the SAME thread (no new thread spawned — the thread already
+    // exists from issue.created registration).
     await postEmbedToThread(client, existingThread.threadId, embed, [actionRow]);
     if (proposedComment) {
       try {
@@ -106,28 +110,15 @@ export async function handleApprovalCreated(
       }
     }
   } else {
+    // No work thread registered (legacy data pre-dating issue.created thread
+    // registration, or an approval not tied to any issue). Post embed + buttons
+    // to the routed channel as a flat message. Do NOT spawn a new thread —
+    // an orphan "approval thread" detached from the work it concerns is the
+    // exact antipattern we're retiring (see bridge/*-poster.py). Operators
+    // can click the View button to reach the full proposedComment in
+    // paperclip's UI.
     const { channelId } = routeIssue(config, companyId, payload.projectId);
-    const messageId = await postEmbedToChannel(client, channelId, embed, [actionRow]);
-
-    // Legacy fallback: spawn a thread off the approval message when no work
-    // thread exists yet and proposedComment is long enough to be unwieldy
-    // inline. Removable once seed-issue thread registration is universal.
-    if (proposedComment.length > 200 && messageId) {
-      try {
-        const channel = (await client.channels.fetch(channelId)) as TextChannel;
-        const thread = await channel.threads.create({
-          name: approvalTitle.slice(0, 100),
-          startMessage: messageId,
-          autoArchiveDuration: 1440,
-        });
-        const chunks = chunkBySection(stripSecrets(proposedComment));
-        for (const chunk of chunks) {
-          await thread.send({ content: truncate(chunk, THREAD_CHUNK_MAX) });
-        }
-      } catch (err) {
-        ctx.logger.warn("approval-created: thread creation failed", { error: String(err) });
-      }
-    }
+    await postEmbedToChannel(client, channelId, embed, [actionRow]);
   }
 
   // Record pending approval for digest
