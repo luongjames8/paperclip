@@ -30,9 +30,27 @@ export interface CompanyConfig {
   paperclipApiUrl: string;
 }
 
+export type ChannelTypeRoute = [regex: string, channelId: string];
+
 export interface DiscordFleetConfig {
   botTokenSecretRef: string;
   companies: CompanyConfig[];
+  // Per-content-surface routing for seed issues, keyed by companyId. The
+  // plugin matches the issue's routine_slug / identifier / title against
+  // each regex in order; first match wins. On no match, falls back to
+  // routeIssue() (projectRouting → channels.orphan). Replaces per-issue
+  // thread spawning.
+  issuesChannelsByType?: Record<string, ChannelTypeRoute[]>;
+  // Per-content-surface routing for approvals, keyed by companyId. Same
+  // semantics as issuesChannelsByType but matched against approval title.
+  // On no match, falls back to approvalFallbackChannelId (or
+  // channels.orphan if absent — see backward-compat note).
+  approvalsChannelsByType?: Record<string, ChannelTypeRoute[]>;
+  // Destination for approvals that don't match any approvalsChannelsByType
+  // regex AND aren't co-locatable in an existing work-thread. Distinct from
+  // channels.orphan (which is the issue-routing fallback). When absent, the
+  // plugin falls back to companyConfig.channels.orphan for backward compat.
+  approvalFallbackChannelId?: string;
 }
 
 export const DEFAULT_DIGEST: DigestConfig = {

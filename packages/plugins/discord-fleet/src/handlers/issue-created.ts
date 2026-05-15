@@ -1,11 +1,10 @@
 import type { Client } from "discord.js";
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
-import type { DiscordFleetConfig } from "../config/schema.js";
+import type { ChannelTypeRoute, DiscordFleetConfig } from "../config/schema.js";
 import { routeIssue } from "../routing/route.js";
 import { postToChannel, postEmbedToChannel, postToThread } from "../discord/rest.js";
 import { buildSeedIssueEmbed } from "../render/embeds.js";
 import { formatChildIssueCreated } from "../render/plain.js";
-import { createThread } from "../discord/threads.js";
 import { getThreadForAncestors, setThreadForIssue } from "../routing/thread-state.js";
 
 interface IssueCreatedPayload {
@@ -21,6 +20,25 @@ interface IssueCreatedPayload {
 
 function issueUrl(baseUrl: string, companyPrefix: string, identifier: string): string {
   return `${baseUrl}/${companyPrefix}/issues/${identifier}`;
+}
+
+function matchChannelByType(
+  routes: ChannelTypeRoute[] | undefined,
+  candidates: Array<string | undefined>,
+): string | null {
+  if (!routes || routes.length === 0) return null;
+  for (const [pattern, channelId] of routes) {
+    let re: RegExp;
+    try {
+      re = new RegExp(pattern);
+    } catch {
+      continue;
+    }
+    for (const value of candidates) {
+      if (value && re.test(value)) return channelId;
+    }
+  }
+  return null;
 }
 
 export async function handleIssueCreated(
@@ -42,37 +60,34 @@ export async function handleIssueCreated(
   const companyConfig = config.companies.find((c) => c.companyId === companyId);
   if (!companyConfig) return;
 
-  const { channelId } = routeIssue(config, companyId, projectId);
   const isSeed = originKind === "routine_execution" || !parentId;
 
   if (isSeed) {
-    // Seed issues get their own Discord thread under the routed channel; the
-    // thread is registered in plugin state so downstream events (approvals,
-    // stuck-detector, blocked transitions) can target the work's thread
-    // instead of spawning new orphan posts.
+    const matchedChannelId = matchChannelByType(
+      config.issuesChannelsByType?.[companyId],
+      [payload.identifier, payload.title],
+    );
+    const destinationChannelId =
+      matchedChannelId ?? routeIssue(config, companyId, projectId).channelId;
+
     const url = issueUrl(companyConfig.paperclipApiUrl, companyConfig.companyPrefix, identifier);
     const embed = buildSeedIssueEmbed({ identifier, title, assignee: payload.assigneeAgentId, issueUrl: url });
-    const threadName = `${identifier} — ${title}`;
-    try {
-      const entry = await createThread(client, channelId, threadName, embed);
-      if (issueId) {
-        await setThreadForIssue(ctx, companyId, issueId, entry);
-      }
-    } catch (err) {
-      ctx.logger.warn("issue-created: thread creation failed, falling back to channel post", {
-        issueId,
-        identifier,
-        err: String(err),
+
+    await postEmbedToChannel(client, destinationChannelId, embed);
+
+    if (issueId) {
+      // Record destination so child issues co-locate via getThreadForAncestors.
+      // Discord.js .send() works on both channels and threads; storing the
+      // resolved destination under threadId keeps downstream lookups unchanged.
+      await setThreadForIssue(ctx, companyId, issueId, {
+        channelId: destinationChannelId,
+        threadId: destinationChannelId,
+        createdAt: new Date().toISOString(),
       });
-      await postEmbedToChannel(client, channelId, embed);
     }
     return;
   }
 
-  // Child issue: post into the nearest ancestor's thread if one is registered,
-  // so descendant work stays co-located with parent context. Falls back to a
-  // flat channel message when no ancestor has a thread (which is the legacy
-  // behavior until enough seed issues have been created post-deploy).
   const ancestorThread = ancestorIds.length
     ? await getThreadForAncestors(ctx, companyId, ancestorIds)
     : null;
@@ -80,6 +95,7 @@ export async function handleIssueCreated(
   if (ancestorThread) {
     await postToThread(client, ancestorThread.threadId, childText);
   } else {
+    const { channelId } = routeIssue(config, companyId, projectId);
     await postToChannel(client, channelId, childText);
   }
 }
