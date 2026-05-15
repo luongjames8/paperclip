@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { truncate } from "../src/render/plain.js";
-import { enforceEmbedLimits, buildApprovalActionRow, APPROVAL_BUTTON_PREFIX } from "../src/render/embeds.js";
+import { enforceEmbedLimits, buildApprovalActionRow, APPROVAL_BUTTON_PREFIX, buildApprovalEmbed } from "../src/render/embeds.js";
 import { ButtonStyle, ComponentType } from "discord.js";
 
 describe("render helpers", () => {
@@ -103,5 +103,41 @@ describe("buildApprovalActionRow", () => {
   it("Link button has no custom_id (Discord Link buttons must not have custom_id)", () => {
     const btn = ROW.components[2] as any;
     expect(btn.custom_id).toBeUndefined();
+  });
+});
+
+// ─── buildApprovalEmbed — description content ────────────────────────────────
+//
+// Earlier embed template included "_Content batch in thread below ↓_" as a
+// trailing line — leftover from the orphan-thread design retired by 72bdca5f.
+// The text now lies (no thread spawned for orphan path; embed posts INTO the
+// existing work thread for issue-linked path — there is no "below"). Removed
+// in this fix; lock with a test so it doesn't regress.
+
+describe("buildApprovalEmbed — description", () => {
+  const embed = buildApprovalEmbed({
+    identifier: "HIN-999",
+    approvalId: "appr-abc12345-def6-7890-1234-567890abcdef",
+    approvalType: "request_board_approval",
+    title: "Test approval",
+    issueUrl: "https://paperclip.example.com/HIN/approvals/appr-abc12345",
+  });
+
+  it("includes the approval type", () => {
+    expect(embed.description).toContain("**Type**: request_board_approval");
+  });
+
+  it("includes the short approval id (first 8 chars + ellipsis)", () => {
+    // shortId = opts.approvalId.slice(0, 8) → "appr-abc"
+    expect(embed.description).toContain("**ID**: appr-abc...");
+  });
+
+  it("includes the View & Approve link", () => {
+    expect(embed.description).toContain("[View & Approve in Paperclip](https://paperclip.example.com/HIN/approvals/appr-abc12345)");
+  });
+
+  it("does NOT promise a thread below (orphan-thread design was retired in 72bdca5f)", () => {
+    expect(embed.description).not.toMatch(/thread below/i);
+    expect(embed.description).not.toMatch(/Content batch/i);
   });
 });
