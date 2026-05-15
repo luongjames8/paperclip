@@ -104,7 +104,7 @@ export function buildApprovalEmbed(opts: {
     color: 0xfee75c,
     title: safe(`🟡 ${headline}`, 256),
     url: opts.issueUrl,
-    description: safe(`**Type**: ${opts.approvalType}\n**ID**: ${shortId}...\n\n[View & Approve in Paperclip](${opts.issueUrl})\n\n_Content batch in thread below ↓_`),
+    description: safe(`**Type**: ${opts.approvalType}\n**ID**: ${shortId}...\n\n[View & Approve in Paperclip](${opts.issueUrl})`),
     timestamp: new Date().toISOString(),
   });
 }
