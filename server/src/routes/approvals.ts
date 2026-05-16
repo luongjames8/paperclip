@@ -118,13 +118,18 @@ export function approvalRoutes(
       details: {
         type: approval.type,
         issueIds: uniqueIssueIds,
-        // Surface approval.payload.title so downstream consumers (e.g.
-        // discord-fleet plugin's approvalsChannelsByType regex routing) can
-        // match without a follow-up GET /api/approvals/<id>. Matches the
+        // Surface approval.payload.title + proposedComment so downstream
+        // consumers (e.g. discord-fleet plugin's approvalsChannelsByType
+        // regex routing + chunked-comment posting) can act on the event
+        // without a follow-up GET /api/approvals/<id>. Matches the
         // issue.created emit precedent at server/src/routes/issues.ts.
         title: (() => {
           const payloadTitle = (normalizedPayload as Record<string, unknown>).title;
           return typeof payloadTitle === "string" ? payloadTitle : null;
+        })(),
+        proposedComment: (() => {
+          const pc = (normalizedPayload as Record<string, unknown>).proposedComment;
+          return typeof pc === "string" ? pc : null;
         })(),
       },
     });
