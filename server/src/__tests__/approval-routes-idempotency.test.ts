@@ -333,6 +333,14 @@ describe("approval routes idempotent retries", () => {
         actorType: "agent",
         actorId: "agent-1",
         action: "approval.created",
+        // Downstream consumers (discord-fleet plugin's approvalsChannelsByType
+        // regex routing) match on details.title; if this field is dropped from
+        // the emit, those routes silently fall through to the orphan fallback.
+        details: expect.objectContaining({
+          type: "request_board_approval",
+          issueIds: ["00000000-0000-0000-0000-000000000001"],
+          title: "Approve hosting spend",
+        }),
       }),
     );
   });

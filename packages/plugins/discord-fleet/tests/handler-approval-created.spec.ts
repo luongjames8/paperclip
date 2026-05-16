@@ -170,7 +170,7 @@ describe("handleApprovalCreated — approvalsChannelsByType + Bug 2.5", () => {
     );
   });
 
-  it("no regex match → falls back to approvalFallbackChannelId (NOT channels.orphan) + chunks proposedComment", async () => {
+  it("no regex match → falls back to companyConfig.approvalFallbackChannelId (NOT channels.orphan) + chunks proposedComment", async () => {
     const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
 
@@ -179,7 +179,9 @@ describe("handleApprovalCreated — approvalsChannelsByType + Bug 2.5", () => {
     config.approvalsChannelsByType = {
       c1: [["[Cc]arousel", "carousels-thread"]],
     };
-    config.approvalFallbackChannelId = "system-dump-channel";
+    // Per-company fallback (P2 fix: was previously root-level which leaked
+    // across companies in multi-company deployments).
+    config.companies[0].approvalFallbackChannelId = "system-dump-channel";
     const client = makeMockClient();
 
     const event = makeApprovalCreatedEvent({
@@ -209,14 +211,14 @@ describe("handleApprovalCreated — approvalsChannelsByType + Bug 2.5", () => {
     );
   });
 
-  it("empty approvalsChannelsByType → graceful fallback to approvalFallbackChannelId", async () => {
+  it("empty approvalsChannelsByType → graceful fallback to companyConfig.approvalFallbackChannelId", async () => {
     const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel } = await import("../src/discord/rest.js");
 
     const harness = createTestHarness({ manifest });
     const config = makeConfig();
     config.approvalsChannelsByType = { c1: [] };
-    config.approvalFallbackChannelId = "system-dump-channel";
+    config.companies[0].approvalFallbackChannelId = "system-dump-channel";
     const client = makeMockClient();
 
     const event = makeApprovalCreatedEvent({ approvalId: "appr-empty-cfg" });
@@ -230,19 +232,73 @@ describe("handleApprovalCreated — approvalsChannelsByType + Bug 2.5", () => {
     );
   });
 
-  it("backward compat: approvalFallbackChannelId absent → falls back to companyConfig.channels.orphan", async () => {
+  it("backward compat: companyConfig.approvalFallbackChannelId absent → falls back to channels.orphan", async () => {
     const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel } = await import("../src/discord/rest.js");
 
     const harness = createTestHarness({ manifest });
     const config = makeConfig();
-    // approvalFallbackChannelId intentionally unset to verify legacy default.
+    // Per-company approvalFallbackChannelId intentionally unset.
     const client = makeMockClient();
 
     const event = makeApprovalCreatedEvent({ approvalId: "appr-legacy" });
     await handleApprovalCreated(harness.ctx, event, client, config);
 
     expect(postEmbedToChannel).toHaveBeenCalledWith(client, "o1", expect.anything(), expect.anything());
+  });
+
+  it("per-company scoping: two companies with different fallbacks route their own approvals correctly", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config: DiscordFleetConfig = {
+      botTokenSecretRef: "bot-ref",
+      companies: [
+        {
+          companyId: "c1",
+          guildId: "g1",
+          channels: { digest: "d1", errors: "e1", orphan: "orphan-c1" },
+          projectRouting: {},
+          digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
+          stuckIssueThresholdHours: 6,
+          paperclipApiKeySecretRef: "ref1",
+          paperclipApiUrl: "http://localhost:3000",
+          companyPrefix: "tc1",
+          approvalFallbackChannelId: "c1-fallback",
+        },
+        {
+          companyId: "c2",
+          guildId: "g2",
+          channels: { digest: "d2", errors: "e2", orphan: "orphan-c2" },
+          projectRouting: {},
+          digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
+          stuckIssueThresholdHours: 6,
+          paperclipApiKeySecretRef: "ref2",
+          paperclipApiUrl: "http://localhost:3000",
+          companyPrefix: "tc2",
+          approvalFallbackChannelId: "c2-fallback",
+        },
+      ],
+    };
+    const client = makeMockClient();
+
+    await handleApprovalCreated(
+      harness.ctx,
+      makeApprovalCreatedEvent({ approvalId: "appr-c1" }, { companyId: "c1" }),
+      client,
+      config,
+    );
+    await handleApprovalCreated(
+      harness.ctx,
+      makeApprovalCreatedEvent({ approvalId: "appr-c2" }, { companyId: "c2" }),
+      client,
+      config,
+    );
+
+    // c1's approval goes to c1's fallback, c2's to c2's — no cross-company leak.
+    expect(postEmbedToChannel).toHaveBeenCalledWith(client, "c1-fallback", expect.anything(), expect.anything());
+    expect(postEmbedToChannel).toHaveBeenCalledWith(client, "c2-fallback", expect.anything(), expect.anything());
   });
 
   it("Bug 2.5 regression lock: orphan-fallback path chunks proposedComment, not just embed", async () => {

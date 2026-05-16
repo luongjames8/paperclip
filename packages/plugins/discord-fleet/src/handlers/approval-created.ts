@@ -130,7 +130,9 @@ export async function handleApprovalCreated(
   //      explicit content-surface routing — highest priority).
   //   2. Existing work-thread/destination from parent issue (co-locates
   //      the approval with the work that produced it).
-  //   3. approvalFallbackChannelId (system-dump approvals channel).
+  //   3. companyConfig.approvalFallbackChannelId (per-company system-dump
+  //      approvals channel — must be company-scoped to avoid cross-company
+  //      leakage in multi-company deployments).
   //   4. companyConfig.channels.orphan (backward-compat default when
   //      approvalFallbackChannelId is absent).
   const matchedChannelId = matchChannelByType(
@@ -146,7 +148,7 @@ export async function handleApprovalCreated(
       : null;
     destinationChannelId =
       existingThread?.threadId ??
-      config.approvalFallbackChannelId ??
+      companyConfig.approvalFallbackChannelId ??
       companyConfig.channels.orphan;
   }
 

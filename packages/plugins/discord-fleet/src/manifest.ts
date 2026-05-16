@@ -64,11 +64,6 @@ const manifest: PaperclipPluginManifestV1 = {
           },
         },
       },
-      approvalFallbackChannelId: {
-        type: "string",
-        title: "Approval Fallback Channel ID",
-        description: "Destination for approvals with no approvalsChannelsByType match and no co-locatable work-thread. Defaults to companyConfig.channels.orphan when absent.",
-      },
       companies: {
         type: "array",
         title: "Companies",
@@ -118,6 +113,11 @@ const manifest: PaperclipPluginManifestV1 = {
             costEventThresholdCents: { type: "number" },
             paperclipApiKeySecretRef: { type: "string", title: "Paperclip API Key Secret Ref" },
             paperclipApiUrl: { type: "string", title: "Paperclip API Base URL", default: "http://localhost:3000" },
+            approvalFallbackChannelId: {
+              type: "string",
+              title: "Approval Fallback Channel ID",
+              description: "Per-company destination for approvals with no approvalsChannelsByType match and no co-locatable work-thread. Defaults to channels.orphan when absent.",
+            },
           },
         },
       },
