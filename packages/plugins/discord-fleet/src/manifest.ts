@@ -36,6 +36,34 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Paperclip secret reference for the Discord bot token (e.g. paperclip-discord/bot-token)",
         default: "paperclip-discord/bot-token",
       },
+      issuesChannelsByType: {
+        type: "object",
+        title: "Issues Channels By Type",
+        description: "Per-companyId map of [regex, channelId] pairs. Matches seed-issue routine_slug / identifier / title; first match wins. Bypasses projectRouting.",
+        additionalProperties: {
+          type: "array",
+          items: {
+            type: "array",
+            minItems: 2,
+            maxItems: 2,
+            items: { type: "string" },
+          },
+        },
+      },
+      approvalsChannelsByType: {
+        type: "object",
+        title: "Approvals Channels By Type",
+        description: "Per-companyId map of [regex, channelId] pairs. Matches approval title; first match wins. Replaces channels.orphan fallback for approvals.",
+        additionalProperties: {
+          type: "array",
+          items: {
+            type: "array",
+            minItems: 2,
+            maxItems: 2,
+            items: { type: "string" },
+          },
+        },
+      },
       companies: {
         type: "array",
         title: "Companies",
@@ -85,6 +113,11 @@ const manifest: PaperclipPluginManifestV1 = {
             costEventThresholdCents: { type: "number" },
             paperclipApiKeySecretRef: { type: "string", title: "Paperclip API Key Secret Ref" },
             paperclipApiUrl: { type: "string", title: "Paperclip API Base URL", default: "http://localhost:3000" },
+            approvalFallbackChannelId: {
+              type: "string",
+              title: "Approval Fallback Channel ID",
+              description: "Per-company destination for approvals with no approvalsChannelsByType match and no co-locatable work-thread. Defaults to channels.orphan when absent.",
+            },
           },
         },
       },

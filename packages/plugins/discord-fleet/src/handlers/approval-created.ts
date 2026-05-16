@@ -1,8 +1,12 @@
-import type { Client, ThreadChannel } from "discord.js";
+import type {
+  APIActionRowComponent,
+  APIComponentInMessageActionRow,
+  APIEmbed,
+  Client,
+} from "discord.js";
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
-import type { DiscordFleetConfig } from "../config/schema.js";
-import { routeIssue } from "../routing/route.js";
-import { postEmbedToChannel, postEmbedToThread } from "../discord/rest.js";
+import type { ChannelTypeRoute, DiscordFleetConfig } from "../config/schema.js";
+import { postEmbedToChannel, postToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
@@ -32,14 +36,12 @@ export const PENDING_APPROVALS_KEY = "pending-approvals";
 const THREAD_CHUNK_MAX = 1990;
 
 function chunkBySection(text: string): string[] {
-  // Split on ## headings; each chunk ≤ THREAD_CHUNK_MAX chars
   const raw = text.split(/(?=^## )/m).filter((s) => s.trim());
   const chunks: string[] = [];
   for (const section of raw) {
     if (section.length <= THREAD_CHUNK_MAX) {
       chunks.push(section);
     } else {
-      // Section is over limit — split at paragraph boundaries
       let remaining = section;
       while (remaining.length > THREAD_CHUNK_MAX) {
         const cut = remaining.lastIndexOf("\n\n", THREAD_CHUNK_MAX);
@@ -53,6 +55,49 @@ function chunkBySection(text: string): string[] {
   return chunks;
 }
 
+function matchChannelByType(
+  routes: ChannelTypeRoute[] | undefined,
+  candidate: string | undefined,
+): string | null {
+  if (!routes || routes.length === 0 || !candidate) return null;
+  for (const [pattern, channelId] of routes) {
+    let re: RegExp;
+    try {
+      re = new RegExp(pattern);
+    } catch {
+      continue;
+    }
+    if (re.test(candidate)) return channelId;
+  }
+  return null;
+}
+
+async function postEmbedAndChunks(
+  ctx: PluginContext,
+  client: Client,
+  destinationId: string,
+  embed: APIEmbed,
+  components: Array<APIActionRowComponent<APIComponentInMessageActionRow>>,
+  proposedComment: string,
+): Promise<void> {
+  // postEmbedToChannel + postToChannel both call client.channels.fetch(id).send(),
+  // which works for both TextChannel and ThreadChannel — the destination can be
+  // either, and Discord.js .send() is unified across them.
+  await postEmbedToChannel(client, destinationId, embed, components);
+  if (!proposedComment) return;
+  const chunks = chunkBySection(stripSecrets(proposedComment));
+  for (const chunk of chunks) {
+    try {
+      await postToChannel(client, destinationId, truncate(chunk, THREAD_CHUNK_MAX));
+    } catch (err) {
+      ctx.logger.warn("approval-created: posting proposedComment chunk failed", {
+        destinationId,
+        error: String(err),
+      });
+    }
+  }
+}
+
 export async function handleApprovalCreated(
   ctx: PluginContext,
   event: PluginEvent,
@@ -61,10 +106,6 @@ export async function handleApprovalCreated(
 ): Promise<void> {
   const companyId = event.companyId;
   const payload = event.payload as ApprovalCreatedPayload;
-  // event.entityId IS the APPROVAL id (paperclip approval-created activity),
-  // not an issue id. Pull linked issues from the plural payload.issueIds
-  // first, falling back to legacy singular issueId for compat with older
-  // emissions / unit-test fixtures.
   const candidateIssueIds = payload.issueIds && payload.issueIds.length > 0
     ? payload.issueIds
     : payload.issueId
@@ -73,11 +114,6 @@ export async function handleApprovalCreated(
   const primaryIssueId = candidateIssueIds[0] ?? "";
   const approvalId = payload.approvalId ?? event.entityId ?? "";
   const identifier = payload.identifier ?? (primaryIssueId || approvalId).slice(0, 8);
-  // paperclip emits `details: { type: approval.type, issueIds }` from
-  // server/src/routes/approvals.ts; activity-log spreads `details` into
-  // `payload`, so the canonical field on the plugin side is `payload.type`.
-  // Keep `payload.approvalType` as fallback in case any other code path
-  // emits the legacy field name.
   const approvalType = payload.type ?? payload.approvalType ?? "unknown";
   const approvalTitle = payload.title ?? `Approval ${approvalId.slice(0, 8)}`;
   const proposedComment = payload.proposedComment ?? "";
@@ -85,52 +121,39 @@ export async function handleApprovalCreated(
   const companyConfig = config.companies.find((c) => c.companyId === companyId);
   if (!companyConfig) return;
 
-  // B1 fix: link to /:companyPrefix/approvals/<id> (board canonical route)
   const url = `${companyConfig.paperclipApiUrl}/${companyConfig.companyPrefix}/approvals/${approvalId}`;
   const embed = buildApprovalEmbed({ identifier, approvalId, approvalType, title: approvalTitle, issueUrl: url });
   const actionRow = buildApprovalActionRow({ approvalId, issueUrl: url });
 
-  // If any linked issue has a registered Discord thread (or any ancestor in
-  // the chain does), post the approval embed + buttons directly into that
-  // thread so it appears alongside the work. getThreadForAncestors walks the
-  // array of candidate issue ids and returns the first matching thread.
-  const existingThread = candidateIssueIds.length
-    ? await getThreadForAncestors(ctx, companyId, candidateIssueIds)
-    : null;
-
-  if (existingThread) {
-    // Approval embed + buttons go INTO the work's existing thread, alongside
-    // the work that produced them. proposedComment posted as follow-up
-    // messages in the SAME thread (no new thread spawned — the thread already
-    // exists from issue.created registration).
-    await postEmbedToThread(client, existingThread.threadId, embed, [actionRow]);
-    if (proposedComment) {
-      try {
-        const thread = (await client.channels.fetch(existingThread.threadId)) as ThreadChannel;
-        const chunks = chunkBySection(stripSecrets(proposedComment));
-        for (const chunk of chunks) {
-          await thread.send({ content: truncate(chunk, THREAD_CHUNK_MAX) });
-        }
-      } catch (err) {
-        ctx.logger.warn("approval-created: posting proposedComment into work thread failed", {
-          threadId: existingThread.threadId,
-          error: String(err),
-        });
-      }
-    }
+  // Routing precedence:
+  //   1. approvalsChannelsByType regex match on approval title (operator's
+  //      explicit content-surface routing — highest priority).
+  //   2. Existing work-thread/destination from parent issue (co-locates
+  //      the approval with the work that produced it).
+  //   3. companyConfig.approvalFallbackChannelId (per-company system-dump
+  //      approvals channel — must be company-scoped to avoid cross-company
+  //      leakage in multi-company deployments).
+  //   4. companyConfig.channels.orphan (backward-compat default when
+  //      approvalFallbackChannelId is absent).
+  const matchedChannelId = matchChannelByType(
+    config.approvalsChannelsByType?.[companyId],
+    approvalTitle,
+  );
+  let destinationChannelId: string;
+  if (matchedChannelId) {
+    destinationChannelId = matchedChannelId;
   } else {
-    // No work thread registered (legacy data pre-dating issue.created thread
-    // registration, or an approval not tied to any issue). Post embed + buttons
-    // to the routed channel as a flat message. Do NOT spawn a new thread —
-    // an orphan "approval thread" detached from the work it concerns is the
-    // exact antipattern we're retiring (see bridge/*-poster.py). Operators
-    // can click the View button to reach the full proposedComment in
-    // paperclip's UI.
-    const { channelId } = routeIssue(config, companyId, payload.projectId);
-    await postEmbedToChannel(client, channelId, embed, [actionRow]);
+    const existingThread = candidateIssueIds.length
+      ? await getThreadForAncestors(ctx, companyId, candidateIssueIds)
+      : null;
+    destinationChannelId =
+      existingThread?.threadId ??
+      companyConfig.approvalFallbackChannelId ??
+      companyConfig.channels.orphan;
   }
 
-  // Record pending approval for digest
+  await postEmbedAndChunks(ctx, client, destinationChannelId, embed, [actionRow], proposedComment);
+
   const pending = ((await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
