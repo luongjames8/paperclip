@@ -2,6 +2,13 @@ import type { APIEmbed } from "discord.js";
 import { EMBED_TOTAL_MAX, embedCharCount } from "./embeds.js";
 import { stripSecrets } from "./secrets.js";
 
+// A URL is "safe" for embedding only if stripSecrets is a no-op on it — i.e. it
+// contains no token pattern. A masked URL would be malformed and rejected by
+// Discord; omitting the URL is the safer behavior.
+function isUrlSafe(url: string): boolean {
+  return stripSecrets(url) === url;
+}
+
 export interface IssueDocsBundle {
   issues: Array<{
     issueId: string;
@@ -125,8 +132,8 @@ export function renderPostsDoc(body: string, approvalShort: string): APIEmbed[] 
       description,
       footer: { text: `${i + 1}/${total} · ${tz} · [preview:${approvalShort}]`.trim() },
     };
-    if (url) embed.url = url;
-    if (img) embed.image = { url: img };
+    if (url && isUrlSafe(url)) embed.url = url;
+    if (img && isUrlSafe(img)) embed.image = { url: img };
     out.push(embed);
   });
 
@@ -138,8 +145,8 @@ export function renderPostsDoc(body: string, approvalShort: string): APIEmbed[] 
       description: desc,
       footer: { text: `GBP · ${gbp.timezone ?? ""} · [preview:${approvalShort}]`.trim() },
     };
-    if (gbp.url) embed.url = gbp.url;
-    if (gbp.mainImage) embed.image = { url: gbp.mainImage };
+    if (typeof gbp.url === "string" && isUrlSafe(gbp.url)) embed.url = gbp.url;
+    if (typeof gbp.mainImage === "string" && isUrlSafe(gbp.mainImage)) embed.image = { url: gbp.mainImage };
     out.push(embed);
   }
 
@@ -171,7 +178,7 @@ export function renderSlidesDoc(body: string, approvalShort: string): APIEmbed[]
       title,
       footer: { text: footerText },
     };
-    if (url) {
+    if (url && isUrlSafe(url)) {
       embed.image = { url };
       embed.url = url;
     }

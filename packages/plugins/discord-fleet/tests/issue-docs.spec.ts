@@ -159,6 +159,43 @@ describe("renderPostsDoc", () => {
     expect(out[1].url).toBe("https://gbp");
   });
 
+  it("omits embed.url + embed.image when post.url or post.mainImage contains a secret", () => {
+    const fakePcpKey = "pcp_" + "Q".repeat(25);
+    const body = JSON.stringify({
+      posts: [{
+        slot: {},
+        slug: "leaky-urls",
+        url: `https://example.com/${fakePcpKey}`,
+        mainImage: `https://img.example.com/${fakePcpKey}.png`,
+        platforms: {},
+      }],
+      gbp: { variant: "v", text: "ok", url: `https://gbp/${fakePcpKey}`, mainImage: `https://gbp-img/${fakePcpKey}.png` },
+    });
+    const out = renderPostsDoc(body, "abcd1234");
+    expect(out).toHaveLength(2);
+    // Post embed should drop both url and image entirely (better than emitting a masked-malformed URL)
+    expect(out[0].url).toBeUndefined();
+    expect(out[0].image).toBeUndefined();
+    // GBP embed same
+    expect(out[1].url).toBeUndefined();
+    expect(out[1].image).toBeUndefined();
+  });
+
+  it("keeps embed.url + embed.image when post URLs are clean", () => {
+    const body = JSON.stringify({
+      posts: [{
+        slot: {},
+        slug: "clean",
+        url: "https://hinomaru.one/tokyo-travel-guide/roppongi",
+        mainImage: "https://hinomaru.one/images/abc.jpg",
+        platforms: {},
+      }],
+    });
+    const out = renderPostsDoc(body, "abcd1234");
+    expect(out[0].url).toBe("https://hinomaru.one/tokyo-travel-guide/roppongi");
+    expect(out[0].image?.url).toBe("https://hinomaru.one/images/abc.jpg");
+  });
+
   it("strips secrets from post description, title, and gbp text", () => {
     // Synthetic tokens matching the patterns in render/secrets.ts
     const fakePcpKey = "pcp_" + "A".repeat(25);
@@ -251,6 +288,23 @@ describe("renderSlidesDoc", () => {
     const out = renderSlidesDoc(body, "abcd1234");
     expect(out).toHaveLength(1);
     expect(out[0].image?.url).toBe("https://ok.png");
+  });
+
+  it("omits slide image+url when slide.url contains a secret", () => {
+    const fakePcpKey = "pcp_" + "X".repeat(25);
+    const body = JSON.stringify({
+      slug: "carousel",
+      slides: [
+        { url: `https://example.com/${fakePcpKey}.png` },           // leaky
+        { url: "https://example.com/clean.png" },                   // clean
+      ],
+    });
+    const out = renderSlidesDoc(body, "abcd1234");
+    expect(out).toHaveLength(2);
+    expect(out[0].url).toBeUndefined();
+    expect(out[0].image).toBeUndefined();
+    expect(out[1].url).toBe("https://example.com/clean.png");
+    expect(out[1].image?.url).toBe("https://example.com/clean.png");
   });
 
   it("strips secrets from slide titles + slug/theme footer", () => {

@@ -174,10 +174,12 @@ export async function handleApprovalCreated(
   }
 
   const groups = renderIssueDocs(bundle, approvalId.slice(0, 8));
+  let anyBodyPosted = false;
   if (groups.length > 0) {
     for (const group of groups) {
       try {
         await postEmbedsToChannel(client, destinationChannelId, group);
+        anyBodyPosted = true;
       } catch (err) {
         ctx.logger.warn("approval-created: rich-group post failed", {
           destinationChannelId,
@@ -185,7 +187,12 @@ export async function handleApprovalCreated(
         });
       }
     }
-  } else if (proposedComment) {
+  }
+  // Fall back to proposedComment if the rich path produced no successful body posts.
+  // Covers both "no groups at all" (non-content approvals) and "every group failed"
+  // (Discord 400/5xx, invalid image URL, etc.) so operator still gets something
+  // beyond the header card before the approval gets marked SEEN.
+  if (!anyBodyPosted && proposedComment) {
     const chunks = chunkBySection(stripSecrets(proposedComment));
     for (const chunk of chunks) {
       try {
