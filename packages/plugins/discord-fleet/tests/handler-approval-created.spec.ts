@@ -401,3 +401,58 @@ describe("handleApprovalCreated — approvalType field-read", () => {
     );
   });
 });
+
+// ─── SEEN_APPROVALS_KEY dedup guard ──────────────────────────────────────────
+
+describe("handleApprovalCreated — SEEN_APPROVALS_KEY dedup guard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("dedup: second call with same approvalId is a no-op (no posts)", async () => {
+    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+    const event = makeApprovalCreatedEvent();
+
+    await handleApprovalCreated(harness.ctx, event, client, config);
+    await handleApprovalCreated(harness.ctx, event, client, config);
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);  // first call posted; second was no-op
+
+    const seen = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
+    expect(seen).toEqual(["appr-001"]);
+  });
+
+  it("dedup survives PENDING_APPROVALS_KEY wipe (digest semantics)", async () => {
+    const { handleApprovalCreated, SEEN_APPROVALS_KEY, PENDING_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+    const event = makeApprovalCreatedEvent();
+
+    await handleApprovalCreated(harness.ctx, event, client, config);
+
+    // Simulate digest wiping PENDING (jobs/digest.ts:100):
+    await harness.ctx.state.set({ scopeKind: "company", scopeId: "c1", stateKey: PENDING_APPROVALS_KEY }, []);
+
+    await handleApprovalCreated(harness.ctx, event, client, config);
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);  // still deduped via SEEN
+  });
+
+  it("PENDING_APPROVALS_KEY is also populated (digest job still sees the approval)", async () => {
+    const { handleApprovalCreated, PENDING_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+
+    const harness = createTestHarness({ manifest });
+    await handleApprovalCreated(harness.ctx, makeApprovalCreatedEvent(), makeMockClient(), makeConfig());
+
+    const pending = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: PENDING_APPROVALS_KEY });
+    expect(pending).toEqual(["appr-001"]);
+  });
+});

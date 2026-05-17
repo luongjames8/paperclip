@@ -33,6 +33,7 @@ interface ApprovalCreatedPayload {
 }
 
 export const PENDING_APPROVALS_KEY = "pending-approvals";
+export const SEEN_APPROVALS_KEY = "seen-approvals";
 const THREAD_CHUNK_MAX = 1990;
 
 function chunkBySection(text: string): string[] {
@@ -121,6 +122,13 @@ export async function handleApprovalCreated(
   const companyConfig = config.companies.find((c) => c.companyId === companyId);
   if (!companyConfig) return;
 
+  const seenKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: SEEN_APPROVALS_KEY };
+  const seen = ((await ctx.state.get(seenKey)) as string[] | null) ?? [];
+  if (seen.includes(approvalId)) {
+    ctx.logger.info("approval-created: already posted, skipping", { approvalId });
+    return;
+  }
+
   const url = `${companyConfig.paperclipApiUrl}/${companyConfig.companyPrefix}/approvals/${approvalId}`;
   const embed = buildApprovalEmbed({ identifier, approvalId, approvalType, title: approvalTitle, issueUrl: url });
   const actionRow = buildApprovalActionRow({ approvalId, issueUrl: url });
@@ -153,6 +161,9 @@ export async function handleApprovalCreated(
   }
 
   await postEmbedAndChunks(ctx, client, destinationChannelId, embed, [actionRow], proposedComment);
+
+  seen.push(approvalId);
+  await ctx.state.set(seenKey, seen);
 
   const pending = ((await ctx.state.get({
     scopeKind: "company",
