@@ -1,5 +1,6 @@
 import type { APIEmbed } from "discord.js";
 import { EMBED_TOTAL_MAX, embedCharCount } from "./embeds.js";
+import { stripSecrets } from "./secrets.js";
 
 export interface IssueDocsBundle {
   issues: Array<{
@@ -114,10 +115,13 @@ export function renderPostsDoc(body: string, approvalShort: string): APIEmbed[] 
       for (const d of descs) descLines.push(`  ↳ ${d}`);
       descLines.push("");
     }
-    const description = descLines.join("\n").trim().slice(0, DESC_MAX);
+    // Doc bodies are written by writer agents — strip any secrets that might have
+    // landed in post text fields before they reach Discord (matches the
+    // proposedComment fallback path's stripSecrets call in approval-created.ts).
+    const description = stripSecrets(descLines.join("\n").trim()).slice(0, DESC_MAX);
 
     const embed: APIEmbed = {
-      title: title.slice(0, TITLE_MAX),
+      title: stripSecrets(title).slice(0, TITLE_MAX),
       description,
       footer: { text: `${i + 1}/${total} · ${tz} · [preview:${approvalShort}]`.trim() },
     };
@@ -128,9 +132,9 @@ export function renderPostsDoc(body: string, approvalShort: string): APIEmbed[] 
 
   if (obj.gbp && typeof obj.gbp === "object") {
     const gbp = obj.gbp as Record<string, any>;
-    const desc = String(gbp.text ?? "").slice(0, DESC_MAX);
+    const desc = stripSecrets(String(gbp.text ?? "")).slice(0, DESC_MAX);
     const embed: APIEmbed = {
-      title: `GBP — ${gbp.variant ?? "post"}`.slice(0, TITLE_MAX),
+      title: stripSecrets(`GBP — ${gbp.variant ?? "post"}`).slice(0, TITLE_MAX),
       description: desc,
       footer: { text: `GBP · ${gbp.timezone ?? ""} · [preview:${approvalShort}]`.trim() },
     };
@@ -157,9 +161,10 @@ export function renderSlidesDoc(body: string, approvalShort: string): APIEmbed[]
     const url = typeof slide.url === "string" ? slide.url : "";
     const label = typeof slide.slide === "string" ? slide.slide : (typeof slide.title === "string" ? slide.title : "");
     const baseTitle = `Slide ${i + 1}/${total}`;
-    const title = (label && label !== baseTitle ? `${baseTitle} — ${label}` : baseTitle).slice(0, TITLE_MAX);
+    // Doc-derived label/slug/theme pass through stripSecrets — see renderPostsDoc.
+    const title = stripSecrets(label && label !== baseTitle ? `${baseTitle} — ${label}` : baseTitle).slice(0, TITLE_MAX);
 
-    const footerParts = [slug, theme, `[preview:${approvalShort}]`].filter(Boolean);
+    const footerParts = [stripSecrets(slug), stripSecrets(theme), `[preview:${approvalShort}]`].filter(Boolean);
     const footerText = footerParts.join(" · ");
 
     const embed: APIEmbed = {

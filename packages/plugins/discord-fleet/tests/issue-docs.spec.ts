@@ -158,6 +158,38 @@ describe("renderPostsDoc", () => {
     expect(out[1].image?.url).toBe("https://gbp.png");
     expect(out[1].url).toBe("https://gbp");
   });
+
+  it("strips secrets from post description, title, and gbp text", () => {
+    // Synthetic tokens matching the patterns in render/secrets.ts
+    const fakePcpKey = "pcp_" + "A".repeat(25);
+    const fakeGithubPat = "ghp_" + "B".repeat(36);
+    const fakeAwsKey = "AKIA" + "C".repeat(16);
+    const body = JSON.stringify({
+      posts: [{
+        slot: { day: "Mon" },
+        slug: "leaked-" + fakePcpKey,
+        platforms: {
+          threads: {
+            main: "Threads body with leaked " + fakeGithubPat + " token",
+            descendants: ["descendant containing " + fakeAwsKey],
+          },
+        },
+      }],
+      gbp: { variant: "morning", text: "GBP body with leaked " + fakePcpKey },
+    });
+    const out = renderPostsDoc(body, "abcd1234");
+    expect(out).toHaveLength(2);
+    // Post embed
+    expect(out[0].title).not.toContain(fakePcpKey);
+    expect(out[0].title).toContain("PAPERCLIP_KEY_***");
+    expect(out[0].description).not.toContain(fakeGithubPat);
+    expect(out[0].description).toContain("GITHUB_PAT_***");
+    expect(out[0].description).not.toContain(fakeAwsKey);
+    expect(out[0].description).toContain("AWS_ACCESS_KEY_***");
+    // GBP embed
+    expect(out[1].description).not.toContain(fakePcpKey);
+    expect(out[1].description).toContain("PAPERCLIP_KEY_***");
+  });
 });
 
 const slidesFixture = fs.readFileSync(path.join(__dirname, "fixtures/slides-doc.json"), "utf8");
@@ -219,5 +251,20 @@ describe("renderSlidesDoc", () => {
     const out = renderSlidesDoc(body, "abcd1234");
     expect(out).toHaveLength(1);
     expect(out[0].image?.url).toBe("https://ok.png");
+  });
+
+  it("strips secrets from slide titles + slug/theme footer", () => {
+    const fakePcpKey = "pcp_" + "Z".repeat(25);
+    const body = JSON.stringify({
+      slug: "leak-" + fakePcpKey,
+      theme: "theme-with-leak-" + fakePcpKey,
+      slides: [{ url: "https://example.com/s1.png", slide: "slide-label-" + fakePcpKey }],
+    });
+    const out = renderSlidesDoc(body, "abcd1234");
+    expect(out).toHaveLength(1);
+    expect(out[0].title).not.toContain(fakePcpKey);
+    expect(out[0].title).toContain("PAPERCLIP_KEY_***");
+    expect(out[0].footer?.text).not.toContain(fakePcpKey);
+    expect(out[0].footer?.text).toContain("PAPERCLIP_KEY_***");
   });
 });
