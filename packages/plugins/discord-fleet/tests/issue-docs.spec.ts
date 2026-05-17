@@ -57,14 +57,14 @@ const postsFixture = fs.readFileSync(path.join(__dirname, "fixtures/posts-doc.js
 
 describe("renderPostsDoc", () => {
   it("returns one embed per post (+ optional GBP embed)", () => {
-    const out = renderPostsDoc(postsFixture, "HIN-401", "abcd1234");
+    const out = renderPostsDoc(postsFixture, "abcd1234");
     const parsed = JSON.parse(postsFixture);
     const expectedN = parsed.posts.length + (parsed.gbp ? 1 : 0);
     expect(out.length).toBe(expectedN);
   });
 
   it("first post embed has expected title/image/footer/url shape", () => {
-    const out = renderPostsDoc(postsFixture, "HIN-401", "abcd1234");
+    const out = renderPostsDoc(postsFixture, "abcd1234");
     const first = out[0];
     const parsed = JSON.parse(postsFixture);
     const post0 = parsed.posts[0];
@@ -84,7 +84,7 @@ describe("renderPostsDoc", () => {
       weekOf: "2026-05-11",
       posts: [{ slot: { day: "Mon", publicationDate: "2026-05-11T00:00:00Z", timezone: "Asia/Taipei" }, slug: "no-image", url: "https://x", platforms: {} }],
     });
-    const out = renderPostsDoc(body, "HIN-1", "abcd1234");
+    const out = renderPostsDoc(body, "abcd1234");
     expect(out[0].image).toBeUndefined();
   });
 
@@ -93,34 +93,34 @@ describe("renderPostsDoc", () => {
     const body = JSON.stringify({
       posts: [{ slot: {}, slug: "s", platforms: { threads: { main: long } } }],
     });
-    const out = renderPostsDoc(body, "HIN-1", "abcd1234");
+    const out = renderPostsDoc(body, "abcd1234");
     expect(out[0].description!.length).toBeLessThanOrEqual(4096);
   });
 
   it("returns [] on malformed JSON body — no throw", () => {
-    expect(renderPostsDoc("not json", "HIN-1", "abcd1234")).toEqual([]);
-    expect(renderPostsDoc('{"posts":', "HIN-1", "abcd1234")).toEqual([]);
+    expect(renderPostsDoc("not json", "abcd1234")).toEqual([]);
+    expect(renderPostsDoc('{"posts":', "abcd1234")).toEqual([]);
   });
 
   it("returns [] when body parses but has no posts array", () => {
-    expect(renderPostsDoc('{"weekOf":"x"}', "HIN-1", "abcd1234")).toEqual([]);
+    expect(renderPostsDoc('{"weekOf":"x"}', "abcd1234")).toEqual([]);
   });
 
   it("returns [] for empty posts array (different from absent)", () => {
-    expect(renderPostsDoc('{"posts":[]}', "HIN-1", "abcd1234")).toEqual([]);
+    expect(renderPostsDoc('{"posts":[]}', "abcd1234")).toEqual([]);
   });
 
   it("handles bare triple-backtick fence (no json language tag)", () => {
     const inner = JSON.stringify({ posts: [{ slot: {}, slug: "bare-fence", platforms: { threads: { main: "hi" } } }] });
     const fenced = "```\n" + inner + "\n```";
-    const out = renderPostsDoc(fenced, "HIN-1", "abcd1234");
+    const out = renderPostsDoc(fenced, "abcd1234");
     expect(out).toHaveLength(1);
     expect(out[0].title).toContain("bare-fence");
   });
 
   it("does not crash when post.slot is a non-object (defensive guard)", () => {
     const body = JSON.stringify({ posts: [{ slot: "not-an-object", slug: "weird", platforms: {} }] });
-    const out = renderPostsDoc(body, "HIN-1", "abcd1234");
+    const out = renderPostsDoc(body, "abcd1234");
     expect(out).toHaveLength(1);
     expect(out[0].title).toContain("weird");
   });
@@ -128,7 +128,7 @@ describe("renderPostsDoc", () => {
   it("handles markdown-fenced JSON bodies (```json ... ```)", () => {
     const inner = JSON.stringify({ posts: [{ slot: {}, slug: "fenced", platforms: { threads: { main: "hi" } } }] });
     const fenced = "```json\n" + inner + "\n```";
-    const out = renderPostsDoc(fenced, "HIN-1", "abcd1234");
+    const out = renderPostsDoc(fenced, "abcd1234");
     expect(out).toHaveLength(1);
     expect(out[0].title).toContain("fenced");
   });
@@ -140,7 +140,7 @@ describe("renderPostsDoc", () => {
     const body =
       '{\n  "posts": [{\n    "slot": {},\n    "slug": "raw-cc",\n    "platforms": {\n      "threads": {\n        "main": "line one\nline two\nline three"\n      }\n    }\n  }]\n}';
     expect(() => JSON.parse(body)).toThrow();  // confirm strict parser rejects
-    const out = renderPostsDoc(body, "HIN-1", "abcd1234");
+    const out = renderPostsDoc(body, "abcd1234");
     expect(out).toHaveLength(1);
     expect(out[0].title).toContain("raw-cc");
     expect(out[0].description).toContain("line one");
@@ -152,7 +152,7 @@ describe("renderPostsDoc", () => {
       posts: [{ slot: {}, slug: "p1", platforms: {} }],
       gbp: { variant: "morning", text: "GBP body text", url: "https://gbp", mainImage: "https://gbp.png", timezone: "Asia/Taipei" },
     });
-    const out = renderPostsDoc(body, "HIN-1", "abcd1234");
+    const out = renderPostsDoc(body, "abcd1234");
     expect(out).toHaveLength(2);
     expect(out[1].title).toContain("GBP");
     expect(out[1].image?.url).toBe("https://gbp.png");
@@ -164,7 +164,7 @@ const slidesFixture = fs.readFileSync(path.join(__dirname, "fixtures/slides-doc.
 
 describe("renderSlidesDoc", () => {
   it("returns one embed per slide with image.url set", () => {
-    const out = renderSlidesDoc(slidesFixture, "HIN-501", "abcd1234");
+    const out = renderSlidesDoc(slidesFixture, "abcd1234");
     const parsed = JSON.parse(slidesFixture);
     expect(out.length).toBe(parsed.slides.length);
     expect(out[0].image?.url).toBe(parsed.slides[0].url);
@@ -172,43 +172,43 @@ describe("renderSlidesDoc", () => {
   });
 
   it("title contains 'Slide N/total' shape", () => {
-    const out = renderSlidesDoc(slidesFixture, "HIN-501", "abcd1234");
+    const out = renderSlidesDoc(slidesFixture, "abcd1234");
     const total = JSON.parse(slidesFixture).slides.length;
     expect(out[0].title).toMatch(new RegExp(`^Slide 1/${total}`));
   });
 
   it("footer ends with [preview:<short>]", () => {
-    const out = renderSlidesDoc(slidesFixture, "HIN-501", "abcd1234");
+    const out = renderSlidesDoc(slidesFixture, "abcd1234");
     expect(out[0].footer?.text).toMatch(/\[preview:abcd1234\]$/);
   });
 
   it("footer omits empty theme cleanly (no '· ·' from absent field)", () => {
     // The real fixture has no 'theme' field. Footer should not contain '· ·' or a double-separator
-    const out = renderSlidesDoc(slidesFixture, "HIN-501", "abcd1234");
+    const out = renderSlidesDoc(slidesFixture, "abcd1234");
     const txt = out[0].footer!.text;
     expect(txt).not.toMatch(/· ·/);
     expect(txt).not.toMatch(/·\s*·/);  // no double separator from empty theme slot
   });
 
   it("returns [] for empty slides array", () => {
-    expect(renderSlidesDoc('{"slug":"x","slides":[]}', "HIN-1", "abcd1234")).toEqual([]);
+    expect(renderSlidesDoc('{"slug":"x","slides":[]}', "abcd1234")).toEqual([]);
   });
 
   it("returns [] on malformed JSON body", () => {
-    expect(renderSlidesDoc("not json", "HIN-1", "abcd1234")).toEqual([]);
+    expect(renderSlidesDoc("not json", "abcd1234")).toEqual([]);
   });
 
   it("handles markdown-fenced JSON bodies", () => {
     const inner = JSON.stringify({ slug: "fenced-carousel", slides: [{ url: "https://example.com/s1.png" }] });
     const fenced = "```json\n" + inner + "\n```";
-    const out = renderSlidesDoc(fenced, "HIN-1", "abcd1234");
+    const out = renderSlidesDoc(fenced, "abcd1234");
     expect(out).toHaveLength(1);
     expect(out[0].image?.url).toBe("https://example.com/s1.png");
   });
 
   it("omits image/url when slide has no url field", () => {
     const body = JSON.stringify({ slug: "no-url", slides: [{ index: 0 }] });
-    const out = renderSlidesDoc(body, "HIN-1", "abcd1234");
+    const out = renderSlidesDoc(body, "abcd1234");
     expect(out).toHaveLength(1);
     expect(out[0].image).toBeUndefined();
     expect(out[0].url).toBeUndefined();
@@ -216,7 +216,7 @@ describe("renderSlidesDoc", () => {
 
   it("skips non-object slide entries (defensive)", () => {
     const body = JSON.stringify({ slug: "mixed", slides: [null, "string", { url: "https://ok.png" }] });
-    const out = renderSlidesDoc(body, "HIN-1", "abcd1234");
+    const out = renderSlidesDoc(body, "abcd1234");
     expect(out).toHaveLength(1);
     expect(out[0].image?.url).toBe("https://ok.png");
   });

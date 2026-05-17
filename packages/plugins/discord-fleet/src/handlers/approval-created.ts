@@ -34,6 +34,11 @@ interface ApprovalCreatedPayload {
   proposedComment?: string;
 }
 
+// Two state keys store the same approvalId list but have different lifetimes —
+// don't collapse them into one. PENDING is wiped daily by jobs/digest.ts when
+// the digest runs; SEEN never clears and is the authoritative dedup record for
+// approval.created handling. Both writes happen at the end of a successful
+// handler invocation.
 export const PENDING_APPROVALS_KEY = "pending-approvals";
 export const SEEN_APPROVALS_KEY = "seen-approvals";
 const THREAD_CHUNK_MAX = 1990;
@@ -99,8 +104,9 @@ export async function handleApprovalCreated(
   if (!companyConfig) return;
 
   const seenKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: SEEN_APPROVALS_KEY };
-  const seen = ((await ctx.state.get(seenKey)) as string[] | null) ?? [];
-  if (seen.includes(approvalId)) {
+  const seenArr = ((await ctx.state.get(seenKey)) as string[] | null) ?? [];
+  const seen = new Set(seenArr);
+  if (seen.has(approvalId)) {
     ctx.logger.info("approval-created: already posted, skipping", { approvalId });
     return;
   }
@@ -143,13 +149,22 @@ export async function handleApprovalCreated(
     const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
     const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
     const issues = await paperclip.getApprovalIssues(approvalId);
-    const withDocs = await Promise.all(
-      issues.map(async (i) => ({
-        issueId: i.id,
-        identifier: i.identifier,
-        documents: await paperclip.listIssueDocuments(i.id),
-      })),
+    // Promise.allSettled (not Promise.all) — one flaky listIssueDocuments call
+    // shouldn't wipe successfully-fetched docs from the other linked issues.
+    const settled = await Promise.allSettled(
+      issues.map((i) => paperclip.listIssueDocuments(i.id)),
     );
+    const withDocs = settled.flatMap((res, idx) => {
+      if (res.status === "fulfilled") {
+        return [{ issueId: issues[idx].id, identifier: issues[idx].identifier, documents: res.value }];
+      }
+      ctx.logger.warn("approval-created: listIssueDocuments failed for one issue, skipping it", {
+        approvalId,
+        issueId: issues[idx].id,
+        error: String(res.reason),
+      });
+      return [];
+    });
     bundle = { issues: withDocs };
   } catch (err) {
     ctx.logger.warn("approval-created: failed to fetch issue docs, falling back to proposedComment", {
@@ -184,8 +199,8 @@ export async function handleApprovalCreated(
     }
   }
 
-  seen.push(approvalId);
-  await ctx.state.set(seenKey, seen);
+  seen.add(approvalId);
+  await ctx.state.set(seenKey, [...seen]);
 
   const pending = ((await ctx.state.get({
     scopeKind: "company",

@@ -1,4 +1,5 @@
 import type { APIEmbed } from "discord.js";
+import { EMBED_TOTAL_MAX, embedCharCount } from "./embeds.js";
 
 export interface IssueDocsBundle {
   issues: Array<{
@@ -8,8 +9,19 @@ export interface IssueDocsBundle {
   }>;
 }
 
+interface PostsDocShape {
+  weekOf?: string;
+  posts?: unknown[];
+  gbp?: unknown;
+}
+
+interface SlidesDocShape {
+  slug?: string;
+  theme?: string;
+  slides?: unknown[];
+}
+
 const EMBED_PER_MESSAGE_MAX = 10;
-const TOTAL_CHARS_PER_MESSAGE_MAX = 6000;
 const DESC_MAX = 4096;
 const TITLE_MAX = 256;
 
@@ -19,35 +31,35 @@ const TITLE_MAX = 256;
 // Used as a lenient fallback when strict JSON.parse rejects bodies produced by
 // upstream writers that embed literal newlines/tabs inside string values.
 function escapeControlCharsInJsonStrings(s: string): string {
-  let out = "";
+  const out: string[] = [];
   let inString = false;
   let backslashRun = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (!inString) {
-      out += c;
+      out.push(c);
       if (c === '"') inString = true;
       backslashRun = 0;
       continue;
     }
     if (c === '"' && backslashRun % 2 === 0) {
       inString = false;
-      out += c;
+      out.push(c);
       backslashRun = 0;
       continue;
     }
     const code = c.charCodeAt(0);
     if (code < 0x20) {
-      if (c === "\n") out += "\\n";
-      else if (c === "\r") out += "\\r";
-      else if (c === "\t") out += "\\t";
+      if (c === "\n") out.push("\\n");
+      else if (c === "\r") out.push("\\r");
+      else if (c === "\t") out.push("\\t");
       backslashRun = 0;
     } else {
-      out += c;
+      out.push(c);
       backslashRun = c === "\\" ? backslashRun + 1 : 0;
     }
   }
-  return out;
+  return out.join("");
 }
 
 function trySafeParseJSON(s: string): unknown {
@@ -67,8 +79,8 @@ function trySafeParseJSON(s: string): unknown {
   }
 }
 
-export function renderPostsDoc(body: string, _identifier: string, approvalShort: string): APIEmbed[] {
-  const obj = trySafeParseJSON(body) as { weekOf?: string; posts?: any[]; gbp?: any } | null;
+export function renderPostsDoc(body: string, approvalShort: string): APIEmbed[] {
+  const obj = trySafeParseJSON(body) as PostsDocShape | null;
   if (!obj || !Array.isArray(obj.posts)) return [];
 
   const posts = obj.posts.filter((p): p is Record<string, any> => p !== null && typeof p === "object");
@@ -130,8 +142,8 @@ export function renderPostsDoc(body: string, _identifier: string, approvalShort:
   return out;
 }
 
-export function renderSlidesDoc(body: string, _identifier: string, approvalShort: string): APIEmbed[] {
-  const obj = trySafeParseJSON(body) as { slug?: string; theme?: string; slides?: any[] } | null;
+export function renderSlidesDoc(body: string, approvalShort: string): APIEmbed[] {
+  const obj = trySafeParseJSON(body) as SlidesDocShape | null;
   if (!obj || !Array.isArray(obj.slides) || obj.slides.length === 0) return [];
 
   const slug = typeof obj.slug === "string" ? obj.slug : "";
@@ -147,7 +159,6 @@ export function renderSlidesDoc(body: string, _identifier: string, approvalShort
     const baseTitle = `Slide ${i + 1}/${total}`;
     const title = (label && label !== baseTitle ? `${baseTitle} — ${label}` : baseTitle).slice(0, TITLE_MAX);
 
-    // Footer: drop empty fields cleanly. Filter then join.
     const footerParts = [slug, theme, `[preview:${approvalShort}]`].filter(Boolean);
     const footerText = footerParts.join(" · ");
 
@@ -165,19 +176,6 @@ export function renderSlidesDoc(body: string, _identifier: string, approvalShort
   return out;
 }
 
-function embedCharCount(e: APIEmbed): number {
-  return (
-    (e.title?.length ?? 0) +
-    (e.description?.length ?? 0) +
-    (e.footer?.text?.length ?? 0) +
-    (e.author?.name?.length ?? 0) +
-    (e.fields ?? []).reduce(
-      (sum, f) => sum + (f.name?.length ?? 0) + (f.value?.length ?? 0),
-      0,
-    )
-  );
-}
-
 /** Pack a flat list of embeds into Discord-message-sized groups (≤10 embeds, ≤6000 chars per group). */
 export function chunkEmbedsForDiscord(embeds: APIEmbed[]): APIEmbed[][] {
   const out: APIEmbed[][] = [];
@@ -187,7 +185,7 @@ export function chunkEmbedsForDiscord(embeds: APIEmbed[]): APIEmbed[][] {
     const c = embedCharCount(e);
     if (
       batch.length >= EMBED_PER_MESSAGE_MAX ||
-      (batch.length > 0 && chars + c > TOTAL_CHARS_PER_MESSAGE_MAX)
+      (batch.length > 0 && chars + c > EMBED_TOTAL_MAX)
     ) {
       out.push(batch);
       batch = [];
@@ -200,16 +198,16 @@ export function chunkEmbedsForDiscord(embeds: APIEmbed[]): APIEmbed[][] {
   return out;
 }
 
-export function renderIssueDocs(bundle: IssueDocsBundle, _approvalShort: string): APIEmbed[][] {
+export function renderIssueDocs(bundle: IssueDocsBundle, approvalShort: string): APIEmbed[][] {
   const flat: APIEmbed[] = [];
   for (const issue of bundle.issues) {
     for (const doc of issue.documents) {
       switch (doc.key) {
         case "posts":
-          flat.push(...renderPostsDoc(doc.body, issue.identifier, _approvalShort));
+          flat.push(...renderPostsDoc(doc.body, approvalShort));
           break;
         case "slides":
-          flat.push(...renderSlidesDoc(doc.body, issue.identifier, _approvalShort));
+          flat.push(...renderSlidesDoc(doc.body, approvalShort));
           break;
         default:
           // skip

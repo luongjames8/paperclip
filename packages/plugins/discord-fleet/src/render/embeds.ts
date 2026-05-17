@@ -40,9 +40,22 @@ function safe(text: string, max = 1900): string {
   return stripSecrets(truncate(text, max));
 }
 
-const EMBED_TOTAL_MAX = 6000;
+export const EMBED_TOTAL_MAX = 6000;
 const DESC_MAX = 4096;
 const TITLE_MAX = 256;
+
+export function embedCharCount(e: APIEmbed): number {
+  return (
+    (e.title?.length ?? 0) +
+    (e.description?.length ?? 0) +
+    (e.footer?.text?.length ?? 0) +
+    (e.author?.name?.length ?? 0) +
+    (e.fields ?? []).reduce(
+      (sum, f) => sum + (f.name?.length ?? 0) + (f.value?.length ?? 0),
+      0,
+    )
+  );
+}
 
 export function enforceEmbedLimits(embed: APIEmbed): APIEmbed {
   const title = embed.title ? embed.title.slice(0, TITLE_MAX) : embed.title;
