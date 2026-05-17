@@ -2,11 +2,21 @@ import type { APIEmbed } from "discord.js";
 import { EMBED_TOTAL_MAX, embedCharCount } from "./embeds.js";
 import { stripSecrets } from "./secrets.js";
 
-// A URL is "safe" for embedding only if stripSecrets is a no-op on it — i.e. it
-// contains no token pattern. A masked URL would be malformed and rejected by
-// Discord; omitting the URL is the safer behavior.
-function isUrlSafe(url: string): boolean {
-  return stripSecrets(url) === url;
+// A URL is "embeddable" iff it's an http(s) absolute URL AND contains no
+// secret pattern. Discord rejects the entire embed message for invalid
+// embed URLs (relative paths, file://, javascript:, malformed schemes), so
+// one bad doc URL would prevent the rich preview group from posting at all.
+// stripSecrets-is-a-noop check ensures no token leaks to Discord; the scheme
+// check protects against writer agents producing relative paths.
+function isUrlEmbeddable(url: string): boolean {
+  if (!/^https?:\/\//i.test(url)) return false;
+  if (stripSecrets(url) !== url) return false;
+  try {
+    new URL(url);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface IssueDocsBundle {
@@ -132,8 +142,8 @@ export function renderPostsDoc(body: string, approvalShort: string): APIEmbed[] 
       description,
       footer: { text: `${i + 1}/${total} · ${tz} · [preview:${approvalShort}]`.trim() },
     };
-    if (url && isUrlSafe(url)) embed.url = url;
-    if (img && isUrlSafe(img)) embed.image = { url: img };
+    if (url && isUrlEmbeddable(url)) embed.url = url;
+    if (img && isUrlEmbeddable(img)) embed.image = { url: img };
     out.push(embed);
   });
 
@@ -145,8 +155,8 @@ export function renderPostsDoc(body: string, approvalShort: string): APIEmbed[] 
       description: desc,
       footer: { text: `GBP · ${gbp.timezone ?? ""} · [preview:${approvalShort}]`.trim() },
     };
-    if (typeof gbp.url === "string" && isUrlSafe(gbp.url)) embed.url = gbp.url;
-    if (typeof gbp.mainImage === "string" && isUrlSafe(gbp.mainImage)) embed.image = { url: gbp.mainImage };
+    if (typeof gbp.url === "string" && isUrlEmbeddable(gbp.url)) embed.url = gbp.url;
+    if (typeof gbp.mainImage === "string" && isUrlEmbeddable(gbp.mainImage)) embed.image = { url: gbp.mainImage };
     out.push(embed);
   }
 
@@ -178,7 +188,7 @@ export function renderSlidesDoc(body: string, approvalShort: string): APIEmbed[]
       title,
       footer: { text: footerText },
     };
-    if (url && isUrlSafe(url)) {
+    if (url && isUrlEmbeddable(url)) {
       embed.image = { url };
       embed.url = url;
     }

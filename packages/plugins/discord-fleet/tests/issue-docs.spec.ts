@@ -181,6 +181,22 @@ describe("renderPostsDoc", () => {
     expect(out[1].image).toBeUndefined();
   });
 
+  it("omits post URLs that are not http(s) absolute (relative paths, file://, etc.)", () => {
+    const body = JSON.stringify({
+      posts: [{
+        slot: {},
+        slug: "bad-schemes",
+        url: "/relative/path",
+        mainImage: "file:///etc/passwd",
+        platforms: {},
+      }],
+    });
+    const out = renderPostsDoc(body, "abcd1234");
+    expect(out).toHaveLength(1);
+    expect(out[0].url).toBeUndefined();
+    expect(out[0].image).toBeUndefined();
+  });
+
   it("keeps embed.url + embed.image when post URLs are clean", () => {
     const body = JSON.stringify({
       posts: [{
@@ -288,6 +304,24 @@ describe("renderSlidesDoc", () => {
     const out = renderSlidesDoc(body, "abcd1234");
     expect(out).toHaveLength(1);
     expect(out[0].image?.url).toBe("https://ok.png");
+  });
+
+  it("omits slide image+url when slide.url is not http(s) absolute", () => {
+    const body = JSON.stringify({
+      slug: "x",
+      slides: [
+        { url: "javascript:alert(1)" },           // bad scheme
+        { url: "../relative.png" },               // relative
+        { url: "https://example.com/clean.png" }, // good
+      ],
+    });
+    const out = renderSlidesDoc(body, "abcd1234");
+    expect(out).toHaveLength(3);
+    expect(out[0].url).toBeUndefined();
+    expect(out[0].image).toBeUndefined();
+    expect(out[1].url).toBeUndefined();
+    expect(out[1].image).toBeUndefined();
+    expect(out[2].url).toBe("https://example.com/clean.png");
   });
 
   it("omits slide image+url when slide.url contains a secret", () => {
