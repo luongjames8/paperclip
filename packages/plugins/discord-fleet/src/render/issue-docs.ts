@@ -13,6 +13,43 @@ const TOTAL_CHARS_PER_MESSAGE_MAX = 6000;
 const DESC_MAX = 4096;
 const TITLE_MAX = 256;
 
+// Escape raw control chars inside JSON string literals only — leaves structural
+// whitespace between fields untouched. Tracks in-string state and counts
+// consecutive backslashes so escaped quotes don't close the string prematurely.
+// Used as a lenient fallback when strict JSON.parse rejects bodies produced by
+// upstream writers that embed literal newlines/tabs inside string values.
+function escapeControlCharsInJsonStrings(s: string): string {
+  let out = "";
+  let inString = false;
+  let backslashRun = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (!inString) {
+      out += c;
+      if (c === '"') inString = true;
+      backslashRun = 0;
+      continue;
+    }
+    if (c === '"' && backslashRun % 2 === 0) {
+      inString = false;
+      out += c;
+      backslashRun = 0;
+      continue;
+    }
+    const code = c.charCodeAt(0);
+    if (code < 0x20) {
+      if (c === "\n") out += "\\n";
+      else if (c === "\r") out += "\\r";
+      else if (c === "\t") out += "\\t";
+      backslashRun = 0;
+    } else {
+      out += c;
+      backslashRun = c === "\\" ? backslashRun + 1 : 0;
+    }
+  }
+  return out;
+}
+
 function trySafeParseJSON(s: string): unknown {
   let t = s.trim();
   if (t.startsWith("```")) {
@@ -22,7 +59,11 @@ function trySafeParseJSON(s: string): unknown {
   try {
     return JSON.parse(t);
   } catch {
-    return null;
+    try {
+      return JSON.parse(escapeControlCharsInJsonStrings(t));
+    } catch {
+      return null;
+    }
   }
 }
 

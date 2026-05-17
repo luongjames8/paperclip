@@ -133,6 +133,20 @@ describe("renderPostsDoc", () => {
     expect(out[0].title).toContain("fenced");
   });
 
+  it("recovers from raw control chars inside string literals (lenient parser)", () => {
+    // Production paperclip writer agents sometimes emit JSON with literal \n inside
+    // string values. JS strict JSON.parse rejects; lenient fallback must handle it.
+    // Synthesize a body with a real newline inside a string value:
+    const body =
+      '{\n  "posts": [{\n    "slot": {},\n    "slug": "raw-cc",\n    "platforms": {\n      "threads": {\n        "main": "line one\nline two\nline three"\n      }\n    }\n  }]\n}';
+    expect(() => JSON.parse(body)).toThrow();  // confirm strict parser rejects
+    const out = renderPostsDoc(body, "HIN-1", "abcd1234");
+    expect(out).toHaveLength(1);
+    expect(out[0].title).toContain("raw-cc");
+    expect(out[0].description).toContain("line one");
+    expect(out[0].description).toContain("line three");
+  });
+
   it("emits a GBP embed at the end when gbp is present", () => {
     const body = JSON.stringify({
       posts: [{ slot: {}, slug: "p1", platforms: {} }],
