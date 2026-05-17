@@ -341,6 +341,17 @@ describe("renderSlidesDoc", () => {
     expect(out[1].image?.url).toBe("https://example.com/clean.png");
   });
 
+  it("clamps slide footer to Discord's 2048 char limit even with absurdly long slug/theme", () => {
+    const body = JSON.stringify({
+      slug: "x".repeat(3000),
+      theme: "y".repeat(3000),
+      slides: [{ url: "https://example.com/s1.png" }],
+    });
+    const out = renderSlidesDoc(body, "abcd1234");
+    expect(out).toHaveLength(1);
+    expect(out[0].footer!.text.length).toBeLessThanOrEqual(2048);
+  });
+
   it("strips secrets from slide titles + slug/theme footer", () => {
     const fakePcpKey = "pcp_" + "Z".repeat(25);
     const body = JSON.stringify({

@@ -1,5 +1,5 @@
 import type { APIEmbed } from "discord.js";
-import { EMBED_TOTAL_MAX, embedCharCount } from "./embeds.js";
+import { EMBED_TOTAL_MAX, embedCharCount, enforceEmbedLimits } from "./embeds.js";
 import { stripSecrets } from "./secrets.js";
 
 // A URL is "embeddable" iff it's an http(s) absolute URL AND contains no
@@ -144,7 +144,7 @@ export function renderPostsDoc(body: string, approvalShort: string): APIEmbed[] 
     };
     if (url && isUrlEmbeddable(url)) embed.url = url;
     if (img && isUrlEmbeddable(img)) embed.image = { url: img };
-    out.push(embed);
+    out.push(enforceEmbedLimits(embed));
   });
 
   if (obj.gbp && typeof obj.gbp === "object") {
@@ -157,7 +157,7 @@ export function renderPostsDoc(body: string, approvalShort: string): APIEmbed[] 
     };
     if (typeof gbp.url === "string" && isUrlEmbeddable(gbp.url)) embed.url = gbp.url;
     if (typeof gbp.mainImage === "string" && isUrlEmbeddable(gbp.mainImage)) embed.image = { url: gbp.mainImage };
-    out.push(embed);
+    out.push(enforceEmbedLimits(embed));
   }
 
   return out;
@@ -192,7 +192,7 @@ export function renderSlidesDoc(body: string, approvalShort: string): APIEmbed[]
       embed.image = { url };
       embed.url = url;
     }
-    out.push(embed);
+    out.push(enforceEmbedLimits(embed));
   });
 
   return out;
