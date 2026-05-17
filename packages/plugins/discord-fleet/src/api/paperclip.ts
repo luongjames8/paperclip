@@ -75,6 +75,20 @@ export class PaperclipClient {
     return body.data;
   }
 
+  // Bypasses request<T>() because /api/approvals/:id/issues returns a bare
+  // JSON array, not the { data: T } envelope request<T>() unwraps.
+  async getApprovalIssues(approvalId: string): Promise<PaperclipIssue[]> {
+    const url = `${this.baseUrl}/api/approvals/${approvalId}/issues`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+    });
+    if (res.status >= 400) {
+      throw new Error(`paperclip API error: ${res.status} ${url}`);
+    }
+    return (await res.json()) as PaperclipIssue[];
+  }
+
   async approveApproval(approvalId: string, decisionNote?: string): Promise<void> {
     await this.resolveApproval(approvalId, "approve", decisionNote);
   }

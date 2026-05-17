@@ -145,3 +145,49 @@ describe("PaperclipClient.rejectApproval", () => {
     await expect(client.rejectApproval("appr-002", "discord:bob")).resolves.toBeUndefined();
   });
 });
+
+describe("PaperclipClient.getApprovalIssues", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("GETs /api/approvals/:id/issues with Bearer auth and returns issue list", async () => {
+    const harness = createTestHarness({ manifest });
+    const fetchSpy = vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({
+      status: 200,
+      json: async () => ([
+        { id: "iss-1", identifier: "HIN-401", projectId: "proj-1", title: "Writer issue", status: "in_progress", updatedAt: "2026-05-16T00:00:00Z", createdAt: "2026-05-15T00:00:00Z" },
+      ]),
+      text: async () => "",
+    } as any);
+
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    const issues = await client.getApprovalIssues("appr-001");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toBe("http://paperclip:3100/api/approvals/appr-001/issues");
+    expect(opts?.method).toBe("GET");
+    expect((opts?.headers as Record<string,string>)["Authorization"]).toBe("Bearer tok");
+    expect(issues).toHaveLength(1);
+    expect(issues[0].identifier).toBe("HIN-401");
+  });
+
+  it("returns empty array when API returns empty list", async () => {
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({
+      status: 200,
+      json: async () => ([]),
+      text: async () => "",
+    } as any);
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    expect(await client.getApprovalIssues("appr-001")).toEqual([]);
+  });
+
+  it("throws on 5xx", async () => {
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({ status: 500, json: async () => ([]), text: async () => "boom" } as any);
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    await expect(client.getApprovalIssues("appr-001")).rejects.toThrow(/paperclip API error: 500/);
+  });
+});
