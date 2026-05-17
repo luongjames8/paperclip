@@ -89,6 +89,41 @@ export function renderPostsDoc(body: string, _identifier: string, approvalShort:
   return out;
 }
 
+export function renderSlidesDoc(body: string, _identifier: string, approvalShort: string): APIEmbed[] {
+  const obj = trySafeParseJSON(body) as { slug?: string; theme?: string; slides?: any[] } | null;
+  if (!obj || !Array.isArray(obj.slides) || obj.slides.length === 0) return [];
+
+  const slug = typeof obj.slug === "string" ? obj.slug : "";
+  const theme = typeof obj.theme === "string" ? obj.theme : "";
+  const total = obj.slides.length;
+  const out: APIEmbed[] = [];
+
+  obj.slides.forEach((s, i) => {
+    if (s === null || typeof s !== "object") return;
+    const slide = s as Record<string, any>;
+    const url = typeof slide.url === "string" ? slide.url : "";
+    const label = typeof slide.slide === "string" ? slide.slide : (typeof slide.title === "string" ? slide.title : "");
+    const baseTitle = `Slide ${i + 1}/${total}`;
+    const title = (label && label !== baseTitle ? `${baseTitle} — ${label}` : baseTitle).slice(0, TITLE_MAX);
+
+    // Footer: drop empty fields cleanly. Filter then join.
+    const footerParts = [slug, theme, `[preview:${approvalShort}]`].filter(Boolean);
+    const footerText = footerParts.join(" · ");
+
+    const embed: APIEmbed = {
+      title,
+      footer: { text: footerText },
+    };
+    if (url) {
+      embed.image = { url };
+      embed.url = url;
+    }
+    out.push(embed);
+  });
+
+  return out;
+}
+
 function embedCharCount(e: APIEmbed): number {
   return (
     (e.title?.length ?? 0) +
@@ -133,7 +168,7 @@ export function renderIssueDocs(bundle: IssueDocsBundle, _approvalShort: string)
           flat.push(...renderPostsDoc(doc.body, issue.identifier, _approvalShort));
           break;
         case "slides":
-          // Task 8: flat.push(...renderSlidesDoc(doc.body, issue.identifier, _approvalShort));
+          flat.push(...renderSlidesDoc(doc.body, issue.identifier, _approvalShort));
           break;
         default:
           // skip

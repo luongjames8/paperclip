@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { APIEmbed } from "discord.js";
-import { renderIssueDocs, chunkEmbedsForDiscord, renderPostsDoc, type IssueDocsBundle } from "../src/render/issue-docs.js";
+import { renderIssueDocs, chunkEmbedsForDiscord, renderPostsDoc, renderSlidesDoc, type IssueDocsBundle } from "../src/render/issue-docs.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -143,5 +143,67 @@ describe("renderPostsDoc", () => {
     expect(out[1].title).toContain("GBP");
     expect(out[1].image?.url).toBe("https://gbp.png");
     expect(out[1].url).toBe("https://gbp");
+  });
+});
+
+const slidesFixture = fs.readFileSync(path.join(__dirname, "fixtures/slides-doc.json"), "utf8");
+
+describe("renderSlidesDoc", () => {
+  it("returns one embed per slide with image.url set", () => {
+    const out = renderSlidesDoc(slidesFixture, "HIN-501", "abcd1234");
+    const parsed = JSON.parse(slidesFixture);
+    expect(out.length).toBe(parsed.slides.length);
+    expect(out[0].image?.url).toBe(parsed.slides[0].url);
+    expect(out[0].url).toBe(parsed.slides[0].url);
+  });
+
+  it("title contains 'Slide N/total' shape", () => {
+    const out = renderSlidesDoc(slidesFixture, "HIN-501", "abcd1234");
+    const total = JSON.parse(slidesFixture).slides.length;
+    expect(out[0].title).toMatch(new RegExp(`^Slide 1/${total}`));
+  });
+
+  it("footer ends with [preview:<short>]", () => {
+    const out = renderSlidesDoc(slidesFixture, "HIN-501", "abcd1234");
+    expect(out[0].footer?.text).toMatch(/\[preview:abcd1234\]$/);
+  });
+
+  it("footer omits empty theme cleanly (no '· ·' from absent field)", () => {
+    // The real fixture has no 'theme' field. Footer should not contain '· ·' or a double-separator
+    const out = renderSlidesDoc(slidesFixture, "HIN-501", "abcd1234");
+    const txt = out[0].footer!.text;
+    expect(txt).not.toMatch(/· ·/);
+    expect(txt).not.toMatch(/·\s*·/);  // no double separator from empty theme slot
+  });
+
+  it("returns [] for empty slides array", () => {
+    expect(renderSlidesDoc('{"slug":"x","slides":[]}', "HIN-1", "abcd1234")).toEqual([]);
+  });
+
+  it("returns [] on malformed JSON body", () => {
+    expect(renderSlidesDoc("not json", "HIN-1", "abcd1234")).toEqual([]);
+  });
+
+  it("handles markdown-fenced JSON bodies", () => {
+    const inner = JSON.stringify({ slug: "fenced-carousel", slides: [{ url: "https://example.com/s1.png" }] });
+    const fenced = "```json\n" + inner + "\n```";
+    const out = renderSlidesDoc(fenced, "HIN-1", "abcd1234");
+    expect(out).toHaveLength(1);
+    expect(out[0].image?.url).toBe("https://example.com/s1.png");
+  });
+
+  it("omits image/url when slide has no url field", () => {
+    const body = JSON.stringify({ slug: "no-url", slides: [{ index: 0 }] });
+    const out = renderSlidesDoc(body, "HIN-1", "abcd1234");
+    expect(out).toHaveLength(1);
+    expect(out[0].image).toBeUndefined();
+    expect(out[0].url).toBeUndefined();
+  });
+
+  it("skips non-object slide entries (defensive)", () => {
+    const body = JSON.stringify({ slug: "mixed", slides: [null, "string", { url: "https://ok.png" }] });
+    const out = renderSlidesDoc(body, "HIN-1", "abcd1234");
+    expect(out).toHaveLength(1);
+    expect(out[0].image?.url).toBe("https://ok.png");
   });
 });
