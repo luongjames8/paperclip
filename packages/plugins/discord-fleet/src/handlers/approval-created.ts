@@ -6,11 +6,13 @@ import type {
 } from "discord.js";
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import type { ChannelTypeRoute, DiscordFleetConfig } from "../config/schema.js";
-import { postEmbedToChannel, postToChannel } from "../discord/rest.js";
+import { postEmbedToChannel, postEmbedsToChannel, postToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
+import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
+import { PaperclipClient } from "../api/paperclip.js";
 
 interface ApprovalCreatedPayload {
   approvalId?: string;
@@ -71,32 +73,6 @@ function matchChannelByType(
     if (re.test(candidate)) return channelId;
   }
   return null;
-}
-
-async function postEmbedAndChunks(
-  ctx: PluginContext,
-  client: Client,
-  destinationId: string,
-  embed: APIEmbed,
-  components: Array<APIActionRowComponent<APIComponentInMessageActionRow>>,
-  proposedComment: string,
-): Promise<void> {
-  // postEmbedToChannel + postToChannel both call client.channels.fetch(id).send(),
-  // which works for both TextChannel and ThreadChannel — the destination can be
-  // either, and Discord.js .send() is unified across them.
-  await postEmbedToChannel(client, destinationId, embed, components);
-  if (!proposedComment) return;
-  const chunks = chunkBySection(stripSecrets(proposedComment));
-  for (const chunk of chunks) {
-    try {
-      await postToChannel(client, destinationId, truncate(chunk, THREAD_CHUNK_MAX));
-    } catch (err) {
-      ctx.logger.warn("approval-created: posting proposedComment chunk failed", {
-        destinationId,
-        error: String(err),
-      });
-    }
-  }
 }
 
 export async function handleApprovalCreated(
@@ -160,7 +136,53 @@ export async function handleApprovalCreated(
       companyConfig.channels.orphan;
   }
 
-  await postEmbedAndChunks(ctx, client, destinationChannelId, embed, [actionRow], proposedComment);
+  await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
+
+  let bundle: IssueDocsBundle = { issues: [] };
+  try {
+    const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
+    const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
+    const issues = await paperclip.getApprovalIssues(approvalId);
+    const withDocs = await Promise.all(
+      issues.map(async (i) => ({
+        issueId: i.id,
+        identifier: i.identifier,
+        documents: await paperclip.listIssueDocuments(i.id),
+      })),
+    );
+    bundle = { issues: withDocs };
+  } catch (err) {
+    ctx.logger.warn("approval-created: failed to fetch issue docs, falling back to proposedComment", {
+      approvalId,
+      error: String(err),
+    });
+  }
+
+  const groups = renderIssueDocs(bundle, approvalId.slice(0, 8));
+  if (groups.length > 0) {
+    for (const group of groups) {
+      try {
+        await postEmbedsToChannel(client, destinationChannelId, group);
+      } catch (err) {
+        ctx.logger.warn("approval-created: rich-group post failed", {
+          destinationChannelId,
+          error: String(err),
+        });
+      }
+    }
+  } else if (proposedComment) {
+    const chunks = chunkBySection(stripSecrets(proposedComment));
+    for (const chunk of chunks) {
+      try {
+        await postToChannel(client, destinationChannelId, truncate(chunk, THREAD_CHUNK_MAX));
+      } catch (err) {
+        ctx.logger.warn("approval-created: chunk post failed", {
+          destinationChannelId,
+          error: String(err),
+        });
+      }
+    }
+  }
 
   seen.push(approvalId);
   await ctx.state.set(seenKey, seen);
