@@ -1,5 +1,10 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 
+export interface PaperclipDocument {
+  key: string;
+  body: string;
+}
+
 export interface PaperclipIssue {
   id: string;
   identifier: string;
@@ -73,6 +78,20 @@ export class PaperclipClient {
     }
     const body = (await res.json()) as { data: PaperclipIssue };
     return body.data;
+  }
+
+  // Bypasses request<T>() because /api/issues/:id/documents returns a bare
+  // JSON array, not the { data: T } envelope request<T>() unwraps.
+  async listIssueDocuments(issueId: string): Promise<PaperclipDocument[]> {
+    const url = `${this.baseUrl}/api/issues/${issueId}/documents`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+    });
+    if (res.status >= 400) {
+      throw new Error(`paperclip API error: ${res.status} ${url}`);
+    }
+    return (await res.json()) as PaperclipDocument[];
   }
 
   // Bypasses request<T>() because /api/approvals/:id/issues returns a bare
