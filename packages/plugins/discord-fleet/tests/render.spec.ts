@@ -56,6 +56,15 @@ describe("render helpers", () => {
     expect(totalLen).toBeLessThanOrEqual(6000);
     expect(result.description?.endsWith("…")).toBe(true);
   });
+
+  it("enforceEmbedLimits: footer clamped to its per-field 2048 cap", () => {
+    const embed = {
+      title: "t",
+      footer: { text: "f".repeat(3000) },
+    };
+    const result = enforceEmbedLimits(embed);
+    expect(result.footer?.text?.length).toBeLessThanOrEqual(2048);
+  });
 });
 
 describe("buildApprovalActionRow", () => {

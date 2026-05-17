@@ -40,16 +40,36 @@ function safe(text: string, max = 1900): string {
   return stripSecrets(truncate(text, max));
 }
 
-const EMBED_TOTAL_MAX = 6000;
+export const EMBED_TOTAL_MAX = 6000;
 const DESC_MAX = 4096;
 const TITLE_MAX = 256;
+const FOOTER_MAX = 2048;
+
+export function embedCharCount(e: APIEmbed): number {
+  return (
+    (e.title?.length ?? 0) +
+    (e.description?.length ?? 0) +
+    (e.footer?.text?.length ?? 0) +
+    (e.author?.name?.length ?? 0) +
+    (e.fields ?? []).reduce(
+      (sum, f) => sum + (f.name?.length ?? 0) + (f.value?.length ?? 0),
+      0,
+    )
+  );
+}
 
 export function enforceEmbedLimits(embed: APIEmbed): APIEmbed {
   const title = embed.title ? embed.title.slice(0, TITLE_MAX) : embed.title;
   let description = embed.description;
+  // Clamp footer to its per-field limit first (Discord caps at 2048). Otherwise
+  // a writer-supplied long slug/theme could blow either the per-footer or the
+  // total embed limit and Discord would reject the entire message.
+  const footer = embed.footer
+    ? { ...embed.footer, text: embed.footer.text.slice(0, FOOTER_MAX) }
+    : embed.footer;
 
   const titleLen = title?.length ?? 0;
-  const footerLen = embed.footer?.text?.length ?? 0;
+  const footerLen = footer?.text?.length ?? 0;
   const authorLen = embed.author?.name?.length ?? 0;
   const fieldsLen = (embed.fields ?? []).reduce((sum, f) => sum + (f.name?.length ?? 0) + (f.value?.length ?? 0), 0);
   const descAllowed = EMBED_TOTAL_MAX - titleLen - footerLen - authorLen - fieldsLen;
@@ -59,7 +79,7 @@ export function enforceEmbedLimits(embed: APIEmbed): APIEmbed {
     description = cap > 0 ? description.slice(0, cap) + "…" : "…";
   }
 
-  return { ...embed, title, description };
+  return { ...embed, title, description, footer };
 }
 
 export function buildSeedIssueEmbed(opts: {

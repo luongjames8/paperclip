@@ -10,6 +10,18 @@ vi.mock("../src/discord/rest.js", () => ({
   postToChannel: vi.fn().mockResolvedValue("msg-id-2"),
   postEmbedToThread: vi.fn().mockResolvedValue("msg-id-3"),
   postEmbedToChannel: vi.fn().mockResolvedValue("msg-id-4"),
+  postEmbedsToChannel: vi.fn().mockResolvedValue("msg-id-5"),
+}));
+
+vi.mock("../src/render/issue-docs.js", () => ({
+  renderIssueDocs: vi.fn().mockReturnValue([]),
+}));
+
+vi.mock("../src/api/paperclip.js", () => ({
+  PaperclipClient: vi.fn().mockImplementation(() => ({
+    getApprovalIssues: vi.fn().mockResolvedValue([]),
+    listIssueDocuments: vi.fn().mockResolvedValue([]),
+  })),
 }));
 
 vi.mock("../src/render/embeds.js", () => ({
@@ -399,5 +411,169 @@ describe("handleApprovalCreated — approvalType field-read", () => {
     expect(buildApprovalEmbed).toHaveBeenCalledWith(
       expect.objectContaining({ approvalType: "unknown" }),
     );
+  });
+});
+
+// ─── SEEN_APPROVALS_KEY dedup guard ──────────────────────────────────────────
+
+describe("handleApprovalCreated — SEEN_APPROVALS_KEY dedup guard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("dedup: second call with same approvalId is a no-op (no posts)", async () => {
+    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+    const event = makeApprovalCreatedEvent();
+
+    await handleApprovalCreated(harness.ctx, event, client, config);
+    await handleApprovalCreated(harness.ctx, event, client, config);
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);  // first call posted; second was no-op
+
+    const seen = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
+    expect(seen).toEqual(["appr-001"]);
+  });
+
+  it("dedup survives PENDING_APPROVALS_KEY wipe (digest semantics)", async () => {
+    const { handleApprovalCreated, SEEN_APPROVALS_KEY, PENDING_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+    const event = makeApprovalCreatedEvent();
+
+    await handleApprovalCreated(harness.ctx, event, client, config);
+
+    // Simulate digest wiping PENDING (jobs/digest.ts:100):
+    await harness.ctx.state.set({ scopeKind: "company", scopeId: "c1", stateKey: PENDING_APPROVALS_KEY }, []);
+
+    await handleApprovalCreated(harness.ctx, event, client, config);
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);  // still deduped via SEEN
+  });
+
+  it("PENDING_APPROVALS_KEY is also populated (digest job still sees the approval)", async () => {
+    const { handleApprovalCreated, PENDING_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+
+    const harness = createTestHarness({ manifest });
+    await handleApprovalCreated(harness.ctx, makeApprovalCreatedEvent(), makeMockClient(), makeConfig());
+
+    const pending = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: PENDING_APPROVALS_KEY });
+    expect(pending).toEqual(["appr-001"]);
+  });
+});
+
+// ─── Rich renderer integration ───────────────────────────────────────────────
+
+describe("handleApprovalCreated — rich renderer integration", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("rich path: when renderer returns groups, posts header then one message per group", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+
+    (renderIssueDocs as any).mockReturnValue([
+      [{ title: "a" }, { title: "b" }],   // group 1
+      [{ title: "c" }],                    // group 2
+    ]);
+
+    const harness = createTestHarness({ manifest });
+    await handleApprovalCreated(harness.ctx, makeApprovalCreatedEvent(), makeMockClient(), makeConfig());
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);      // header
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);     // two body groups
+    expect(postToChannel).not.toHaveBeenCalled();             // no proposedComment fallback
+  });
+
+  it("fallback path: when renderer returns [], chunk-posts proposedComment as today", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ proposedComment: "## section\nbody text here" });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
+
+  it("fetch failure: still posts header, falls back to proposedComment, marks SEEN", async () => {
+    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+
+    // Force the client to throw on getApprovalIssues
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalIssues: vi.fn().mockRejectedValue(new Error("boom")),
+      listIssueDocuments: vi.fn(),
+    }));
+    (renderIssueDocs as any).mockReturnValue([]);  // matches empty-bundle behavior
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ proposedComment: "fallback text" });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+    expect(postToChannel).toHaveBeenCalled();
+    const seen = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
+    expect(seen).toEqual(["appr-001"]);
+  });
+
+  it("rich-post failure: when all rich groups fail, falls back to proposedComment", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+
+    // Renderer returns groups (so rich path runs), but every postEmbedsToChannel call fails.
+    (renderIssueDocs as any).mockReturnValue([
+      [{ title: "a" }],
+      [{ title: "b" }],
+    ]);
+    (postEmbedsToChannel as any).mockRejectedValue(new Error("discord 400: invalid image url"));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ proposedComment: "## section\nfallback body" });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);          // header still posted
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);         // both groups attempted
+    expect(postToChannel).toHaveBeenCalled();                     // proposedComment fallback fired
+  });
+
+  it("partial rich-post success: at least one group posted, NO proposedComment fallback", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+
+    (renderIssueDocs as any).mockReturnValue([
+      [{ title: "a" }],
+      [{ title: "b" }],
+    ]);
+    // First call succeeds, second fails.
+    (postEmbedsToChannel as any)
+      .mockResolvedValueOnce("msg-1")
+      .mockRejectedValueOnce(new Error("discord 5xx transient"));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ proposedComment: "would-be fallback" });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);
+    expect(postToChannel).not.toHaveBeenCalled();                 // partial success → no fallback
   });
 });

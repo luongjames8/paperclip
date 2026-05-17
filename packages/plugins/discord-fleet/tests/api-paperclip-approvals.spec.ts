@@ -145,3 +145,98 @@ describe("PaperclipClient.rejectApproval", () => {
     await expect(client.rejectApproval("appr-002", "discord:bob")).resolves.toBeUndefined();
   });
 });
+
+describe("PaperclipClient.getApprovalIssues", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("GETs /api/approvals/:id/issues with Bearer auth and returns issue list", async () => {
+    const harness = createTestHarness({ manifest });
+    const fetchSpy = vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({
+      status: 200,
+      json: async () => ([
+        { id: "iss-1", identifier: "HIN-401", projectId: "proj-1", title: "Writer issue", status: "in_progress", updatedAt: "2026-05-16T00:00:00Z", createdAt: "2026-05-15T00:00:00Z" },
+      ]),
+      text: async () => "",
+    } as any);
+
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    const issues = await client.getApprovalIssues("appr-001");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toBe("http://paperclip:3100/api/approvals/appr-001/issues");
+    expect(opts?.method).toBe("GET");
+    expect((opts?.headers as Record<string,string>)["Authorization"]).toBe("Bearer tok");
+    expect(issues).toHaveLength(1);
+    expect(issues[0].identifier).toBe("HIN-401");
+  });
+
+  it("returns empty array when API returns empty list", async () => {
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({
+      status: 200,
+      json: async () => ([]),
+      text: async () => "",
+    } as any);
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    expect(await client.getApprovalIssues("appr-001")).toEqual([]);
+  });
+
+  it("throws on 5xx", async () => {
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({ status: 500, json: async () => ([]), text: async () => "boom" } as any);
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    await expect(client.getApprovalIssues("appr-001")).rejects.toThrow(/paperclip API error: 500/);
+  });
+});
+
+describe("PaperclipClient.listIssueDocuments", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("GETs /api/issues/:id/documents and returns doc list", async () => {
+    const harness = createTestHarness({ manifest });
+    const fetchSpy = vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({
+      status: 200,
+      json: async () => ([
+        { key: "posts", body: '{"weekOf":"2026-05-11","posts":[]}' },
+        { key: "draft", body: "some draft text" },
+      ]),
+      text: async () => "",
+    } as any);
+
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    const docs = await client.listIssueDocuments("iss-1");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://paperclip:3100/api/issues/iss-1/documents");
+    expect(docs).toHaveLength(2);
+    expect(docs[0].key).toBe("posts");
+    expect(docs[0].body).toBe('{"weekOf":"2026-05-11","posts":[]}');
+  });
+
+  it("returns empty array on empty response", async () => {
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({
+      status: 200,
+      json: async () => ([]),
+      text: async () => "",
+    } as any);
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    expect(await client.listIssueDocuments("iss-1")).toEqual([]);
+  });
+
+  it("throws on 5xx", async () => {
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({
+      status: 500,
+      json: async () => ([]),
+      text: async () => "",
+    } as any);
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    await expect(client.listIssueDocuments("iss-1")).rejects.toThrow(/paperclip API error: 500/);
+  });
+});

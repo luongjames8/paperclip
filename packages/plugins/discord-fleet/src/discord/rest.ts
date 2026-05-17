@@ -26,17 +26,26 @@ export async function postToChannel(client: Client, channelId: string, text: str
   });
 }
 
-export async function postEmbedToChannel(
+export async function postEmbedsToChannel(
+  client: Client,
+  channelId: string,
+  embeds: APIEmbed[],
+  components?: Array<APIActionRowComponent<APIComponentInMessageActionRow>>,
+): Promise<string> {
+  return rateLimit.enqueue(channelId, async () => {
+    const channel = await fetchTextChannel(client, channelId);
+    const msg = await channel.send({ embeds, components });
+    return msg.id;
+  });
+}
+
+export function postEmbedToChannel(
   client: Client,
   channelId: string,
   embed: APIEmbed,
   components?: Array<APIActionRowComponent<APIComponentInMessageActionRow>>,
 ): Promise<string> {
-  return rateLimit.enqueue(channelId, async () => {
-    const channel = await fetchTextChannel(client, channelId);
-    const msg = await channel.send({ embeds: [embed], components });
-    return msg.id;
-  });
+  return postEmbedsToChannel(client, channelId, [embed], components);
 }
 
 export async function postToThread(client: Client, threadId: string, text: string): Promise<string> {
