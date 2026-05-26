@@ -95,6 +95,33 @@ export async function handleApprovalButton(
   await removeFromPending(ctx, company.companyId, parsed.approvalId);
 
   await renderResolved(interaction, parsed.action);
+
+  // Reject is terminal in paperclip — no auto-resubmission, no auto-respawn
+  // of upstream Creative/Writer issues. Operators have repeatedly assumed
+  // reject means "send back for fixes" (it does not) and burned hours
+  // manually reconstructing the chain. Surface this explicitly post-reject
+  // so the expectation gap closes at the moment of action.
+  if (parsed.action === "reject") {
+    try {
+      await interaction.followUp({
+        content:
+          "⚠️ Rejected — **this approval is terminal**. No auto-resubmission, " +
+          "no upstream work-issue is respawned. If you wanted a redo, comment " +
+          "the change you need and ask the relevant agent to spawn a new work " +
+          "issue (or wait for the next batch). Reject = \"delete this entirely,\" " +
+          "not \"send back for fixes.\"",
+        ephemeral: false,
+      });
+    } catch (err) {
+      // Best-effort warning. If Discord rate-limits or the follow-up window
+      // expires (15 min after deferUpdate), the reject still took effect —
+      // we just couldn't surface the warning. Log and move on.
+      ctx.logger.warn("approval-button: reject-warning followUp failed", {
+        approvalId: parsed.approvalId,
+        err: String(err),
+      });
+    }
+  }
 }
 
 function resolveUserMapping(company: CompanyConfig, discordUserId: string): UserMapping | undefined {
