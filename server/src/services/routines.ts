@@ -1427,6 +1427,37 @@ export function routineService(
       }
     }
 
+    if (run.status === "issue_created" && run.linkedIssueId) {
+      try {
+        const spawned = await issueSvc.getById(run.linkedIssueId);
+        if (spawned) {
+          const actorId =
+            input.source === "schedule" ? "routine-scheduler" :
+            input.source === "webhook" ? "routine-webhook" :
+            "routine-api";
+          await logActivity(db, {
+            companyId: input.routine.companyId,
+            actorType: "system",
+            actorId,
+            action: "issue.created",
+            entityType: "issue",
+            entityId: spawned.id,
+            details: {
+              identifier: spawned.identifier ?? null,
+              title: spawned.title,
+              projectId: spawned.projectId ?? null,
+              parentId: spawned.parentId ?? null,
+              originKind: "routine_execution",
+              originId: input.routine.id,
+              originRunId: run.id,
+            },
+          });
+        }
+      } catch (err) {
+        logger.warn({ err, routineId: input.routine.id, runId: run.id }, "failed to log routine-spawned issue.created");
+      }
+    }
+
     const telemetryClient = getTelemetryClient();
     if (telemetryClient) {
       trackRoutineRun(telemetryClient, {

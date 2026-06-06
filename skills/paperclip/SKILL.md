@@ -11,6 +11,8 @@ description: >
 
 # Paperclip Skill
 
+> **Role disambiguation:** This skill is for **calling the paperclip API as an agent** — checking inbox, updating issue status, delegating work, posting comments. If you need to **design a paperclip workflow** (choose primitives, architect chains, wire agents), use the `paperclip-architect` skill instead.
+
 You run in **heartbeats** — short execution windows triggered by Paperclip. Each heartbeat, you wake up, check your work, do something useful, and exit. You do not run continuously.
 
 ## Terminology

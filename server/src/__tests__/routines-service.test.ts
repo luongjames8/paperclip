@@ -1598,4 +1598,42 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(runsAfterResume).toHaveLength(2);
     expect(runsAfterResume.some((run) => run.status === "issue_created")).toBe(true);
   });
+
+  it("emits issue.created logActivity when routine spawns an execution issue", async () => {
+    const { companyId, routine, svc } = await seedFixture();
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+    expect(run.status).toBe("issue_created");
+    expect(run.linkedIssueId).toBeTruthy();
+
+    const logged = await db
+      .select({
+        action: activityLog.action,
+        actorType: activityLog.actorType,
+        actorId: activityLog.actorId,
+        entityType: activityLog.entityType,
+        entityId: activityLog.entityId,
+        details: activityLog.details,
+      })
+      .from(activityLog)
+      .where(eq(activityLog.action, "issue.created"))
+      .then((rows) => rows[0] ?? null);
+
+    expect(logged).not.toBeNull();
+    expect(logged?.actorType).toBe("system");
+    expect(logged?.actorId).toBe("routine-api");
+    expect(logged?.entityType).toBe("issue");
+    expect(logged?.entityId).toBe(run.linkedIssueId);
+    const storedIssue = await db
+      .select({ identifier: issues.identifier })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+    expect(logged?.details).toMatchObject({
+      identifier: storedIssue?.identifier ?? null,
+      originKind: "routine_execution",
+      originId: routine.id,
+      originRunId: run.id,
+    });
+  });
 });
