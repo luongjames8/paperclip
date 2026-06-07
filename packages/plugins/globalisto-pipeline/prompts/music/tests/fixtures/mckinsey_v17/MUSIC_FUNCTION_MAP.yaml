@@ -1,0 +1,25 @@
+MUSIC_FUNCTION_MAP:
+  topic: "mckinsey_opioid_v17"
+  total_sections: 14
+  functions:
+    S1: ORIENT
+    S2: ORIENT
+    S3: EXPLAIN
+    S4: INVESTIGATE
+    S5: INVESTIGATE
+    S6: EXPLAIN
+    S7: INVESTIGATE
+    S8: INVESTIGATE
+    S9: INVESTIGATE
+    S10: EXPLAIN
+    S11: CONSEQUENCE
+    S12: CONSEQUENCE
+    S13: CONSEQUENCE
+    S14: UNRESOLVED_CLOSE
+  function_distribution:
+    ORIENT: 2
+    EXPLAIN: 3
+    INVESTIGATE: 5
+    TRANSITION: 0
+    CONSEQUENCE: 3
+    UNRESOLVED_CLOSE: 1

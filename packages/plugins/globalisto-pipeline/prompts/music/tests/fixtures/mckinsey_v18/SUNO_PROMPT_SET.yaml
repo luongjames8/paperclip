@@ -1,0 +1,60 @@
+SUNO_PROMPT_SET:
+  topic: "McKinsey Opioid Crisis"
+  total_production_sections: 4
+  production_sections:
+    - section_id: 1
+      section_name: "HOOK"
+      lane_id: J3_TRAPANESE
+      function: ORIENT
+      emotion_token: "watchful"
+      target_duration: "30 seconds"
+      style: |
+        Trapanese underscore, establishing, watchful and shocking tone, slow to mid-tempo 65-80 BPM, minimal trap rhythm with precise grid timing, sharp percussive articulation, plucked Japanese motifs over deep bass and sparse synth layers, restrained structure. Total duration: 30 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Hook] Immediate impact, strong opening statement, 0-10s
+        [Sustain] Maintain energy, develop motif, 10-20s
+        [Transition] Prepare for next section, 20-30s
+      exclusions: "lush orchestral strings, sustained Chinese string phrasing, bright pop hooks, jazz harmony, funk grooves, aggressive EDM energy."
+
+    - section_id: 2
+      section_name: "BUILD"
+      lane_id: BACKBONE_ANALYTICAL_ELECTRONIC
+      function: INVESTIGATE
+      emotion_token: "uneasy"
+      target_duration: "180 seconds"
+      style: |
+        Minimal electronic tension score, probing, uneasy tone with grief transitioning to revelation, mid-tempo 70-90 BPM, steady clock-like pulse, clean minimal electronic texture, neutral synth tones with limited harmonic movement, precise articulation, restrained dynamics, modern documentary mix optimized for clarity and repetition. Total duration: 180 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Establish] Set foundation, introduce elements, 0-45s
+        [Accumulate] Add layers, increase density, 45-90s
+        [Intensify] Raise tension, approach peak, 90-135s
+        [Prepare] Set up payoff, 135-180s
+      exclusions: "emotional swells, cinematic scoring, trap hi-hats, distorted bass, EDM drops, melodic hooks, lush pads, organic instruments, lo-fi noise or saturation."
+
+    - section_id: 3
+      section_name: "ESCALATE"
+      lane_id: K3_KOREAN_ELECTRONIC
+      function: INVESTIGATE
+      emotion_token: "probing"
+      target_duration: "285 seconds"
+      style: |
+        Korean electronic tension score, probing, probing and urgent tone escalating from outrage to absurdity, mid-tempo 100-120 BPM, driving electronic beat with K-pop influenced production polish, clean synth textures, tight sidechain compression, minimal melodic hooks, rhythm-first structure, bright modern mix without excessive drops or builds. Total duration: 285 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Rise] Increase intensity, introduce urgency, 0-95s
+        [Push] Drive momentum forward, stakes escalate, 95-190s
+        [Peak] Reach high point, maximum tension, 190-285s
+      exclusions: "ballad pacing, orchestral elements, traditional instruments, lo-fi aesthetics, jazz harmony, ambient drones, aggressive EDM drops, rock guitars."
+
+    - section_id: 4
+      section_name: "LAND"
+      lane_id: C6_MODERN_CINEMATIC_CHINESE
+      function: UNRESOLVED_CLOSE
+      emotion_token: "lingering"
+      target_duration: "105 seconds"
+      style: |
+        Modern cinematic Chinese underscore, unresolved ending, lingering tone with dark irony transitioning to urgency, slow to mid-tempo 65-85 BPM, sparse rhythmic pulse, restrained articulation, hybrid of traditional Chinese motifs with minimal cinematic synth pads and low percussion, controlled dynamics and clean modern mix. Total duration: 105 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Arrive] Establish consequence and weight, 0-52s
+        [Settle] Let meaning land, 52-79s
+        [Close] Final resolution, 79-105s
+      exclusions: "busy pop arrangements, strong hip-hop swing, EDM drops, folk strumming, jazz harmony, overly romantic classical phrasing."

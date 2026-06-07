@@ -1,0 +1,308 @@
+# Discovery Module Configuration Schema
+# Per-project settings that control discovery behavior
+
+# Example usage in consumer project:
+# ```yaml
+# # globalisto/config/discovery_config.yaml
+# discovery:
+#   mode: topic_first
+#   time_window_months: 12
+#   audience_context: "Western observers and Japan enthusiasts"
+#   min_sincere_items: 3
+# ```
+
+schema:
+  discovery:
+    type: object
+    properties:
+
+      mode:
+        type: string
+        enum: [topic_first, belief_first]
+        required: true
+        description: |
+          Discovery strategy.
+          - topic_first: Full parallel discovery (top-down + bottom-up + fusion)
+          - belief_first: Validate provided candidate_belief only (skip generation)
+
+      time_window_months:
+        type: integer
+        default: 12
+        description: |
+          How far back to look for discourse.
+          12 = last year (default)
+          6 = stricter recency requirement
+
+      hot_threshold_months:
+        type: integer
+        default: 6
+        description: |
+          Threshold for marking discourse as HOT.
+          Items newer than this are marked HOT.
+
+      audience_context:
+        type: string
+        description: |
+          Who holds these beliefs?
+          Used in top-down generation.
+          Example: "Western observers", "Japan enthusiasts", "investors"
+
+      min_sincere_items:
+        type: integer
+        default: 3
+        description: |
+          Minimum SINCERE discourse items for HIGH bonafide score.
+          Below this with 2+ sources = MEDIUM
+          Zero SINCERE = LOW (rejected)
+
+      min_sources:
+        type: integer
+        default: 2
+        description: |
+          Minimum distinct sources for HIGH bonafide score.
+          Single source with 3+ items = MEDIUM only
+
+      discourse_sources:
+        type: array
+        items:
+          type: string
+        default:
+          - reddit
+          - forums
+          - youtube_comments
+          - articles
+        description: |
+          Which discourse sources to scan.
+          Order = priority.
+
+      bypass_discovery:
+        type: boolean
+        default: false
+        description: |
+          Skip discovery entirely and use fixed belief/outline.
+          Useful for scaffolds or iteration.
+
+      max_candidates:
+        type: integer
+        default: 10
+        description: |
+          Maximum candidate beliefs to validate.
+          Prevents over-exploration.
+
+      # Concurrency limits - prevents memory exhaustion
+      concurrency:
+        type: object
+        properties:
+          max_parallel_searches:
+            type: integer
+            default: 3
+            description: |
+              Max WebSearch queries to run simultaneously.
+              Batches of this size, wait for completion, then next batch.
+          max_parallel_fetches:
+            type: integer
+            default: 2
+            description: |
+              Max web_fetch calls to run simultaneously.
+              Web fetches are heavier than searches.
+          max_parallel_candidates:
+            type: integer
+            default: 2
+            description: |
+              Max candidate beliefs to validate in parallel.
+              Each candidate spawns multiple sub-operations.
+          max_parallel_items:
+            type: integer
+            default: 3
+            description: |
+              Max discourse items to classify in parallel (step 4a).
+              Prevents memory spikes during validation.
+
+---
+
+# Bonafide scoring thresholds (universal)
+
+bonafide_thresholds:
+  high:
+    min_sincere: 3
+    min_sources: 2
+  medium:
+    min_sincere: 1
+    # OR single source with 3+ items
+  low:
+    sincere: 0
+    # All strawman/neutral = rejected
+
+---
+
+# Interest scoring thresholds (universal)
+
+interest_thresholds:
+  high:
+    recency_months: 6
+    active_threads: true
+    recent_content: true
+  medium:
+    recency_months: 12
+    some_activity: true
+  low:
+    recency_months: 12+
+    dead_posts: true
+
+---
+
+# Decision matrix (universal)
+
+decision_matrix:
+  # GO conditions
+  go:
+    - bonafide: [high, medium]
+      interest: [high, medium]
+  # PRIORITY condition
+  priority:
+    - bonafide: high
+      recency: HOT
+      interest: high
+  # NO-GO conditions
+  no_go:
+    - bonafide: low
+      reason: "stale strawman - no one holds this"
+    - interest: low
+      reason: "nobody cares about this"
+
+---
+
+# Project-specific configurations
+
+projects:
+
+  globalisto:
+    mode: topic_first
+    time_window_months: 12
+    hot_threshold_months: 6
+    audience_context: "Western observers, Japan enthusiasts, business analysts"
+    min_sincere_items: 3
+    min_sources: 2
+    discourse_sources:
+      - reddit
+      - youtube_comments
+      - articles
+      - forums
+    max_candidates: 10
+    concurrency:
+      max_parallel_searches: 3
+      max_parallel_fetches: 2
+      max_parallel_candidates: 2
+      max_parallel_items: 3
+    notes: |
+      Japan-focused video content.
+      Audience often holds misconceptions about Japan.
+      Look for beliefs that are "common knowledge" in the West but wrong.
+
+  investment-tube:
+    mode: topic_first
+    time_window_months: 12
+    hot_threshold_months: 3  # Faster cycle for finance
+    audience_context: "Retail investors, finance enthusiasts"
+    min_sincere_items: 3
+    min_sources: 2
+    discourse_sources:
+      - reddit
+      - forums
+      - articles
+      - youtube_comments
+    max_candidates: 10
+    concurrency:
+      max_parallel_searches: 3
+      max_parallel_fetches: 2
+      max_parallel_candidates: 2
+      max_parallel_items: 3
+    notes: |
+      Financial video content.
+      Beliefs about companies, markets, investment strategies.
+      Shorter hot threshold due to fast-moving markets.
+
+  clearframe:
+    mode: belief_first
+    bypass_discovery: true
+    notes: |
+      Web content with fixed scaffolds.
+      Discovery typically not needed - beliefs come from topic planning.
+      Use belief_first for validation when uncertain.
+
+  surplus-kb:
+    mode: belief_first
+    bypass_discovery: true
+    notes: |
+      Knowledge base content.
+      Fixed scaffolds with predefined slots.
+      Discovery not typically used.
+
+  hinomaru:
+    mode: topic_first
+    time_window_months: 18  # Longer window for travel
+    hot_threshold_months: 12
+    audience_context: "Western travelers to Japan"
+    min_sincere_items: 2  # Lower bar for travel content
+    min_sources: 2
+    discourse_sources:
+      - reddit
+      - forums
+      - articles
+    max_candidates: 8
+    concurrency:
+      max_parallel_searches: 3
+      max_parallel_fetches: 2
+      max_parallel_candidates: 2
+      max_parallel_items: 3
+    notes: |
+      Travel content.
+      Beliefs about traveling in Japan.
+      Longer relevance window for travel topics.
+
+---
+
+# Discourse classification guide
+
+classification_guide:
+  SINCERE:
+    description: "Person stating or defending the belief genuinely"
+    signals:
+      - "I think X because..."
+      - "X is actually true, here's why..."
+      - "People don't understand that X..."
+      - First-person statements of belief
+      - Defending when challenged
+  STRAWMAN:
+    description: "Person attacking a caricature no one holds"
+    signals:
+      - "People who believe X are idiots"
+      - "The old thinking was X, but now we know..."
+      - "Nobody seriously believes X anymore"
+      - Mocking tone
+      - No one in thread defending X
+  NEUTRAL:
+    description: "Descriptive, not taking position"
+    signals:
+      - "Some people believe X"
+      - "The debate is between X and Y"
+      - Academic/analytical framing
+      - Journalism without opinion
+
+---
+
+# Content class determination
+
+content_class_rules:
+  detonator:
+    description: "Belief is FALSE and defensible"
+    criteria:
+      - People sincerely hold the belief
+      - Evidence contradicts it
+      - The contradiction is surprising
+  mirror:
+    description: "Belief is TRUE but misunderstood/underappreciated"
+    criteria:
+      - Belief is actually correct
+      - People don't understand why
+      - Deeper mechanism is interesting

@@ -1,0 +1,303 @@
+# Engagement Strategy Configuration Schema
+# Shared reference for all Step 3B sub-steps
+
+version: "1.0"
+
+# =============================================================================
+# CONTENT CLASSES
+# =============================================================================
+
+content_classes:
+  open_loops:
+    - investigation  # "Why did X happen?"
+    - explainer      # "How does X work?"
+    - essay          # "What does X mean?"
+
+  emotional_arc:
+    - profile        # Person's story
+    - documentary    # Event/phenomenon story
+    - story          # Narrative-first content
+
+  value_density:
+    - tutorial       # "How to do X"
+    - analysis       # "X vs Y" or "State of X"
+    - guide          # "Complete guide to X"
+    - listicle       # "N things about X"
+
+  identity_tribe:
+    - commentary     # "My take on X"
+    - opinion        # "Why X is wrong/right"
+    - lifestyle      # "A day in the life of X"
+
+# =============================================================================
+# RETENTION TARGETS
+# =============================================================================
+
+targets:
+  retention_30s: 0.70   # 70% at 30 seconds
+  retention_60s: 0.60   # 60% at 60 seconds
+  apv: 0.50             # 50% average percentage viewed
+
+# =============================================================================
+# HOOK ZONE THRESHOLDS
+# =============================================================================
+
+hook_zone:
+  strength_thresholds:
+    HIGH:
+      stakes: present
+      curiosity_gap: present
+    MEDIUM:
+      stakes: present
+      curiosity_gap: absent
+    MEDIUM_ALT:
+      stakes: absent
+      curiosity_gap: present
+    LOW:
+      stakes: absent
+      curiosity_gap: absent
+
+# =============================================================================
+# TEASE INTERVALS
+# =============================================================================
+
+tease_points:
+  min_interval_seconds: 90
+  max_interval_seconds: 180
+  default_count: 3  # for ~10 min video
+
+# =============================================================================
+# PATTERN INTERRUPT ZONES
+# =============================================================================
+
+pattern_interrupts:
+  high_risk_zones:
+    - id: post_hook
+      location: "beat 2-3"
+      risk: "viewer deciding to commit"
+    - id: mid_video
+      location: "40-60% mark"
+      risk: "attention fatigue"
+    - id: pre_climax
+      location: "beat before resolution"
+      risk: "early exit - 'I get it'"
+
+  types:
+    - pacing_shift
+    - format_shift
+    - tone_shift
+    - visual_shift
+
+# =============================================================================
+# END BEHAVIOR STRATEGIES
+# =============================================================================
+
+end_behavior:
+  detonator:
+    applies_to: [investigation, explainer, essay, profile, documentary, story]
+    main_loop: "closes dramatically"
+    forbidden_phrases:
+      - "in conclusion"
+      - "to summarize"
+      - "so there you have it"
+      - "thanks for watching"
+
+  mirror:
+    applies_to: [commentary, opinion]
+    main_loop: "stays open"
+    forbidden_phrases:
+      - "the answer is"
+      - "you should"
+      - "here's what to do"
+
+  soft_landing:
+    applies_to: [tutorial, guide, analysis, listicle]
+    main_loop: "closes with resolution"
+    permitted_phrases:
+      - "to recap"
+      - "key takeaways"
+
+# =============================================================================
+# VALIDATION MODES
+# =============================================================================
+
+modes:
+  advisory:
+    blocking: false
+    verdict_on_issues: "REVIEW"
+  strict:
+    blocking: true
+    verdict_on_issues: "OVERRIDE_REQUIRED"
+
+# =============================================================================
+# GLOSSARY
+# =============================================================================
+
+glossary:
+  open_loop: "A question raised but not yet answered, creating psychological tension"
+  curiosity_gap: "The space between what viewer knows and what they want to know"
+  stakes: "What's at risk - makes the topic matter to the viewer"
+  tease: "Forward reference promising upcoming content"
+  pattern_interrupt: "Deliberate change in pacing/format to re-engage attention"
+  hook_zone: "First 30 seconds / 2 beats where viewer decides to stay"
+  detonator: "End strategy where main tension resolves dramatically"
+  mirror: "End strategy where main question reflects back to viewer"
+  soft_landing: "End strategy with clear resolution and optional recap"
+
+# =============================================================================
+# EXAMPLES
+# =============================================================================
+
+examples:
+
+  # Example 1: Investigation with open_loops engine
+  investigation_example:
+    content_class: investigation
+    title: "Why Tech CEOs All Use the Same Layoff Language"
+    beat_1: "262,000 tech workers laid off in 2023. But here's what's strange..."
+    beat_2: "Every single CEO used almost identical phrasing. Coincidence?"
+
+    engine_selection:
+      primary: open_loops
+      supporting: [identity_tribe]
+      rationale: "Investigation = open_loops. Audience positioning adds tribal pull."
+
+    hook_zone:
+      strength: HIGH
+      stakes:
+        present: true
+        type: collective
+        evidence: "262,000 tech workers laid off"
+      curiosity_gap:
+        present: true
+        type: mystery
+        evidence: "What's strange... Coincidence?"
+
+    loops:
+      main:
+        question: "Why do all tech CEOs use the same layoff language?"
+        opens_at: BEAT_01
+        closes_at: BEAT_07
+      supporting:
+        - id: L_SUP_01
+          question: "Who benefits from coordinated messaging?"
+          opens_at: BEAT_02
+          closes_at: BEAT_05
+
+    end_behavior:
+      strategy: detonator
+      main_loop_closes_at: BEAT_07
+      forbidden_phrases: ["in conclusion", "to summarize"]
+
+  # Example 2: Tutorial with value_density engine
+  tutorial_example:
+    content_class: tutorial
+    title: "5 Ways to Improve Your Code Reviews"
+    beat_1: "Your code reviews are slowing down the team. Here's how to fix it."
+    beat_2: "First, always review in small batches. Studies show reviews over 400 lines..."
+
+    engine_selection:
+      primary: value_density
+      supporting: []
+      rationale: "Tutorial = value_density. High insight-per-minute expected."
+
+    hook_zone:
+      strength: MEDIUM
+      stakes:
+        present: true
+        type: professional
+        evidence: "slowing down the team"
+      curiosity_gap:
+        present: false
+
+    value_density:
+      target_insights_per_minute: 3.0
+      actual_insights_per_minute: 2.8
+      signposting: numbered_list
+
+    end_behavior:
+      strategy: soft_landing
+      main_loop_closes_at: BEAT_06
+      permitted_phrases: ["to recap", "key takeaways"]
+
+  # Example 3: Commentary with identity_tribe engine
+  commentary_example:
+    content_class: commentary
+    title: "Why 'Hustle Culture' Is a Scam"
+    beat_1: "If you've ever been told you just need to work harder..."
+    beat_2: "While everyone celebrates the grind, the data tells a different story."
+
+    engine_selection:
+      primary: identity_tribe
+      supporting: [open_loops]
+      rationale: "Commentary = identity_tribe. Audience validation is primary driver."
+
+    hook_zone:
+      strength: HIGH
+      stakes:
+        present: true
+        type: identity
+        evidence: "been told you just need to work harder"
+      curiosity_gap:
+        present: true
+        type: contradiction
+        evidence: "data tells a different story"
+
+    identity_tribe:
+      target_identity: "Thoughtful professionals frustrated by hustle culture"
+      positioning_statement: "For those who've been told they're not working hard enough—you were right to push back."
+      in_group_signals:
+        - beat: BEAT_01
+          signal: "Being told to work harder"
+          type: shared_experience
+      out_group_contrast:
+        - beat: BEAT_02
+          contrast: "Hustle culture celebration"
+          target: behavior
+
+    end_behavior:
+      strategy: mirror
+      main_loop_closes_at: stays_open
+      forbidden_phrases: ["the answer is", "you should"]
+
+  # Example 4: Profile with emotional_arc engine
+  profile_example:
+    content_class: profile
+    title: "Sarah Chen: 12 Years at Google, Then One Email Changed Everything"
+    beat_1: "Sarah Chen was a senior engineer at Google for 12 years."
+    beat_2: "Then one email changed everything."
+
+    engine_selection:
+      primary: emotional_arc
+      supporting: []
+      rationale: "Profile = emotional_arc. Character journey drives engagement."
+
+    hook_zone:
+      strength: HIGH
+      stakes:
+        present: true
+        type: survival
+        evidence: "12 years at Google" (investment at risk)
+      curiosity_gap:
+        present: true
+        type: cliffhanger
+        evidence: "one email changed everything"
+
+    emotional_arc:
+      protagonist: "Sarah Chen"
+      protagonist_type: person
+      stakes: "Career, identity, financial security"
+      turning_points:
+        - beat: BEAT_02
+          shift: "stability → shock"
+          trigger: "Layoff email"
+        - beat: BEAT_05
+          shift: "despair → determination"
+          trigger: "Realizes opportunity"
+      climax_beat: BEAT_07
+      resolution_type: triumph
+
+    end_behavior:
+      strategy: detonator
+      main_loop_closes_at: BEAT_07
+      forbidden_phrases: ["in conclusion"]

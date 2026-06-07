@@ -1,0 +1,86 @@
+{
+  "description": "Known sister site groupings for domain diversity calculation. Domains in the same group count as 1 unique domain.",
+  "updated": "2025-01-21",
+  "groups": [
+    {
+      "group_id": "conde_nast",
+      "domains": ["wired.com", "vanityfair.com", "newyorker.com", "vogue.com", "gq.com", "architecturaldigest.com", "bonappetit.com", "glamour.com", "self.com", "them.us", "pitchfork.com", "epicurious.com"]
+    },
+    {
+      "group_id": "news_corp",
+      "domains": ["wsj.com", "nypost.com", "marketwatch.com", "barrons.com"]
+    },
+    {
+      "group_id": "vox_media",
+      "domains": ["vox.com", "theverge.com", "polygon.com", "sbnation.com", "eater.com", "curbed.com", "recode.net"]
+    },
+    {
+      "group_id": "nyt",
+      "domains": ["nytimes.com", "wirecutter.com", "theatletic.com"]
+    },
+    {
+      "group_id": "buzzfeed",
+      "domains": ["buzzfeed.com", "buzzfeednews.com", "tasty.co", "huffpost.com"]
+    },
+    {
+      "group_id": "atlantic_media",
+      "domains": ["theatlantic.com", "citylab.com", "defenseone.com", "govexec.com", "nextgov.com"]
+    },
+    {
+      "group_id": "hearst",
+      "domains": ["esquire.com", "elle.com", "harpersbazaar.com", "cosmopolitan.com", "goodhousekeeping.com", "menshealth.com", "womenshealthmag.com", "countryliving.com", "delish.com", "housebeautiful.com", "oprahmag.com", "popularmechanics.com", "roadandtrack.com", "runnersworld.com", "bicycling.com"]
+    },
+    {
+      "group_id": "meredith",
+      "domains": ["people.com", "ew.com", "instyle.com", "realsimple.com", "marthastewart.com", "parents.com", "bhg.com", "allrecipes.com", "shape.com", "health.com"]
+    },
+    {
+      "group_id": "cnn",
+      "domains": ["cnn.com", "money.cnn.com"]
+    },
+    {
+      "group_id": "bbc",
+      "domains": ["bbc.com", "bbc.co.uk"]
+    },
+    {
+      "group_id": "guardian",
+      "domains": ["theguardian.com", "guardian.co.uk"]
+    },
+    {
+      "group_id": "reddit",
+      "domains": ["reddit.com", "old.reddit.com", "new.reddit.com", "redd.it"]
+    },
+    {
+      "group_id": "stackexchange",
+      "domains": ["stackoverflow.com", "stackexchange.com", "superuser.com", "serverfault.com", "askubuntu.com", "mathoverflow.net"]
+    },
+    {
+      "group_id": "medium",
+      "domains": ["medium.com", "towardsdatascience.com", "betterprogramming.pub", "levelup.gitconnected.com"]
+    },
+    {
+      "group_id": "substack",
+      "domains": ["substack.com"]
+    },
+    {
+      "group_id": "gannett",
+      "domains": ["usatoday.com", "azcentral.com", "indystar.com", "freep.com", "tennessean.com", "jsonline.com"]
+    },
+    {
+      "group_id": "npr",
+      "domains": ["npr.org", "wbur.org", "wnyc.org", "kqed.org"]
+    },
+    {
+      "group_id": "japan_media",
+      "domains": ["japantimes.co.jp", "asahi.com", "mainichi.jp", "yomiuri.co.jp"]
+    },
+    {
+      "group_id": "quora",
+      "domains": ["quora.com"]
+    },
+    {
+      "group_id": "wikipedia",
+      "domains": ["wikipedia.org", "en.wikipedia.org", "wiktionary.org", "wikimedia.org"]
+    }
+  ]
+}

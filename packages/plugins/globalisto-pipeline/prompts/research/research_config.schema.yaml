@@ -1,0 +1,198 @@
+# Research Module Configuration Schema
+# Per-project settings that control research behavior
+
+# Example usage in consumer project:
+# ```yaml
+# # globalisto/config/research_config.yaml
+# research:
+#   mode: fresh_research
+#   source_hierarchy:
+#     - Asian-language primary sources
+#     - Company earnings/filings
+#     - Industry publications
+#     - Mainstream press
+# ```
+
+schema:
+  research:
+    type: object
+    properties:
+
+      mode:
+        type: string
+        enum: [domain_pull, fresh_research]
+        required: true
+        description: |
+          Research strategy.
+          - domain_pull: Check fact database first, research gaps only
+          - fresh_research: Search from scratch for each slot
+
+      min_beats_per_slot:
+        type: integer
+        default: 5
+        description: |
+          FLOOR, not ceiling. Anti-laziness constraint.
+          Research should exceed this when material exists.
+          Below floor = WARNING (not blocker).
+
+      source_hierarchy:
+        type: array
+        items:
+          type: string
+        required_when: mode == fresh_research
+        description: |
+          Prioritized list of source types.
+          Higher in list = more credible/preferred.
+
+      fact_database:
+        type: string
+        required_when: mode == domain_pull
+        description: |
+          Path to domain fact database.
+          Relative to project root.
+
+      domains_required:
+        type: array
+        items:
+          type: string
+        required_when: mode == domain_pull
+        description: |
+          Which domains to pull from in database.
+
+      invalidation_behavior:
+        type: string
+        enum: [STOP_PIPELINE, NOTE_IT]
+        default: NOTE_IT
+        description: |
+          What to do if research invalidates the angle.
+          - STOP_PIPELINE: Halt and report (globalisto)
+          - NOTE_IT: Flag but continue (most repos)
+
+      research_objectives:
+        type: array
+        items:
+          type: string
+        description: |
+          What research should look for.
+          Common: mechanism_discovery, counterarguments
+          Domain-specific: red_flag_discovery, warning_signs, etc.
+
+---
+
+# Coverage thresholds (universal)
+
+coverage_thresholds:
+  thin: 5       # below = WARNING
+  adequate: 7   # 5-7 = acceptable
+  strong: 8     # 8+ = ideal
+
+---
+
+# Project-specific configurations
+
+projects:
+
+  globalisto:
+    mode: fresh_research
+    min_beats_per_slot: 6
+    source_hierarchy:
+      - Native-language primary sources
+      - Company earnings/filings
+      - Industry publications
+      - Mainstream press
+    research_objectives:
+      - mechanism_discovery
+      - thread_expansion
+      - counterarguments
+      - invalidation_search
+      - character_agency
+    invalidation_behavior: STOP_PIPELINE
+    notes: |
+      Standalone video content. Fresh research per topic.
+      Invalidation stops pipeline - don't make videos on invalid angles.
+
+  clearframe:
+    mode: domain_pull
+    min_beats_per_slot: 5
+    fact_database: ./domains/
+    domains_required: [legal, professional, industry]
+    source_hierarchy:
+      - Legal (statutes, case law, regulations)
+      - Professional (industry associations, licensing)
+      - Industry (trade publications, practitioner blogs)
+    research_objectives:
+      - mechanism_discovery
+      - red_flag_discovery
+      - risk_condition_discovery
+    invalidation_behavior: NOTE_IT
+    notes: |
+      Web content with fact database.
+      Domain-pull first, fresh research for gaps only.
+      Legal domain: no fear language.
+
+  surplus-kb:
+    mode: domain_pull
+    min_beats_per_slot: 5
+    fact_database: ./domains/
+    domains_required: [general, professional]
+    source_hierarchy:
+      - Legal
+      - Professional
+      - Industry
+    research_objectives:
+      - mechanism_discovery
+      - red_flag_discovery
+    invalidation_behavior: NOTE_IT
+    notes: |
+      Knowledge base. Follows clearframe pattern.
+
+  hinomaru:
+    mode: domain_pull
+    min_beats_per_slot: 5
+    fact_database: ./fact_index.yaml
+    domains_required: [government, local_expert, travel_media]
+    source_hierarchy:
+      - Government sources
+      - Local expert (J-blogs, local guides)
+      - Travel media
+    research_objectives:
+      - mechanism_discovery
+      - local_nuance
+    invalidation_behavior: NOTE_IT
+    notes: |
+      Travel content. Has fact database but less structured.
+      Needs scaffold upgrade per roadmap.
+
+  investment-tube:
+    mode: fresh_research
+    min_beats_per_slot: 6
+    source_hierarchy:
+      - SEC filings (10-K, 10-Q, 8-K, proxy)
+      - Earnings calls/transcripts
+      - Contemporaneous press (before outcome known)
+      - Analytical (research reports)
+    research_objectives:
+      - mechanism_discovery
+      - warning_signs
+      - signal_detection
+    invalidation_behavior: NOTE_IT
+    source_requirements:
+      sec_filings: 3+
+      earnings: 2+
+      contemporaneous_press: 3+
+      analytical: 2+
+    notes: |
+      Financial video content.
+      Fresh research per topic.
+      Contemporaneous sources critical (defeat hindsight bias).
+
+---
+
+# Source diversity requirements by project
+
+source_diversity:
+  globalisto: "3+ distinct sources, 2+ evidence types per slot"
+  clearframe: "2+ each tier (legal, professional, industry)"
+  investment-tube: "3+ SEC, 2+ earnings, 3+ press, 2+ analytical"
+  surplus-kb: "Follows clearframe pattern"
+  hinomaru: "Government > Local expert > Travel media"
