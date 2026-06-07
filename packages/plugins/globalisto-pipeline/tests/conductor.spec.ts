@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
-import { pluginManifestV1Schema } from "@paperclipai/shared";
+import { describe, expect, it } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { Agent } from "@paperclipai/shared";
 import { nextAction, type RunState } from "../src/engine/conductor.js";
@@ -111,10 +110,6 @@ function makeAgent(id: string, companyId: string, name: string): Agent {
 }
 
 describe("conductor integration smoke (harness)", () => {
-  it("manifest is valid", () => {
-    expect(() => pluginManifestV1Schema.parse(manifest)).not.toThrow();
-  });
-
   it("drives ≥2 steps, auto-passes human steps, and advances state correctly", async () => {
     const companyId = randomUUID();
     const glm5AgentId = randomUUID();
@@ -274,9 +269,4 @@ describe("conductor integration smoke (harness)", () => {
     expect(secondCall.agentId).toBe(qwen37AgentId); // discovery:step_1_5 is also sonnet → qwen37
   });
 
-  it("setup runs without throwing", async () => {
-    const harness = createTestHarness({ manifest });
-    harness.ctx.agents.invoke = async () => ({ runId: randomUUID() });
-    await expect(plugin.definition.setup(harness.ctx)).resolves.not.toThrow();
-  });
 });

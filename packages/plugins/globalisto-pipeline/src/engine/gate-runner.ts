@@ -80,19 +80,19 @@ export function runLocalGate(
 
     case "writing:hook_length":
       return hookLength(
-        input as { content?: string },
+        input as Parameters<typeof hookLength>[0],
         resolvedParams as { max_words?: number },
       );
 
     case "writing:conclusion_behavior":
       return conclusionBehavior(
-        input as { content?: string },
+        input as Parameters<typeof conclusionBehavior>[0],
         resolvedParams as { banned_phrases?: string[] },
       );
 
     case "writing:final_length":
       return finalLength(
-        input as { content?: string },
+        input as Parameters<typeof finalLength>[0],
         resolvedParams as { warn_threshold?: number; block_threshold?: number },
       );
 

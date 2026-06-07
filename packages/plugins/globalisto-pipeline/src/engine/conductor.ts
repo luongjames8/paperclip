@@ -38,7 +38,7 @@ export function nextAction(run: RunState, steps: StepSpec[]): ConductorAction {
     return { kind: "wait" };
   }
 
-  const next = nextStep({ completedStepIds: run.completedStepIds, topic: "", profile: "" }, steps);
+  const next = nextStep({ completedStepIds: run.completedStepIds }, steps);
   if (next === null) return { kind: "complete" };
   return { kind: "invoke", step: next };
 }

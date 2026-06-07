@@ -824,29 +824,4 @@ export const THEMATIC_STEPS: StepSpec[] = [
  * All gate ids from the canonical GATES object in pipeline-mcp/spec.js.
  * Used by validateSpec to catch unknown gate references.
  */
-export const KNOWN_GATE_IDS: string[] = [
-  "research:fetch_count",
-  "structure:discard_rate",
-  "structure:hook_position",
-  "structure:retention_coherence",
-  "structure:pacing_rules",
-  "structure:credibility_budget",
-  "structure:loop_tease_alignment",
-  "writing:quote_injection",
-  "writing:hook_length",
-  "writing:conclusion_behavior",
-  "writing:final_length",
-  "writing:punchup_integrity",
-  "angle:title_length",
-  "angle:serp_audit",
-  "angle:brand_recognition",
-  "angle:audience_test",
-  "angle:preflight_checklist",
-  "research:adversarial_coverage",
-  "validation:evidence_alignment",
-  "writing:title_confirmation",
-  "writing:hook_confirmation_check",
-  "packaging:trinity_gate_check",
-  "packaging:ecosystem_consistency",
-  "packaging:trinity_alignment",
-];
+export const KNOWN_GATE_IDS: string[] = Object.keys(GATE_DEFS);

@@ -12,7 +12,7 @@
 import type { ModelProfile, ModelRole, PipelineState, StepResult, StepSpec } from "./types.js";
 
 /** The next step to run, or null when every step is complete. */
-export function nextStep(state: PipelineState, steps: StepSpec[]): StepSpec | null {
+export function nextStep(state: { completedStepIds: string[] }, steps: StepSpec[]): StepSpec | null {
   const done = new Set(state.completedStepIds);
   return steps.find((step) => !done.has(step.id)) ?? null;
 }

@@ -8,6 +8,10 @@ import { GATE_DEFS } from "./engine/spec-data.js";
 import { runLocalGate } from "./engine/gate-runner.js";
 import { assemblePrompt } from "./engine/prompt.js";
 import { PROFILES } from "./engine/profiles.js";
+import { assembleGateInput } from "./engine/gate-input.js";
+
+// Steps are constant — load once at module scope rather than per conductor tick.
+const THEMATIC_STEPS = loadThematicSpec();
 
 // The hardcoded schema name for this plugin's DB namespace (pre-computed).
 const SCHEMA = "plugin_globalisto_pipeline_46b22ea2d1";
@@ -36,6 +40,20 @@ function parseCompletedStepIds(raw: string | string[]): string[] {
   } catch {
     return [];
   }
+}
+
+async function markStepAdvanced(
+  ctx: Parameters<typeof plugin.definition.setup>[0],
+  runId: string,
+  completedStepIds: string[],
+): Promise<void> {
+  await ctx.db.execute(
+    `UPDATE ${TABLE}
+     SET completed_step_ids=$1::jsonb, active_step_id=NULL,
+         active_worker_run_id=NULL, step_complete=false, updated_at=now()
+     WHERE id=$2`,
+    [JSON.stringify(completedStepIds), runId],
+  );
 }
 
 const plugin = definePlugin({
@@ -89,8 +107,6 @@ const plugin = definePlugin({
 
     // ── job: conductor ───────────────────────────────────────────────────────
     ctx.jobs.register("conductor", async (_job) => {
-      const steps = loadThematicSpec();
-
       // Load all running pipeline rows
       const rows = await ctx.db.query<PipelineRow>(
         `SELECT * FROM ${TABLE} WHERE status='running'`,
@@ -98,9 +114,12 @@ const plugin = definePlugin({
 
       ctx.logger.info("Conductor tick", { runCount: rows.length });
 
+      // Per-tick agent list cache: keyed by company_id to avoid N identical list calls.
+      const agentListCache = new Map<string, Awaited<ReturnType<typeof ctx.agents.list>>>();
+
       for (const row of rows) {
         try {
-          await processPipelineRun(ctx, row, steps);
+          await processPipelineRun(ctx, row, agentListCache);
         } catch (err) {
           ctx.logger.error("Conductor error for run", {
             runId: row.id,
@@ -123,7 +142,7 @@ const plugin = definePlugin({
 async function processPipelineRun(
   ctx: Parameters<typeof plugin.definition.setup>[0],
   row: PipelineRow,
-  steps: ReturnType<typeof loadThematicSpec>,
+  agentListCache: Map<string, Awaited<ReturnType<typeof ctx.agents.list>>>,
 ): Promise<void> {
   const runState: RunState = {
     completedStepIds: parseCompletedStepIds(row.completed_step_ids),
@@ -131,7 +150,7 @@ async function processPipelineRun(
     stepComplete: Boolean(row.step_complete),
   };
 
-  const action = nextAction(runState, steps);
+  const action = nextAction(runState, THEMATIC_STEPS);
 
   ctx.logger.info("Conductor action", {
     runId: row.id,
@@ -157,14 +176,8 @@ async function processPipelineRun(
 
       // Human steps: auto-pass for v1
       if (step.requiredModel === "human") {
-        const completed = [...parseCompletedStepIds(row.completed_step_ids), step.id];
-        await ctx.db.execute(
-          `UPDATE ${TABLE}
-           SET completed_step_ids=$1::jsonb, active_step_id=NULL,
-               active_worker_run_id=NULL, step_complete=false, updated_at=now()
-           WHERE id=$2`,
-          [JSON.stringify(completed), row.id],
-        );
+        const completed = [...runState.completedStepIds, step.id];
+        await markStepAdvanced(ctx, row.id, completed);
         ctx.logger.info("Human gate auto-passed", { runId: row.id, stepId: step.id });
         return;
       }
@@ -176,23 +189,26 @@ async function processPipelineRun(
       }
       const agentName = resolveWorker(step.requiredModel, profile);
 
-      const agentList = await ctx.agents.list({ companyId: row.company_id });
+      // Use per-tick cache to avoid N identical list calls per tick.
+      if (!agentListCache.has(row.company_id)) {
+        agentListCache.set(row.company_id, await ctx.agents.list({ companyId: row.company_id }));
+      }
+      const agentList = agentListCache.get(row.company_id)!;
       const agent = agentList.find((a) => a.name === agentName);
       if (!agent) {
         throw new Error(`Worker agent not found: "${agentName}" in company ${row.company_id}`);
       }
 
-      // Read input artifacts from issue documents
+      // Read input artifacts from issue documents in parallel
       const inputsMap: Record<string, string> = {};
       if (row.active_issue_id) {
-        for (const inputName of step.inputs) {
-          const doc = await ctx.issues.documents.get(
-            row.active_issue_id,
-            `artifact:${inputName}`,
-            row.company_id,
-          );
-          if (doc) inputsMap[inputName] = doc.body;
-        }
+        const issueId = row.active_issue_id;
+        const docs = await Promise.all(
+          step.inputs.map((n) => ctx.issues.documents.get(issueId, `artifact:${n}`, row.company_id)),
+        );
+        step.inputs.forEach((n, i) => {
+          if (docs[i]) inputsMap[n] = docs[i]!.body;
+        });
       }
 
       const promptContent = `Execute pipeline step ${step.id}. Prompt: ${step.prompt}. Write your output artifact(s) ${JSON.stringify(step.outputs)} as issue documents keyed "artifact:<name>".`;
@@ -223,17 +239,15 @@ async function processPipelineRun(
       const step = action.step;
       const issueId = row.active_issue_id;
 
-      // Read output artifacts
+      // Read output artifacts in parallel
       const artifacts: Record<string, string> = {};
       if (issueId) {
-        for (const outName of step.outputs) {
-          const doc = await ctx.issues.documents.get(
-            issueId,
-            `artifact:${outName}`,
-            row.company_id,
-          );
-          if (doc) artifacts[outName] = doc.body;
-        }
+        const docs = await Promise.all(
+          step.outputs.map((n) => ctx.issues.documents.get(issueId, `artifact:${n}`, row.company_id)),
+        );
+        step.outputs.forEach((n, i) => {
+          if (docs[i]) artifacts[n] = docs[i]!.body;
+        });
       }
 
       // Run gates
@@ -252,15 +266,27 @@ async function processPipelineRun(
           continue;
         }
 
-        // Local gate: assemble best-effort input from artifacts
-        const firstArtifactBody = Object.values(artifacts)[0] ?? "";
-        const gateInput: Record<string, unknown> = { content: firstArtifactBody, ...artifacts };
+        // Local gate: assemble input via declared gateInputMap, then evaluate.
+        // Full per-gate gateInputMap fidelity is validated at the live golden run;
+        // gates whose declared artifacts are present now actually evaluate.
+        const gateInput = assembleGateInput(
+          gateDef.gateInputMap as Record<string, unknown> | undefined,
+          artifacts,
+        );
+
+        if (Object.keys(gateInput).length === 0) {
+          ctx.logger.info(`Gate ${gateId} input unavailable — skipped`, {
+            runId: row.id,
+            stepId: step.id,
+          });
+          continue;
+        }
 
         let gateResult;
         try {
           gateResult = runLocalGate(gateId, gateInput, gateDef.params as Record<string, unknown> | undefined);
         } catch (err) {
-          ctx.logger.info(`Gate ${gateId} not evaluated (v1 input assembly): ${String(err)}`, {
+          ctx.logger.info(`Gate ${gateId} not evaluated: ${String(err)}`, {
             runId: row.id,
             stepId: step.id,
           });
@@ -268,7 +294,7 @@ async function processPipelineRun(
         }
 
         if ("deferred" in gateResult) {
-          ctx.logger.info(`Gate ${gateId} not evaluated (v1 input assembly): ${gateResult.reason}`, {
+          ctx.logger.info(`Gate ${gateId} not evaluated: ${gateResult.reason}`, {
             runId: row.id,
             stepId: step.id,
           });
@@ -289,14 +315,8 @@ async function processPipelineRun(
       }
 
       // Advance: mark step complete
-      const completed = [...parseCompletedStepIds(row.completed_step_ids), step.id];
-      await ctx.db.execute(
-        `UPDATE ${TABLE}
-         SET completed_step_ids=$1::jsonb, active_step_id=NULL,
-             active_worker_run_id=NULL, step_complete=false, updated_at=now()
-         WHERE id=$2`,
-        [JSON.stringify(completed), row.id],
-      );
+      const completed = [...runState.completedStepIds, step.id];
+      await markStepAdvanced(ctx, row.id, completed);
 
       ctx.logger.info("Step advanced", { runId: row.id, stepId: step.id, completedCount: completed.length });
       return;

@@ -107,6 +107,8 @@ interface DiscardInput {
 export function discardRate(input: DiscardInput, params: { standard_min: number; comprehensive_min: number }): GateResult {
   const { selection_mode, units_selected } = input;
 
+  // Resolve the effective available count and handle the promotions short-circuit.
+  let available: number;
   if ("promotions_made" in input || "original_spine_count" in input) {
     const { original_spine_count, promotions_made = 0, effective_spine_count, minimum_required, minimum_met } = input;
     if (!units_selected || !minimum_required) {
@@ -118,21 +120,17 @@ export function discardRate(input: DiscardInput, params: { standard_min: number;
       }
       return { pass: false, action: "BLOCK", reasons: [`Even with ${promotions_made} promotions, only have ${units_selected} beats (need ${minimum_required})`] };
     }
-    const available = effective_spine_count ?? original_spine_count ?? 0;
-    const rate = (available - units_selected) / available;
-    const minDiscard = selection_mode === "comprehensive" ? params.comprehensive_min : params.standard_min;
-    if (rate >= minDiscard) {
-      return { pass: true, action: "CONTINUE", reasons: [`Discard rate ${(rate * 100).toFixed(1)}% meets minimum ${(minDiscard * 100).toFixed(0)}%`] };
+    available = effective_spine_count ?? original_spine_count ?? 0;
+  } else {
+    const { spine_material_available } = input;
+    if (!spine_material_available || !units_selected) {
+      return { pass: false, action: "BLOCK", reasons: ["Missing spine_material_available or units_selected"] };
     }
-    return { pass: false, action: "BLOCK", reasons: [`Discard rate ${(rate * 100).toFixed(1)}% below minimum ${(minDiscard * 100).toFixed(0)}%`] };
+    available = spine_material_available;
   }
 
-  const { spine_material_available } = input;
-  if (!spine_material_available || !units_selected) {
-    return { pass: false, action: "BLOCK", reasons: ["Missing spine_material_available or units_selected"] };
-  }
+  const rate = (available - units_selected!) / available;
   const minDiscard = selection_mode === "comprehensive" ? params.comprehensive_min : params.standard_min;
-  const rate = (spine_material_available - units_selected) / spine_material_available;
   if (rate >= minDiscard) {
     return { pass: true, action: "CONTINUE", reasons: [`Discard rate ${(rate * 100).toFixed(1)}% meets minimum ${(minDiscard * 100).toFixed(0)}%`] };
   }
