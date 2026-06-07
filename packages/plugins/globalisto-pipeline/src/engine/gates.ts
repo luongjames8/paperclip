@@ -68,6 +68,202 @@ export function adversarialCoverage(
   };
 }
 
+// ── Content helpers (ported from canonical gates.js) ──────────────────────────
+
+/** Count narration words, skipping headers, production tags, yaml, rules, code fences. */
+export function countNarratorWords(script: string): number {
+  let wordCount = 0;
+  for (const line of script.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("#")) continue;
+    if (/^\[.+\]$/.test(trimmed)) continue;
+    if (/^[a-z_]+:\s/i.test(trimmed)) continue;
+    if (/^[-=]{3,}$/.test(trimmed)) continue;
+    if (trimmed.startsWith("```")) continue;
+    wordCount += trimmed.split(/\s+/).filter((w) => w.length > 0).length;
+  }
+  return wordCount;
+}
+
+function allSections(content: string): string[] {
+  return content.match(/## SECTION \d+[^\n]*\n[\s\S]*?(?=\n## SECTION \d+|$)/gi) ?? [];
+}
+
+// ── discard_rate ──────────────────────────────────────────────────────────────
+
+interface DiscardInput {
+  selection_mode?: string;
+  units_selected?: number;
+  promotions_made?: number;
+  original_spine_count?: number;
+  effective_spine_count?: number;
+  minimum_required?: number;
+  minimum_met?: boolean;
+  spine_material_available?: number;
+}
+
+/** structure:discard_rate — selection meets minimum / discard-rate requirements. */
+export function discardRate(input: DiscardInput, params: { standard_min: number; comprehensive_min: number }): GateResult {
+  const { selection_mode, units_selected } = input;
+
+  if ("promotions_made" in input || "original_spine_count" in input) {
+    const { original_spine_count, promotions_made = 0, effective_spine_count, minimum_required, minimum_met } = input;
+    if (!units_selected || !minimum_required) {
+      return { pass: false, action: "BLOCK", reasons: ["Missing units_selected or minimum_required in selection output"] };
+    }
+    if (promotions_made > 0) {
+      if (minimum_met && units_selected >= minimum_required) {
+        return { pass: true, action: "CONTINUE", reasons: [`Promoted ${promotions_made} items to meet minimum`, `Selected ${units_selected} beats (minimum: ${minimum_required})`] };
+      }
+      return { pass: false, action: "BLOCK", reasons: [`Even with ${promotions_made} promotions, only have ${units_selected} beats (need ${minimum_required})`] };
+    }
+    const available = effective_spine_count ?? original_spine_count ?? 0;
+    const rate = (available - units_selected) / available;
+    const minDiscard = selection_mode === "comprehensive" ? params.comprehensive_min : params.standard_min;
+    if (rate >= minDiscard) {
+      return { pass: true, action: "CONTINUE", reasons: [`Discard rate ${(rate * 100).toFixed(1)}% meets minimum ${(minDiscard * 100).toFixed(0)}%`] };
+    }
+    return { pass: false, action: "BLOCK", reasons: [`Discard rate ${(rate * 100).toFixed(1)}% below minimum ${(minDiscard * 100).toFixed(0)}%`] };
+  }
+
+  const { spine_material_available } = input;
+  if (!spine_material_available || !units_selected) {
+    return { pass: false, action: "BLOCK", reasons: ["Missing spine_material_available or units_selected"] };
+  }
+  const minDiscard = selection_mode === "comprehensive" ? params.comprehensive_min : params.standard_min;
+  const rate = (spine_material_available - units_selected) / spine_material_available;
+  if (rate >= minDiscard) {
+    return { pass: true, action: "CONTINUE", reasons: [`Discard rate ${(rate * 100).toFixed(1)}% meets minimum ${(minDiscard * 100).toFixed(0)}%`] };
+  }
+  return { pass: false, action: "BLOCK", reasons: [`Discard rate ${(rate * 100).toFixed(1)}% below minimum ${(minDiscard * 100).toFixed(0)}%`] };
+}
+
+// ── quote_injection ───────────────────────────────────────────────────────────
+
+interface ResearchMaster {
+  sources?: Array<{ credibility?: string }>;
+  evidence?: Array<{ credibility?: string }>;
+  data_points?: Array<{ confidence?: string }>;
+  quotes?: Array<{ credibility?: string }>;
+}
+
+/** writing:quote_injection — RESEARCH_MASTER has >= 10 sources (current or legacy shape). */
+export function quoteInjection(input: { research?: ResearchMaster }): GateResult {
+  const data = input.research;
+  if (!data || typeof data !== "object") {
+    return { pass: false, action: "BLOCK", reasons: ["Missing research master object"] };
+  }
+  let sources = data.sources ?? data.evidence ?? [];
+  let count = sources.length;
+  let format = "current";
+  if (count === 0 && (data.data_points || data.quotes)) {
+    const dp = data.data_points ?? [];
+    const q = data.quotes ?? [];
+    count = dp.length + q.length;
+    format = "legacy";
+    sources = [...dp.map((d) => ({ credibility: d.confidence })), ...q.map((x) => ({ credibility: x.credibility ?? "medium" }))];
+  }
+  const minSources = 10;
+  const highCred = sources.filter((s) => s.credibility === "high").length;
+  if (count >= minSources) {
+    return { pass: true, action: "CONTINUE", reasons: [`Found ${count} sources (min: ${minSources}), ${highCred} high-credibility (format: ${format})`], metrics: { total_sources: count, high_credibility_sources: highCred, format } };
+  }
+  return { pass: false, action: "BLOCK", reasons: [`Insufficient sources: ${count} (need ${minSources})`], metrics: { total_sources: count, format } };
+}
+
+// ── hook_length ───────────────────────────────────────────────────────────────
+
+/** writing:hook_length — Section 1 word count under the max. */
+export function hookLength(input: { content?: string }, params: { max_words?: number }): GateResult {
+  const content = input.content;
+  const max = params?.max_words ?? 80;
+  if (!content) return { pass: false, action: "BLOCK", reasons: ["No content provided"] };
+  const m = content.match(/## SECTION 1[:\s][^\n]*\n([\s\S]*?)(?=\n## SECTION 2|$)/i);
+  if (!m) return { pass: false, action: "BLOCK", reasons: ["Section 1 not found in script"] };
+  const wordCount = countNarratorWords(m[1]);
+  if (wordCount > max) {
+    return { pass: false, action: "BLOCK", reasons: [`Section 1 too long: ${wordCount} words (max ${max})`], metrics: { word_count: wordCount, max_allowed: max } };
+  }
+  return { pass: true, action: "CONTINUE", reasons: [`Section 1 word count OK: ${wordCount} words (max ${max})`], metrics: { section1_words: wordCount } };
+}
+
+// ── conclusion_behavior ───────────────────────────────────────────────────────
+
+/** writing:conclusion_behavior — no banned conclusion phrases in the final section. */
+export function conclusionBehavior(input: { content?: string }, params: { banned_phrases?: string[] }): GateResult {
+  const content = input.content;
+  const banned = params?.banned_phrases ?? [];
+  if (!content) return { pass: false, action: "BLOCK", reasons: ["No content provided"] };
+  const sections = allSections(content);
+  if (sections.length === 0) return { pass: false, action: "BLOCK", reasons: ["No sections found in script"] };
+  const finalSection = sections[sections.length - 1].toLowerCase();
+  const found = banned.filter((p) => finalSection.includes(p.toLowerCase()));
+  if (found.length > 0) {
+    return { pass: false, action: "BLOCK", reasons: [`Conclusion behavior detected: "${found.join('", "')}"`], metrics: { banned_phrases_found: found } };
+  }
+  return { pass: true, action: "CONTINUE", reasons: ["No conclusion behavior detected in final section"] };
+}
+
+// ── final_length ──────────────────────────────────────────────────────────────
+
+/** writing:final_length — final section word count vs warn/block thresholds. */
+export function finalLength(input: { content?: string }, params: { warn_threshold?: number; block_threshold?: number }): GateResult {
+  const content = input.content;
+  const warn = params?.warn_threshold ?? 60;
+  const block = params?.block_threshold ?? 80;
+  if (!content) return { pass: false, action: "BLOCK", reasons: ["No content provided"] };
+  const sections = allSections(content);
+  if (sections.length === 0) return { pass: false, action: "BLOCK", reasons: ["No sections found in script"] };
+  const wordCount = countNarratorWords(sections[sections.length - 1]);
+  if (wordCount > block) {
+    return { pass: false, action: "BLOCK", reasons: [`Final section too long: ${wordCount} words (max ${block})`], metrics: { word_count: wordCount } };
+  }
+  if (wordCount > warn) {
+    return { pass: true, action: "WARN", reasons: [`Final section slightly long: ${wordCount} words (target: ${warn})`], metrics: { word_count: wordCount } };
+  }
+  return { pass: true, action: "CONTINUE", reasons: [`Final section length OK: ${wordCount} words`], metrics: { final_section_words: wordCount } };
+}
+
+// ── punchup_integrity ─────────────────────────────────────────────────────────
+
+/** writing:punchup_integrity — punch-up preserved sections + citations, bounded word delta. */
+export function punchupIntegrity(input: { original?: string; punched?: string }, params: { max_word_delta?: number }): GateResult {
+  const { original, punched } = input;
+  const maxDelta = params?.max_word_delta ?? 0.15;
+  if (!original || !punched) {
+    return { pass: false, action: "BLOCK", reasons: ["original and punched content both required"] };
+  }
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  const origSections = original.match(/## SECTION \d+/gi) ?? [];
+  const punchSections = punched.match(/## SECTION \d+/gi) ?? [];
+  if (origSections.length !== punchSections.length) {
+    errors.push(`Section count changed: ${origSections.length} → ${punchSections.length}`);
+  }
+
+  const idSet = (text: string, re: RegExp) => new Set((text.match(re) ?? []).map((id) => id.toLowerCase()));
+  const missing = (a: Set<string>, b: Set<string>) => [...a].filter((id) => !b.has(id));
+
+  const missEvidence = missing(idSet(original, /\[dp_\d+\]/gi), idSet(punched, /\[dp_\d+\]/gi));
+  if (missEvidence.length > 0) errors.push(`Missing evidence IDs: ${missEvidence.join(", ")}`);
+  const missQuotes = missing(idSet(original, /\[q_\d+\]/gi), idSet(punched, /\[q_\d+\]/gi));
+  if (missQuotes.length > 0) errors.push(`Missing quote IDs: ${missQuotes.join(", ")}`);
+
+  const ow = countNarratorWords(original);
+  const pw = countNarratorWords(punched);
+  const delta = Math.abs(pw - ow) / ow;
+  if (delta > maxDelta) {
+    if (pw < ow) warnings.push(`Word count decreased by ${Math.round(delta * 100)}% (tightening OK but significant)`);
+    else errors.push(`Word count increased by ${Math.round(delta * 100)}% (max ${maxDelta * 100}%)`);
+  }
+
+  if (errors.length > 0) return { pass: false, action: "BLOCK", reasons: errors, metrics: { warnings } };
+  if (warnings.length > 0) return { pass: true, action: "WARN", reasons: warnings };
+  return { pass: true, action: "CONTINUE", reasons: ["Punch-up preserved structure and all citations"] };
+}
+
 interface TeaseUnit {
   unit_id?: string;
   beat_id?: string;
