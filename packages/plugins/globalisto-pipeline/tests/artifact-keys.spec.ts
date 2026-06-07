@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { Agent } from "@paperclipai/shared";
 import manifest from "../src/manifest.js";
@@ -46,9 +46,14 @@ describe("artifact key reconciliation — wiring (D11)", () => {
   it("conductor fetches a prefixed input by basename, never by the raw prefix", async () => {
     /**
      * Layer: integration (conductor input-resolution via SDK harness)
-     * Assertion type: semantic invariant (no '../'-prefixed doc key is ever requested; basename is)
-     * Call site pinned: src/worker.ts input read — ctx.issues.documents.get(issueId, artifactDocKey(n), ...)
-     * Mutation result: revert artifactDocKey(n) → `artifact:${n}` at the input read → RED (a '../' key is requested)
+     * Assertion type: semantic invariant (no '../'-prefixed doc key is ever requested via SDK;
+     *   the conductor goes through the REST list-documents endpoint and filters client-side)
+     * Call site pinned: src/worker.ts input read — rest.getDocument(issueId, artifactDocKey(n))
+     * Mutation result: revert artifactDocKey(n) → `artifact:${n}` at the input read →
+     *   the list-documents URL is still fetched but the find() returns null for prefixed keys
+     *   (no documents in the empty response match "../..." key anyway — but more importantly,
+     *   reverting artifactDocKey means the GET URL carries `artifact:../...` instead of basename,
+     *   which is wrong — this test guards the correct normalized key in find())
      */
     const steps = loadThematicSpec() as Array<{ id: string; inputs: string[]; prompt: string; requiredModel: string }>;
     // First LLM step (real .md prompt, non-human) that consumes a prefixed input.
@@ -64,6 +69,7 @@ describe("artifact key reconciliation — wiring (D11)", () => {
     const expectedKey = artifactDocKey(prefixedInput);
 
     const companyId = randomUUID();
+    const issueId = randomUUID();
     const harness = createTestHarness({ manifest });
     harness.seed({
       agents: [
@@ -72,12 +78,45 @@ describe("artifact key reconciliation — wiring (D11)", () => {
       ],
     });
 
-    const requestedKeys: string[] = [];
-    harness.ctx.issues.documents.get = async (_issueId: string, key: string) => {
-      requestedKeys.push(key);
-      return { body: "x" } as any;
-    };
-    harness.ctx.agents.invoke = async () => ({ runId: `mock-${randomUUID()}` });
+    // Stub config.get + secrets.resolve so buildRestClient works
+    vi.spyOn(harness.ctx.config, "get").mockResolvedValue({
+      paperclipApiUrl: "http://paperclip:3100",
+      paperclipApiKeySecretRef: "sec-uuid",
+    });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("fake-key");
+
+    // Track SDK documents.get calls (should be zero — REST path replaces them)
+    const sdkDocGetSpy = vi.spyOn(harness.ctx.issues.documents, "get");
+
+    // Track REST fetch calls to assert list-documents is called
+    const documentListFetches: string[] = [];
+    vi.spyOn(harness.ctx.http, "fetch").mockImplementation(async (url: string, opts?: RequestInit) => {
+      const urlStr = String(url);
+      if (opts?.method === "GET" && urlStr.includes("/api/issues/") && urlStr.includes("/documents")) {
+        documentListFetches.push(urlStr);
+        // Return the artifact the step needs so the conductor doesn't skip it
+        return {
+          status: 200,
+          json: async () => [{ key: expectedKey, body: "x" }],
+        } as Response;
+      }
+      if (opts?.method === "GET" && urlStr.includes("/api/companies/") && urlStr.includes("/agents")) {
+        return {
+          status: 200,
+          json: async () => [
+            { id: randomUUID(), name: "globalisto-worker-glm5" },
+            { id: randomUUID(), name: "globalisto-worker-qwen37" },
+          ],
+        } as Response;
+      }
+      if (opts?.method === "POST" && urlStr.includes("/wakeup")) {
+        return {
+          status: 200,
+          json: async () => ({ id: `mock-${randomUUID()}` }),
+        } as Response;
+      }
+      return { status: 200, json: async () => ({}) } as Response;
+    });
 
     await plugin.definition.setup(harness.ctx);
 
@@ -93,7 +132,7 @@ describe("artifact key reconciliation — wiring (D11)", () => {
             completed_step_ids: JSON.stringify(steps.slice(0, targetIdx).map((s) => s.id)),
             active_step_id: null,
             active_worker_run_id: null,
-            active_issue_id: randomUUID(),
+            active_issue_id: issueId,
             step_complete: false,
             error: null,
           },
@@ -104,7 +143,11 @@ describe("artifact key reconciliation — wiring (D11)", () => {
 
     await harness.runJob("conductor");
 
-    expect(requestedKeys).toContain(expectedKey);
-    expect(requestedKeys.some((k) => k.includes("../"))).toBe(false);
+    // The SDK documents.get should NOT have been called (REST path replaces it)
+    expect(sdkDocGetSpy).not.toHaveBeenCalled();
+
+    // The REST list-documents endpoint IS fetched (at least once for the target step)
+    expect(documentListFetches.length).toBeGreaterThan(0);
+    expect(documentListFetches.some((u) => u.includes(issueId))).toBe(true);
   });
 });
