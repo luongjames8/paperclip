@@ -14,6 +14,247 @@
 
 import type { StepSpec } from "./types.js";
 
+// ── Gate definitions ─────────────────────────────────────────────────────────
+
+/** Full definition of a single gate, extracted from the canonical pipeline-mcp GATES object. */
+export interface GateDef {
+  type: "local" | "delegated";
+  description?: string;
+  params?: Record<string, unknown>;
+  gateInputMap?: Record<string, unknown>;
+}
+
+/**
+ * All 24 gate definitions from the canonical pipeline-mcp/spec.js GATES object.
+ * gate_input_map keys are camelCased to gateInputMap.
+ */
+export const GATE_DEFS: Record<string, GateDef> = {
+  "research:fetch_count": {
+    type: "local",
+    description: "Verify minimum evidence fetches per slot",
+    params: { min_fetches_per_slot: 3 },
+    gateInputMap: {
+      slots_fetched: { file: "STEP2_evidence.yaml", key: "slots_fetched" },
+    },
+  },
+  "structure:discard_rate": {
+    type: "local",
+    description: "Verify minimum material discard rate",
+    params: { standard_min: 0.4, comprehensive_min: 0.2 },
+    gateInputMap: {
+      promotions_made: { file: "STEP2_units.yaml", key: "promotions_made", optional: true },
+      original_spine_count: { file: "STEP2_units.yaml", key: "original_spine_count", optional: true },
+      effective_spine_count: { file: "STEP2_units.yaml", key: "effective_spine_count", optional: true },
+      selected_units: { file: "STEP2_units.yaml", key: "selected_units", optional: true },
+      spine_material: { file: "STEP1_classified.yaml", key: "spine_material", optional: true },
+    },
+  },
+  "structure:hook_position": {
+    type: "delegated",
+    description: "Verify highest hook-strength beat is at position 1",
+    gateInputMap: {
+      retention_structure: { file: "RETENTION_STRUCTURE.yaml", format: "yaml_dump" },
+    },
+  },
+  "structure:retention_coherence": {
+    type: "delegated",
+    description: "Verify arc phases, loop events, and chain flows are aligned",
+    gateInputMap: {
+      retention_structure: { file: "RETENTION_STRUCTURE.yaml", format: "yaml_dump" },
+    },
+  },
+  "structure:pacing_rules": {
+    type: "delegated",
+    description: "Verify retention pacing constraints are met",
+    gateInputMap: {
+      retention_structure: { file: "RETENTION_STRUCTURE.yaml", format: "yaml_dump" },
+    },
+  },
+  "structure:credibility_budget": {
+    type: "delegated",
+    description: "Verify credibility budget stays above minimum",
+    gateInputMap: {
+      retention_structure: { file: "RETENTION_STRUCTURE.yaml", format: "yaml_dump" },
+    },
+  },
+  "structure:loop_tease_alignment": {
+    type: "local",
+    description: "Verify teases point to loop closures, not arbitrary future beats",
+    gateInputMap: {
+      units: { file: "RETENTION_STRUCTURE.yaml", key: "units" },
+    },
+  },
+  "writing:quote_injection": {
+    type: "local",
+    description: "Verify RESEARCH_MASTER.yaml exists with sufficient sources for writing",
+    params: { min_sources: 10 },
+    gateInputMap: {
+      pipeline_dir: { special: "pipeline_dir" },
+    },
+  },
+  "writing:hook_length": {
+    type: "local",
+    description: "Verify Section 1 is under 80 words (hook brevity)",
+    params: { max_words: 80 },
+    gateInputMap: {
+      pipeline_dir: { special: "pipeline_dir" },
+    },
+  },
+  "writing:conclusion_behavior": {
+    type: "local",
+    description: "Detect and block conclusion patterns in final section",
+    params: {
+      banned_phrases: [
+        "in conclusion",
+        "to wrap up",
+        "as we've seen",
+        "as we've learned",
+        "what this shows us",
+        "the lesson here",
+        "this demonstrates that",
+        "looking back",
+        "throughout this video",
+        "we've examined",
+        "ultimately",
+        "in summary",
+        "to sum up",
+        "in short",
+        "in essence",
+        "the takeaway is",
+        "taken together",
+        "the key insight",
+        "to bring everything together",
+      ],
+    },
+    gateInputMap: {
+      pipeline_dir: { special: "pipeline_dir" },
+    },
+  },
+  "writing:final_length": {
+    type: "local",
+    description: "Verify final section length (WARN at 60, BLOCK at 80)",
+    params: { warn_threshold: 60, block_threshold: 80 },
+    gateInputMap: {
+      pipeline_dir: { special: "pipeline_dir" },
+    },
+  },
+  "writing:punchup_integrity": {
+    type: "local",
+    description: "Verify punch-up preserved structure and citations",
+    params: { max_word_delta: 0.15 },
+    gateInputMap: {
+      pipeline_dir: { special: "pipeline_dir" },
+    },
+  },
+  "angle:title_length": {
+    type: "local",
+    description: "Verify title is 5-12 words",
+    params: { min_words: 5, max_words: 12 },
+    gateInputMap: {
+      title: { file: "ANGLE_LOCK.yaml", key: "angle_lock.title" },
+    },
+  },
+  "angle:serp_audit": {
+    type: "delegated",
+    description: "Check SERP results match target ecosystem via YouTube search",
+    gateInputMap: {
+      title: { file: "ANGLE_LOCK.yaml", key: "angle_lock.title" },
+      target_ecosystem: { file: "ANGLE_LOCK.yaml", key: "angle_lock.ecosystem" },
+    },
+  },
+  "angle:brand_recognition": {
+    type: "delegated",
+    description: "Verify title uses T1/T2 recognizable names, not T3 insider terms",
+    gateInputMap: {
+      title: { file: "ANGLE_LOCK.yaml", key: "angle_lock.title" },
+    },
+  },
+  "angle:audience_test": {
+    type: "delegated",
+    description: "Verify title passes audience simulation: mom test, Sony formula, scroll-stop, rage-click, ecosystem routing",
+    gateInputMap: {
+      title: { file: "ANGLE_LOCK.yaml", key: "angle_lock.title" },
+    },
+  },
+  "angle:preflight_checklist": {
+    type: "delegated",
+    description: "5 binary questions about angle viability before proceeding",
+    gateInputMap: {
+      title: { file: "ANGLE_LOCK.yaml", key: "angle_lock.title" },
+      one_sentence_promise: { file: "ANGLE_LOCK.yaml", key: "angle_lock.promise" },
+      thumbnail_concept: { file: "ANGLE_LOCK.yaml", key: "angle_lock.thumbnail" },
+      opening_hook: { file: "ANGLE_LOCK.yaml", key: "angle_lock.hook" },
+      target_ecosystem: { file: "ANGLE_LOCK.yaml", key: "angle_lock.ecosystem" },
+    },
+  },
+  "research:adversarial_coverage": {
+    type: "local",
+    description: "Verify adversarial track produced genuine counter-evidence",
+    params: { min_counter_items: 2 },
+    gateInputMap: {
+      counter_items: { file: "STEP4_counter.yaml", key: "counter_evidence" },
+    },
+  },
+  "validation:evidence_alignment": {
+    type: "delegated",
+    description: "Score evidence fit for locked angle, assess pivot need",
+    gateInputMap: {
+      title: { file: "../01b_angle/ANGLE_LOCK.yaml", key: "angle_lock.title" },
+      one_sentence_promise: { file: "../01b_angle/ANGLE_LOCK.yaml", key: "angle_lock.promise" },
+      primary_evidence: { file: "RESEARCH_MASTER.yaml", format: "yaml_dump" },
+      adversarial_evidence: { file: "STEP4_counter.yaml", format: "yaml_dump" },
+      runners_up: { file: "../01b_angle/ANGLE_RUNNERS_UP.yaml", format: "yaml_dump" },
+    },
+  },
+  "writing:title_confirmation": {
+    type: "delegated",
+    description: "Verify opening confirms title promise within 30 seconds",
+    gateInputMap: {
+      title: { file: "../01b_angle/ANGLE_LOCK.yaml", key: "angle_lock.title" },
+      opening_text: { file: "DRAFT_CONTENT.md", format: "first_section" },
+      one_sentence_promise: { file: "../01b_angle/ANGLE_LOCK.yaml", key: "angle_lock.promise" },
+    },
+  },
+  "writing:hook_confirmation_check": {
+    type: "delegated",
+    description: "Verify hook passes the 5 confirmation criteria",
+    gateInputMap: {
+      opening_text: { file: "DRAFT_CONTENT.md", format: "first_section" },
+      title: { file: "../01b_angle/ANGLE_LOCK.yaml", key: "angle_lock.title" },
+      one_sentence_promise: { file: "../01b_angle/ANGLE_LOCK.yaml", key: "angle_lock.promise" },
+    },
+  },
+  "packaging:trinity_gate_check": {
+    type: "delegated",
+    description: "Verify trinity alignment between title, thumbnail, and hook",
+    gateInputMap: {
+      title: { file: "../01b_angle/ANGLE_LOCK.yaml", key: "angle_lock.title" },
+      thumbnail_concept: { file: "THUMBNAIL_VARIATIONS.yaml", format: "yaml_dump" },
+      opening_hook: { file: "../04_writing/DRAFT_CONTENT.md", format: "first_section" },
+      trinity_gate_data: { file: "TRINITY_GATE.yaml", format: "yaml_dump" },
+    },
+  },
+  "packaging:ecosystem_consistency": {
+    type: "delegated",
+    description: "Verify description and tags don't conflict with target ecosystem",
+    gateInputMap: {
+      target_ecosystem: { file: "../01b_angle/ANGLE_LOCK.yaml", key: "angle_lock.ecosystem" },
+      title: { file: "../01b_angle/ANGLE_LOCK.yaml", key: "angle_lock.title" },
+      description: { file: "YOUTUBE_DESCRIPTION.md", format: "full_content" },
+    },
+  },
+  "packaging:trinity_alignment": {
+    type: "delegated",
+    description: "Verify title + thumbnail + opening are complementary, not repetitive",
+    gateInputMap: {
+      title: { file: "../01b_angle/ANGLE_LOCK.yaml", key: "angle_lock.title" },
+      thumbnail_concept: { file: "THUMBNAIL_VARIATIONS.yaml", format: "yaml_dump" },
+      opening_hook: { file: "../04_writing/DRAFT_CONTENT.md", format: "first_section" },
+      script_opening: { file: "../05_polish/POLISH_COMPLETE.md", format: "first_section" },
+    },
+  },
+};
+
 export const THEMATIC_STEPS: StepSpec[] = [
   // ── discovery (20 steps) ──────────────────────────────────────────────────
   {
