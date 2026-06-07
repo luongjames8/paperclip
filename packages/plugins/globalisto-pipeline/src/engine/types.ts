@@ -41,3 +41,14 @@ export interface PipelineState {
 
 /** Maps an abstract model role to the worker-agent id that carries that model. */
 export type ModelProfile = Record<ModelRole, string>;
+
+/** Gate verdict action, mirroring the canonical pipeline-mcp gate results. */
+export type GateAction = "CONTINUE" | "WARN" | "BLOCK";
+
+/** Result of evaluating a gate. Pure — no IO. */
+export interface GateResult {
+  pass: boolean;
+  action: GateAction;
+  reasons: string[];
+  metrics?: Record<string, unknown>;
+}
