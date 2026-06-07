@@ -41,6 +41,7 @@ COPY packages/plugins/plugin-llm-wiki/package.json packages/plugins/plugin-llm-w
 COPY packages/plugins/plugin-workspace-diff/package.json packages/plugins/plugin-workspace-diff/
 COPY packages/plugins/discord-fleet/package.json packages/plugins/discord-fleet/
 COPY packages/plugins/helper-runner/package.json packages/plugins/helper-runner/
+COPY packages/plugins/globalisto-pipeline/package.json packages/plugins/globalisto-pipeline/
 COPY patches/ patches/
 COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
@@ -67,6 +68,9 @@ RUN test -f packages/plugins/discord-fleet/dist/worker.js \
 RUN pnpm --filter @openclaw/plugin-helper-runner build
 RUN test -f packages/plugins/helper-runner/dist/worker.js \
     || (echo "ERROR: helper-runner build output missing" && exit 1)
+RUN pnpm --filter @openclaw/plugin-globalisto-pipeline build
+RUN test -f packages/plugins/globalisto-pipeline/dist/worker.js \
+    || (echo "ERROR: globalisto-pipeline build output missing" && exit 1)
 
 FROM base AS production
 ARG USER_UID=1000
