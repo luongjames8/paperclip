@@ -11,6 +11,7 @@ import { PROFILES } from "./engine/profiles.js";
 import { assembleGateInput } from "./engine/gate-input.js";
 import { readStepPrompt } from "./engine/load-prompt.js";
 import { fileURLToPath } from "node:url";
+import { basename } from "node:path";
 
 // Steps are constant — load once at module scope rather than per conductor tick.
 const THEMATIC_STEPS = loadThematicSpec();
@@ -45,6 +46,38 @@ function parseCompletedStepIds(raw: string | string[]): string[] {
   } catch {
     return [];
   }
+}
+
+// Artifacts are keyed by basename. Producer steps declare BARE output names
+// (e.g. "BEAT_GRAPH.yaml") while consumer steps reference them with a
+// numbered-directory prefix (e.g. "../03_structure/BEAT_GRAPH.yaml"). The two
+// forms are the SAME logical artifact (verified: every prefixed/bare pair shares
+// a unique basename, no collisions). Normalize every read/write to the basename
+// so cross-step inputs actually resolve instead of silently returning null.
+export function artifactDocKey(name: string): string {
+  return `artifact:${basename(name)}`;
+}
+
+// Terminal worker-run failure handling (halt + surface). The host emits
+// agent.run.failed (failed/timed_out) and agent.run.cancelled — distinct from
+// agent.run.finished (succeeded). Without these handlers a failed worker run
+// leaves the pipeline stalled forever. Policy: mark the run failed and record
+// the worker error so the operator sees the break (no auto-retry in v1).
+async function haltPipelineForWorkerRun(
+  ctx: Parameters<typeof plugin.definition.setup>[0],
+  workerRunId: string | undefined,
+  kind: string,
+  workerError: string | null,
+): Promise<void> {
+  if (!workerRunId) return;
+  const message = workerError ? `worker run ${kind}: ${workerError}` : `worker run ${kind}`;
+  await ctx.db.execute(
+    `UPDATE ${TABLE}
+     SET status='failed', error=$1, updated_at=now()
+     WHERE active_worker_run_id = $2 AND status='running'`,
+    [message, workerRunId],
+  );
+  ctx.logger.warn(`Pipeline run halted: ${message}`, { workerRunId });
 }
 
 async function markStepAdvanced(
@@ -108,6 +141,18 @@ const plugin = definePlugin({
       );
 
       ctx.logger.info("Marked step complete via agent.run.finished", { workerRunId });
+    });
+
+    // ── event: agent.run.failed / cancelled ──────────────────────────────────
+    // A worker run that does NOT succeed emits one of these (server heartbeat.ts).
+    // Halt the pipeline run and surface the error rather than stalling forever.
+    ctx.events.on("agent.run.failed", async (event) => {
+      const payload = (event.payload ?? {}) as { error?: string | null };
+      await haltPipelineForWorkerRun(ctx, event.entityId, "failed", payload.error ?? null);
+    });
+    ctx.events.on("agent.run.cancelled", async (event) => {
+      const payload = (event.payload ?? {}) as { error?: string | null };
+      await haltPipelineForWorkerRun(ctx, event.entityId, "cancelled", payload.error ?? null);
     });
 
     // ── job: conductor ───────────────────────────────────────────────────────
@@ -222,7 +267,7 @@ async function processPipelineRun(
       if (row.active_issue_id) {
         const issueId = row.active_issue_id;
         const docs = await Promise.all(
-          step.inputs.map((n) => ctx.issues.documents.get(issueId, `artifact:${n}`, row.company_id)),
+          step.inputs.map((n) => ctx.issues.documents.get(issueId, artifactDocKey(n), row.company_id)),
         );
         step.inputs.forEach((n, i) => {
           if (docs[i]) inputsMap[n] = docs[i]!.body;
@@ -230,7 +275,8 @@ async function processPipelineRun(
       }
 
       // Feed the FULL prompt content (not a path) + the output-artifact contract.
-      const promptContent = `${promptBody}\n\n---\n\nWrite your output artifact(s) ${JSON.stringify(step.outputs)} as issue documents keyed "artifact:<name>".`;
+      const outputKeys = step.outputs.map((o) => basename(o));
+      const promptContent = `${promptBody}\n\n---\n\nWrite your output artifact(s) ${JSON.stringify(outputKeys)} as issue documents keyed "artifact:<name>".`;
       const prompt = assemblePrompt(promptContent, inputsMap);
 
       const { runId: workerRunId } = await ctx.agents.invoke(agent.id, row.company_id, {
@@ -262,7 +308,7 @@ async function processPipelineRun(
       const artifacts: Record<string, string> = {};
       if (issueId) {
         const docs = await Promise.all(
-          step.outputs.map((n) => ctx.issues.documents.get(issueId, `artifact:${n}`, row.company_id)),
+          step.outputs.map((n) => ctx.issues.documents.get(issueId, artifactDocKey(n), row.company_id)),
         );
         step.outputs.forEach((n, i) => {
           if (docs[i]) artifacts[n] = docs[i]!.body;
