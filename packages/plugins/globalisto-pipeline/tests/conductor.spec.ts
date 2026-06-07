@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { Agent } from "@paperclipai/shared";
 import { nextAction, type RunState } from "../src/engine/conductor.js";
@@ -123,14 +123,50 @@ describe("conductor integration smoke (harness)", () => {
       ],
     });
 
-    // Track invoke calls
-    const invokeCalls: Array<{ agentId: string; companyId: string; prompt: string }> = [];
-    let invokeCallCount = 0;
-    harness.ctx.agents.invoke = async (agentId, cId, opts) => {
-      invokeCalls.push({ agentId, companyId: cId, prompt: opts.prompt });
-      invokeCallCount++;
-      return { runId: `mock-run-${invokeCallCount}` };
-    };
+    // Stub config.get + secrets.resolve so buildRestClient works
+    vi.spyOn(harness.ctx.config, "get").mockResolvedValue({
+      paperclipApiUrl: "http://paperclip:3100",
+      paperclipApiKeySecretRef: "sec-uuid",
+    });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("fake-key");
+
+    // Track wakeup calls recorded via http.fetch
+    const wakeupCalls: Array<{ agentId: string; body: { source: string; reason: string; payload: { prompt: string } } }> = [];
+    let wakeupCallCount = 0;
+
+    vi.spyOn(harness.ctx.http, "fetch").mockImplementation(async (url: string, opts?: RequestInit) => {
+      const urlStr = String(url);
+      if (opts?.method === "POST" && urlStr.includes("/wakeup")) {
+        // Extract agentId from URL: /api/agents/<id>/wakeup
+        const match = urlStr.match(/\/api\/agents\/([^/]+)\/wakeup/);
+        const agentId = match?.[1] ?? "";
+        wakeupCallCount++;
+        const body = JSON.parse(opts.body as string);
+        wakeupCalls.push({ agentId, body });
+        return {
+          status: 200,
+          json: async () => ({ id: `mock-run-${wakeupCallCount}` }),
+        } as Response;
+      }
+      if (opts?.method === "GET" && urlStr.includes("/api/companies/") && urlStr.includes("/agents")) {
+        // Return the two seeded agents as a bare array
+        return {
+          status: 200,
+          json: async () => [
+            { id: glm5AgentId, name: "globalisto-worker-glm5" },
+            { id: qwen37AgentId, name: "globalisto-worker-qwen37" },
+          ],
+        } as Response;
+      }
+      if (opts?.method === "GET" && urlStr.includes("/api/issues/") && urlStr.includes("/documents")) {
+        return {
+          status: 200,
+          json: async () => [],
+        } as Response;
+      }
+      // Fallback
+      return { status: 200, json: async () => ({}) } as Response;
+    });
 
     await plugin.definition.setup(harness.ctx);
 
@@ -154,10 +190,6 @@ describe("conductor integration smoke (harness)", () => {
     expect(insertExec).toBeTruthy();
 
     // ── Step 1: conductor runs, discovers first step → invoke ────────────────
-    // Reset dbExecutes tracking between conductor runs isn't needed — just check total growth
-    const execCountBefore = harness.dbExecutes.length;
-
-    // Patch db.query to return the pipeline_runs row we "inserted"
     const mockRunId = result.runId;
     const mockIssueId = result.issueId;
 
@@ -185,14 +217,14 @@ describe("conductor integration smoke (harness)", () => {
     await harness.runJob("conductor");
 
     // First non-human step in THEMATIC_STEPS is discovery:step_1 (sonnet → globalisto-worker-qwen37 in mixed)
-    expect(invokeCalls.length).toBe(1);
-    const firstCall = invokeCalls[0];
+    expect(wakeupCalls.length).toBe(1);
+    const firstCall = wakeupCalls[0];
     expect(firstCall.agentId).toBe(qwen37AgentId); // sonnet → qwen37 in "mixed"
     // The conductor feeds the FULL prompt CONTENT (read from the vendored prompts)
     // plus the appended output-artifact contract — not the step-id path string.
-    expect(firstCall.prompt).toContain("Write your output artifact");
+    expect(firstCall.body.payload.prompt).toContain("Write your output artifact");
 
-    // Record the worker runId returned from mock invoke
+    // Record the worker runId returned from mock wakeup
     const workerRunId = "mock-run-1";
 
     // ── Step 2: fire agent.run.finished → marks step_complete=true ───────────
@@ -266,8 +298,8 @@ describe("conductor integration smoke (harness)", () => {
     await harness.runJob("conductor");
 
     // Should have invoked the second step now
-    expect(invokeCalls.length).toBe(2);
-    const secondCall = invokeCalls[1];
+    expect(wakeupCalls.length).toBe(2);
+    const secondCall = wakeupCalls[1];
     expect(secondCall.agentId).toBe(qwen37AgentId); // discovery:step_1_5 is also sonnet → qwen37
   });
 

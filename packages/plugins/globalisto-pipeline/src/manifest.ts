@@ -21,7 +21,23 @@ const manifest: PaperclipPluginManifestV1 = {
     "jobs.schedule",
     "events.subscribe",
     "ui.dashboardWidget.register",
+    "http.outbound",
+    "secrets.read-ref",
   ],
+  instanceConfigSchema: {
+    type: "object",
+    properties: {
+      paperclipApiUrl: {
+        type: "string",
+        title: "Paperclip API Base URL",
+        default: "http://paperclip:3100",
+      },
+      paperclipApiKeySecretRef: {
+        type: "string",
+        title: "Paperclip API Key Secret Ref",
+      },
+    },
+  },
   database: {
     namespaceSlug: "globalisto_pipeline",
     migrationsDir: "migrations",
