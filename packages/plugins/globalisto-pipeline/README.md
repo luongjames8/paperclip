@@ -15,12 +15,25 @@ bailian. All model calls go through the gateway; no direct provider calls.
   unit-tested with no harness (`tests/engine.spec.ts`). This is the testable core.
 - `src/worker.ts` — wires the engine to `ctx` (currently scaffold demo handlers).
 
-**Scaffold status (this commit):** engine pure functions + tests + plugin skeleton, green.
-**Implementation phase (TODO):** vendor the canonical `pipeline-mcp` spec/prompts; add the
-10 local gates (port from `gates.js`); add the `ctx.db` state tables (`database` namespace +
-migrations) and the `ctx.jobs` scheduled conductor; wire `ctx.agents.invoke` + completion
-polling; create the worker agents + profiles. Deferred beyond v1: the 14 judge gates,
-Discord human-gate wiring, the QC-matrix runner.
+**Status: v1 plugin feature-complete + tested (76 tests green, typecheck clean against the 529 SDK).**
+Built: pure engine (`nextStep`/`advance`/`resolveWorker`), all 10 local gates, the 61-step
+THEMATIC spec + structural validator, GATE_DEFS (24) + gate dispatcher, prompt assembly, and
+the ctx-wired conductor (`start` action, `agent.run.finished` handler, `conductor` cron job,
+`ctx.agents.invoke` + completion + gate eval + artifact flow via issue documents) + `ctx.db`
+migration + integration smoke (`createTestHarness`, mocked invoke).
+
+**Deploy-prep (NOT in this plugin / not yet done):**
+- **Worker-agent configs** — `globalisto-worker-glm5` (`bailian/glm-5`) + `globalisto-worker-qwen37`
+  (`bailian/qwen3.7-plus`), adapter `openclaw_gateway`. These live in the **openclaw-fleet** repo
+  (globalisto company package + `openclaw.json`), NOT here, and must reconcile with the globalisto
+  instance's in-progress migration. The plugin resolves them by name via `ctx.agents.list`.
+- **Prompt vendoring** — the conductor references each step's prompt by path; the worker agents need
+  the canonical `pipeline-mcp/prompts/**` in their workspace.
+- **paperclip-deploy** (rebuild image, plugin instance config) + the live golden run.
+
+**v1 limits (logged, not silent):** gate input assembly is best-effort (full per-gate input maps
+are a follow-up against the golden run); human gates auto-pass. **Deferred beyond v1:** the 14
+delegated/judge gates, Discord human-gate wiring, the QC-matrix runner.
 
 ## Development
 
