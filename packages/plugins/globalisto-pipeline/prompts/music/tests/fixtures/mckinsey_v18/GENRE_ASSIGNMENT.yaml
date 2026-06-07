@@ -1,0 +1,14 @@
+GENRE_ASSIGNMENT:
+  topic: "McKinsey Opioid Crisis"
+  total_production_sections: 4
+  production_section_lanes:
+    SECTION_1: J3_TRAPANESE
+    SECTION_2: BACKBONE_ANALYTICAL_ELECTRONIC
+    SECTION_3: K3_KOREAN_ELECTRONIC
+    SECTION_4: C6_MODERN_CINEMATIC_CHINESE
+  lane_variety_count: 4
+  rejected_lanes:
+    - C2_CLASSICAL_CHINESE_ORCHESTRAL
+    - C3_MANDAPOP_BALLAD
+    - K5_KPOP_BALLAD
+    - K6_KPOP_DANCE

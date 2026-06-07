@@ -9,9 +9,14 @@ import { runLocalGate } from "./engine/gate-runner.js";
 import { assemblePrompt } from "./engine/prompt.js";
 import { PROFILES } from "./engine/profiles.js";
 import { assembleGateInput } from "./engine/gate-input.js";
+import { readStepPrompt } from "./engine/load-prompt.js";
+import { fileURLToPath } from "node:url";
 
 // Steps are constant — load once at module scope rather than per conductor tick.
 const THEMATIC_STEPS = loadThematicSpec();
+// Vendored canonical prompts ship beside the built worker (../prompts from dist/
+// and from src/). The conductor FEEDS the full prompt content to the worker.
+const PROMPTS_DIR = fileURLToPath(new URL("../prompts", import.meta.url));
 
 // The hardcoded schema name for this plugin's DB namespace (pre-computed).
 const SCHEMA = "plugin_globalisto_pipeline_46b22ea2d1";
@@ -182,6 +187,19 @@ async function processPipelineRun(
         return;
       }
 
+      // Script-only steps (e.g. final assembly, music durations) carry a .js
+      // "prompt" with no LLM prompt file — node-exec is NOT implemented in v1.
+      // Log loudly and advance; do NOT feed JS to an LLM or silently succeed.
+      const promptBody = readStepPrompt(PROMPTS_DIR, step.prompt);
+      if (promptBody === null) {
+        ctx.logger.warn(
+          `Step ${step.id} is script-only (${step.prompt}) — node-exec NOT implemented in v1; advancing WITHOUT producing its output. Final package assembly needs this wired.`,
+          { runId: row.id, stepId: step.id },
+        );
+        await markStepAdvanced(ctx, row.id, [...runState.completedStepIds, step.id]);
+        return;
+      }
+
       // Resolve the worker agent by name
       const profile = PROFILES[row.profile];
       if (!profile) {
@@ -211,7 +229,8 @@ async function processPipelineRun(
         });
       }
 
-      const promptContent = `Execute pipeline step ${step.id}. Prompt: ${step.prompt}. Write your output artifact(s) ${JSON.stringify(step.outputs)} as issue documents keyed "artifact:<name>".`;
+      // Feed the FULL prompt content (not a path) + the output-artifact contract.
+      const promptContent = `${promptBody}\n\n---\n\nWrite your output artifact(s) ${JSON.stringify(step.outputs)} as issue documents keyed "artifact:<name>".`;
       const prompt = assemblePrompt(promptContent, inputsMap);
 
       const { runId: workerRunId } = await ctx.agents.invoke(agent.id, row.company_id, {

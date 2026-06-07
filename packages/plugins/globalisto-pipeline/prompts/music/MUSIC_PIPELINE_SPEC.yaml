@@ -1,0 +1,1046 @@
+# MUSIC PIPELINE SPECIFICATION
+# Version: v5 (Suno v5 native, expanded library, structure aware)
+# Date: Generated from current pipeline state
+# Purpose: Single source of truth for music pipeline system
+
+# =============================================================================
+# 1. PIPELINE_OVERVIEW
+# =============================================================================
+
+PIPELINE_OVERVIEW:
+  description: "Music pipeline transforms narrative structure into Suno v5-compatible prompts"
+
+  # CRITICAL: We manually paste prompts into Suno UI. No API.
+  # - "Style of Music" field → style
+  # - "Lyrics" field → currently empty (instrumental)
+  # - "Exclude from Song" field → exclusions (MANDATORY)
+
+  steps:
+    - step_id: "12A"
+      name: "Genre Lane Abstraction Gate"
+      model: "opus"
+      dependencies: []  # Can run in parallel with 12B
+      inputs: ["BEAT_GRAPH.yaml", "NARRATIVE_BLUEPRINT.md", "CONTENT_ROLE_MAP", "VIDEO_RUN_CONTEXT"]
+      outputs: ["GENRE_ASSIGNMENT.yaml"]
+      purpose: "Select genre lane per production section (not per beat)"
+
+    - step_id: "12B"
+      name: "Music Function Collapse"
+      model: "sonnet"
+      dependencies: []  # Can run in parallel with 12A
+      inputs: ["BEAT_GRAPH.yaml", "NARRATIVE_BLUEPRINT.md", "CONTENT_ROLE_MAP"]
+      outputs: ["MUSIC_FUNCTION_MAP.yaml"]
+      purpose: "Collapse narrative structure into musical behavior primitives (one function per production section)"
+
+    - step_id: "12D"
+      name: "Duration Calculation"
+      model: "script"
+      dependencies: []  # Only needs BEAT_GRAPH.yaml
+      inputs: ["BEAT_GRAPH.yaml"]
+      outputs: ["MUSIC_DURATIONS.yaml"]
+      purpose: "Calculate music duration targets from production sections"
+
+    - step_id: "12E"
+      name: "Music Dynamics Mapping"
+      model: "sonnet"
+      dependencies: []  # Can run after 12A/12B/12D complete, or in parallel
+      inputs: ["BEAT_GRAPH.yaml", "AV_SCRIPT.md", "STEP3B_engagement_strategy.yaml"]
+      outputs: ["MUSIC_DYNAMICS.yaml"]
+      purpose: "Derive internal music dynamics from content markers (intensity, emotional_function, inline markers)"
+
+    - step_id: "12C"
+      name: "Suno Style Block Assembler"
+      model: "sonnet"
+      dependencies: ["12A", "12B", "12D", "12E"]  # Needs all upstream outputs
+      inputs: ["GENRE_ASSIGNMENT.yaml", "MUSIC_FUNCTION_MAP.yaml", "MUSIC_DURATIONS.yaml", "MUSIC_DYNAMICS.yaml", "BEAT_GRAPH.yaml", "SUNO_STYLE_LIBRARY.yaml"]
+      outputs: ["SUNO_PROMPT_SET.yaml"]
+      purpose: "Assemble final Suno v5-compatible prompts (one per production section)"
+
+  execution_order:
+    parallel_group_1: ["12A", "12B", "12D", "12E"]  # 12E can run in parallel
+    then: ["12C"]  # 12C needs all upstream including 12E
+
+  note: "12A, 12B, 12D, 12E have no dependencies on each other - only 12C needs all upstream outputs"
+
+# =============================================================================
+# 2. STEP_DEFINITIONS
+# =============================================================================
+
+STEP_DEFINITIONS:
+  
+  step_12A:
+    step_id: "12A"
+    purpose: "Select ONE genre lane per PRODUCTION SECTION (not per beat). Judgment and classification only."
+    inputs:
+      - file: "BEAT_GRAPH.yaml"
+        fields_used: ["production_sections", "beats[]"]
+      - file: "NARRATIVE_BLUEPRINT.md"
+        fields_used: "overall narrative structure"
+      - file: "CONTENT_ROLE_MAP"
+        fields_used: "content roles and functions"
+      - file: "VIDEO_RUN_CONTEXT"
+        fields_used: "video execution context"
+    outputs:
+      - file: "GENRE_ASSIGNMENT.yaml"
+        schema:
+          GENRE_ASSIGNMENT:
+            topic: "string"
+            total_production_sections: "integer"
+            production_section_lanes:
+              SECTION_1: "LANE_ID"
+              SECTION_2: "LANE_ID"
+              # ... for all production sections
+            lane_variety_count: "integer"
+            rejected_lanes: ["C2_CLASSICAL_CHINESE_ORCHESTRAL", "C3_MANDAPOP_BALLAD", "K5_KPOP_BALLAD", "K6_KPOP_DANCE"]
+    model: "opus"
+    logic_summary: |
+      - Assigns one genre lane per production section (3-5 sections total)
+      - Follows "no-cheese" rule: music must NOT author emotional interpretation
+      - Opening sections must use high-contrast, unresolved, rhythm-led lanes
+      - Character lanes allowed when texture-first, rhythm-first, atmosphere-supporting
+      - Forbidden lanes: C2, C3, K5, K6 (form implies emotional authorship)
+      - Avoid same lane for >3 consecutive sections
+      - Aim for 3+ different lanes in 6+ section videos
+
+  step_12B:
+    step_id: "12B"
+    purpose: "Collapse narrative structure into musical behavior primitives (ONE function per production section)"
+    inputs:
+      - file: "BEAT_GRAPH.yaml"
+        fields_used: ["production_sections", "beat_sequence"]
+      - file: "NARRATIVE_BLUEPRINT.md"
+        fields_used: "section role and narrative flow"
+      - file: "CONTENT_ROLE_MAP"
+        fields_used: "content roles"
+    outputs:
+      - file: "MUSIC_FUNCTION_MAP.yaml"
+        schema:
+          MUSIC_FUNCTION_MAP:
+            topic: "string"
+            total_production_sections: "integer"
+            functions:
+              SECTION_1: "FUNCTION"
+              SECTION_2: "FUNCTION"
+              # ... for all production sections
+            function_distribution:
+              ORIENT: "integer"
+              EXPLAIN: "integer"
+              INVESTIGATE: "integer"
+              TRANSITION: "integer"
+              CONSEQUENCE: "integer"
+              UNRESOLVED_CLOSE: "integer"
+    model: "sonnet"
+    logic_summary: |
+      - Assigns ONE function per production section (aggregates beat functions within each section)
+      - Canonical function set: ORIENT, EXPLAIN, INVESTIGATE, TRANSITION, CONSEQUENCE, UNRESOLVED_CLOSE
+      - Decision tree based on production section name, aggregated beat functions, section role
+      - HOOK → ORIENT (establish situational context)
+      - LAND → UNRESOLVED_CLOSE (for documentary-style endings)
+      - ESCALATE sections → INVESTIGATE (revelation, contradiction, tension)
+      - BUILD sections → EXPLAIN or INVESTIGATE (context building or tension)
+      - UNRESOLVED_CLOSE reserved for final section only
+
+  step_12D:
+    step_id: "12D"
+    purpose: "Calculate music duration targets from production sections in BEAT_GRAPH.yaml"
+    inputs:
+      - file: "BEAT_GRAPH.yaml"
+        fields_used: ["production_sections.timing", "production_sections.name", "production_sections.mood"]
+    outputs:
+      - file: "MUSIC_DURATIONS.yaml"
+        schema:
+          MUSIC_DURATIONS:
+            config:
+              buffer_seconds: "integer"
+            sections:
+              - section_id: "integer"
+                section_name: "string"
+                words: "integer"
+                function: "string"
+                wpm: "integer"
+                calculated_duration: "integer"
+                target_duration: "integer"
+                arc_completes_at: "integer"
+                buffer: "integer"
+                emotion_tokens: "string"
+            totals:
+              total_words: "integer"
+              calculated_total: "integer"
+              calculated_total_formatted: "string"
+              target_total: "integer"
+              target_total_formatted: "string"
+    model: "script"
+    logic_summary: |
+      - Reads production_sections from BEAT_GRAPH.yaml
+      - Calculates duration from timing field (format: "MM:SS-MM:SS")
+      - Adds buffer for [Extend] section (default: 10 seconds)
+      - Minimum duration: 30 seconds
+      - Maps production section name to function (hardcoded mapping)
+      - Uses function-based WPM mapping (from S2-1 baseline data)
+      - Extracts emotion tokens from BEAT_GRAPH moods
+
+  step_12E:
+    step_id: "12E"
+    purpose: "Derive internal music dynamics from content markers, NOT templates"
+    inputs:
+      - file: "BEAT_GRAPH.yaml"
+        fields_used: ["production_sections", "beat_sequence.emotional_function"]
+      - file: "AV_SCRIPT.md"
+        fields_used: ["section headers (TONE/PACE)", "inline markers ([LAND], [SINK IN])"]
+      - file: "STEP3B_engagement_strategy.yaml"
+        fields_used: ["intensity scores", "peak_moments", "pattern_interrupts"]
+    outputs:
+      - file: "MUSIC_DYNAMICS.yaml"
+        schema:
+          MUSIC_DYNAMICS:
+            schema_version: "string"
+            derived_from: ["array of source files"]
+            sections:
+              - section_id: "integer"
+                section_name: "string"
+                duration: "string"
+                internal_dynamics:
+                  - tag: "Suno-native tag"
+                    start: "timing"
+                    end: "timing"
+                    source: "content marker that drove this choice"
+    model: "sonnet"
+    logic_summary: |
+      - Extract emotional_function and beat functions from BEAT_GRAPH
+      - Extract intensity scores and peak_moments from engagement_strategy
+      - Extract inline markers ([LAND], [SINK IN]) from AV_SCRIPT
+      - Map to Suno-native tags: intensity 5-6→[Verse], 7→[Build], 8+→[Bridge]
+      - Insert [Break] at inline markers
+      - Output timing-based tag sequences per section
+
+  step_12C:
+    step_id: "12C"
+    purpose: "Assemble final Suno v5-compatible prompts (one per production section)"
+    inputs:
+      - file: "GENRE_ASSIGNMENT.yaml"
+        fields_used: ["production_section_lanes"]
+      - file: "MUSIC_FUNCTION_MAP.yaml"
+        fields_used: ["functions"]
+      - file: "MUSIC_DURATIONS.yaml"
+        fields_used: ["sections.target_duration"]
+      - file: "MUSIC_DYNAMICS.yaml"
+        fields_used: ["sections.internal_dynamics"]
+      - file: "BEAT_GRAPH.yaml"
+        fields_used: ["production_sections.name", "production_sections.mood", "production_sections.timing"]
+      - file: "SUNO_STYLE_LIBRARY.yaml"
+        fields_used: ["lanes.*.suno_name", "lanes.*.style", "lanes.*.excludes"]
+    outputs:
+      - file: "SUNO_PROMPT_SET.yaml"
+        schema:
+          SUNO_PROMPT_SET:
+            topic: "string"
+            total_production_sections: "integer"
+            production_sections:
+              - section_id: "integer"
+                section_name: "string"
+                lane_id: "LANE_ID"
+                function: "FUNCTION"
+                emotion_token: "string"
+                target_duration: "string"
+                style: "string"
+                exclusions: "string"
+    model: "sonnet"
+    logic_summary: |
+      - Generates ONE Suno prompt per production section (3-5 sections total)
+      - Style name must come FIRST (Suno parses left-to-right with decreasing weight)
+      - Appends function-derived modifier after style name
+      - Resolves {EMOTION} token with rotation for variety
+      - Incorporates mood from BEAT_GRAPH.yaml
+      - Includes mandatory instrumental suffix
+      - Includes total duration in style body
+      - Reads internal dynamics metatags from MUSIC_DYNAMICS.yaml (12E output) instead of generating from templates
+      - Outputs separate style and exclusions fields (Suno v5 format)
+
+# =============================================================================
+# 3. FUNCTION_DERIVATION
+# =============================================================================
+
+FUNCTION_DERIVATION:
+  canonical_functions:
+    - ORIENT
+    - EXPLAIN
+    - INVESTIGATE
+    - TRANSITION
+    - CONSEQUENCE
+    - UNRESOLVED_CLOSE
+
+  decision_tree: |
+    Is this the FINAL production section (LAND)?
+    ├─ YES → UNRESOLVED_CLOSE (for documentary-style endings)
+    └─ NO → Continue...
+    
+    Is this the OPENING production section (HOOK)?
+    ├─ YES → ORIENT
+    └─ NO → Continue...
+    
+    Does this production section contain AGGREGATED ESCALATION or REVELATION beats?
+    ├─ YES → INVESTIGATE
+    └─ NO → Continue...
+    
+    Does this production section bridge major narrative shifts?
+    ├─ YES → TRANSITION
+    └─ NO → Continue...
+    
+    Does this production section deliver AGGREGATED CONSEQUENCES or AFTERMATH beats?
+    ├─ YES → CONSEQUENCE
+    └─ NO → Continue...
+    
+    Does this production section BUILD context or explain mechanisms?
+    ├─ YES → EXPLAIN
+    └─ NO → Default to EXPLAIN (safest neutral option)
+
+  hardcoded_rules:
+    - HOOK → ORIENT (establish situational context)
+    - LAND → UNRESOLVED_CLOSE (for documentary-style endings)
+
+  aggregation_rules:
+    description: "Aggregate beat functions within each production section to determine section's overall function"
+    rules:
+      - PROVE + IMPLICATE beats → INVESTIGATE function
+      - CONTEXT + EXPLAIN beats → EXPLAIN function
+      - REVEAL + CONSEQUENCE beats → CONSEQUENCE function
+      - TRANSITION + BRIDGE beats → TRANSITION function
+      - MIXED beats → Use dominant function or apply decision tree
+      - Priority when beats conflict: INVESTIGATE > CONSEQUENCE > EXPLAIN > TRANSITION > ORIENT
+      - If section name strongly indicates a function (e.g., HOOK → ORIENT), override beat aggregation
+
+  inputs_for_function_assignment:
+    - Production section name and mood (from BEAT_GRAPH.yaml production_sections)
+    - Aggregated beat functions within the section (from BEAT_GRAPH.yaml beat_sequence)
+    - Section role (from NARRATIVE_BLUEPRINT)
+    - Position in overall narrative flow
+
+# =============================================================================
+# 4. CURRENT_METATAG_SYSTEM
+# =============================================================================
+
+CURRENT_METATAG_SYSTEM:
+  status: "PROBLEMATIC - needs revision"
+
+  warning: |
+    These are CUSTOM metatags that Suno likely IGNORES.
+    Suno only recognizes: [Intro], [Verse], [Pre-Chorus], [Chorus], [Bridge], [Outro], [Build], [Drop], [Break], [Fade]
+    See SUNO_NATIVE_TAGS section for correct vocabulary.
+    See CONTENT_MARKERS section for content-aware approach.
+
+  current_custom_metatags_by_section_type:
+    HOOK:
+      custom_tags: ["[Hook]", "[Sustain]", "[Transition]"]
+      template: |
+        [Hook] Immediate impact, strong opening statement, 0s to [duration/3]
+        [Sustain] Maintain energy, develop motif, [duration/3] to [2*duration/3]
+        [Transition] Prepare for next section, [2*duration/3] to end
+      problem: "These tags are NOT Suno-native. Suno likely ignores them."
+
+    BUILD:
+      custom_tags: ["[Establish]", "[Accumulate]", "[Intensify]", "[Prepare]"]
+      template: |
+        [Establish] Set foundation, introduce elements, 0s to [duration/4]
+        [Accumulate] Add layers, increase density, [duration/4] to [duration/2]
+        [Intensify] Raise tension, approach peak, [duration/2] to [3*duration/4]
+        [Prepare] Set up payoff, [3*duration/4] to end
+      problem: "Template-based, ignores actual content. BUILD always gets same shape regardless of script."
+
+    ESCALATE:
+      custom_tags: ["[Rise]", "[Push]", "[Peak]"]
+      template: |
+        [Rise] Increase intensity, introduce urgency, 0s to [duration/3]
+        [Push] Drive momentum forward, stakes escalate, [duration/3] to [2*duration/3]
+        [Peak] Reach high point, maximum tension, [2*duration/3] to end
+      problem: "Template-based, ignores where actual peaks fall in the content."
+
+    LAND:
+      custom_tags: ["[Arrive]", "[Settle]", "[Close]"]
+      template: |
+        [Arrive] Establish consequence and weight, 0s to [duration/2]
+        [Settle] Let meaning land, [duration/2] to [3*duration/4]
+        [Close] Final resolution, [3*duration/4] to end
+      problem: "Template-based, ignores inline markers like [LAND], [SINK IN] in script."
+
+  timing_calculation:
+    description: "Fixed proportional timing - NOT content-aware"
+    method: "Duration divided by section type-specific intervals"
+    examples:
+      - "HOOK: duration/3 intervals"
+      - "BUILD: duration/4 intervals"
+      - "ESCALATE: duration/3 intervals"
+      - "LAND: duration/2, duration/4 intervals"
+    problem: "Timing is fixed per section type, ignores where actual emphasis points fall"
+
+  two_core_problems:
+    problem_1:
+      name: "Wrong vocabulary"
+      description: "Custom tags that Suno doesn't recognize"
+      solution: "Use Suno-native tags: [Intro], [Verse], [Build], [Bridge], [Break], [Fade], [Outro]"
+
+    problem_2:
+      name: "Template-based, not content-aware"
+      description: "Same shape for all BUILD sections regardless of where peaks/emphasis actually fall"
+      solution: "Derive shape from content markers: intensity scores, emotional_function, inline markers"
+
+# =============================================================================
+# 5. PROMPT_ASSEMBLY
+# =============================================================================
+
+PROMPT_ASSEMBLY:
+  assembly_formula: |
+    For each PRODUCTION SECTION:
+    
+    STYLE FIELD:
+    ```
+    [STYLE_NAME] [FUNCTION_MODIFIER], [EMOTION] and [MOOD] tone, [TEMPO], [GROOVE], [INSTRUMENTATION], [PRODUCTION]. Total duration: [calculated duration] seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+    
+    [STRUCTURE METATAGS — based on production section name and duration]
+    ```
+    
+    EXCLUSIONS FIELD:
+    ```
+    [EXCLUSIONS from SUNO_STYLE_LIBRARY verbatim]
+    ```
+
+  element_order:
+    - Style name (MUST come first)
+    - Function modifier
+    - Emotion token + mood
+    - Tempo
+    - Groove
+    - Instrumentation
+    - Production
+    - Total duration declaration
+    - Instrumental suffix
+    - Structure metatags
+
+  style_field_sources:
+    style_name: "From SUNO_STYLE_LIBRARY.yaml, suno_name field (English-only, no CJK)"
+    function_modifier: "From MUSIC_FUNCTION_MAP → modifier mapping"
+    emotion_token: "From function + rotation (primary for first occurrence, alternates for subsequent)"
+    mood: "From BEAT_GRAPH.yaml production_sections.mood"
+    tempo_groove_instrumentation_production: "From SUNO_STYLE_LIBRARY.yaml style field (with {EMOTION} replaced)"
+    total_duration: "From MUSIC_DURATIONS.yaml target_duration"
+    instrumental_suffix: "Fixed: 'Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.'"
+    structure_metatags: "Based on production section name and calculated duration"
+
+  exclusions_field:
+    source: "From SUNO_STYLE_LIBRARY.yaml excludes field (verbatim)"
+    requirement: "Must be separate field, NOT integrated into style field"
+
+  lyrics_field: "Currently nothing (instrumental only)"
+
+# =============================================================================
+# 6. VARIABLE_REFERENCE
+# =============================================================================
+
+VARIABLE_REFERENCE:
+  variables:
+    
+    # Production section variables
+    production_section_count:
+      source: "BEAT_GRAPH.yaml production_sections length"
+      type: "derived"
+      variability: "per-version"
+      description: "Number of production sections (typically 3-5)"
+    
+    production_section_names:
+      source: "BEAT_GRAPH.yaml production_sections.name"
+      type: "derived"
+      variability: "per-version"
+      description: "Section names (HOOK, BUILD, ESCALATE, LAND, etc.)"
+    
+    production_section_moods:
+      source: "BEAT_GRAPH.yaml production_sections.mood"
+      type: "derived"
+      variability: "per-version"
+      description: "Emotional mood for each section"
+    
+    production_section_timing:
+      source: "BEAT_GRAPH.yaml production_sections.timing"
+      type: "derived"
+      variability: "per-version"
+      description: "Time range in format 'MM:SS-MM:SS'"
+    
+    # Genre lane variables
+    lane_id:
+      source: "GENRE_ASSIGNMENT.yaml production_section_lanes"
+      type: "derived"
+      variability: "per-version"
+      description: "Selected genre lane per production section"
+    
+    suno_name:
+      source: "SUNO_STYLE_LIBRARY.yaml lanes.*.suno_name"
+      type: "fixed"
+      variability: "system-wide"
+      description: "English-only style name for Suno"
+    
+    # Function variables
+    function:
+      source: "MUSIC_FUNCTION_MAP.yaml functions"
+      type: "derived"
+      variability: "per-version"
+      description: "Musical function per production section"
+    
+    function_modifier:
+      source: "Function → modifier mapping (fixed table)"
+      type: "fixed"
+      variability: "system-wide"
+      description: "Short modifier appended after style name"
+    
+    # Emotion variables
+    emotion_token:
+      source: "Function + rotation (primary/alternates)"
+      type: "derived"
+      variability: "per-version"
+      description: "Emotional descriptor with rotation for variety"
+    
+    emotion_rotation:
+      source: "Fixed rotation table in SUNO_STYLE_LIBRARY.yaml"
+      type: "fixed"
+      variability: "system-wide"
+      description: "Primary and alternate emotion tokens per function"
+    
+    # Duration variables
+    calculated_duration:
+      source: "MUSIC_DURATIONS.yaml sections.calculated_duration"
+      type: "derived"
+      variability: "per-version"
+      description: "Duration calculated from timing field"
+    
+    target_duration:
+      source: "MUSIC_DURATIONS.yaml sections.target_duration"
+      type: "derived"
+      variability: "per-version"
+      description: "Target duration with buffer added"
+    
+    buffer_seconds:
+      source: "MUSIC_DURATIONS.yaml config.buffer_seconds"
+      type: "fixed"
+      variability: "system-wide"
+      description: "Buffer added for [Extend] section (default: 10)"
+    
+    # Style variables
+    style_template:
+      source: "SUNO_STYLE_LIBRARY.yaml lanes.*.style"
+      type: "fixed"
+      variability: "system-wide"
+      description: "Style template with {EMOTION} placeholder"
+    
+    exclusions_template:
+      source: "SUNO_STYLE_LIBRARY.yaml lanes.*.excludes"
+      type: "fixed"
+      variability: "system-wide"
+      description: "Exclusions template (verbatim)"
+
+# =============================================================================
+# 7. CONSTRAINTS
+# =============================================================================
+
+CONSTRAINTS:
+  
+  hard_rules:
+    - "Music MUST NOT author emotional interpretation"
+    - "Music MUST NOT signal catharsis, redemption, nostalgia, or moral resolution"
+    - "Style name MUST come FIRST in Suno prompt (Suno parses left-to-right with decreasing weight)"
+    - "EVERY style prompt MUST end with instrumental declaration: 'Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.'"
+    - "Style text MUST include total duration inline: 'Total duration: [calculated duration] seconds.'"
+    - "CJK characters MUST NOT appear anywhere in style or exclusions"
+    - "'Documentary' MUST NOT appear in the first 5 words of style"
+    - "Exclusions MUST be separate field, NOT integrated into style field"
+  
+  no_cheese_rule:
+    description: "Music must be engaging and dramatic but avoid sentimentality"
+    allowed_amplification:
+      - tension
+      - urgency
+      - gravity
+      - unease
+      - inevitability
+    must_avoid:
+      - sentimentality
+      - heroism
+      - melodrama
+      - emotional payoff
+  
+  forbidden_genre_lanes:
+    - C2_CLASSICAL_CHINESE_ORCHESTRAL: "Melody-first form implies emotional arc and resolution"
+    - C3_MANDAPOP_BALLAD: "Ballad form implies emotional payoff and nostalgia"
+    - K5_KPOP_BALLAD: "Ballad form implies emotional payoff and catharsis"
+    - K6_KPOP_DANCE: "Hook-driven chorus structure implies emotional payoff"
+  
+  character_lane_constraints:
+    description: "Character lanes add rhythmic, tonal, or textural distinctiveness"
+    must_behave_as:
+      - texture-first
+      - rhythm-first
+      - atmosphere-supporting
+    must_not_behave_as:
+      - melody-led
+      - emotionally narrative
+      - nostalgic
+      - culturally storytelling
+      - foregrounded thematic drivers
+  
+  opening_jolt_rule:
+    description: "For opening or early sections, avoid defaulting to BACKBONE_MINIMAL_PIANO"
+    preferred_opening_lanes:
+      - J3_TRAPANESE: "sharp, modern, immediate"
+      - K1_KOREAN_HIPHOP: "punchy, hard-hitting, contemporary"
+      - C4_GUOCHAO: "punchy, rhythmic, contemporary"
+      - K3_KOREAN_ELECTRONIC: "driving, polished, alert"
+      - BACKBONE_ANALYTICAL_ELECTRONIC: "clean, alert, neutral"
+      - SEA1_THAI_ELECTRONIC: "hypnotic, driving, distinctive"
+    avoid_for_openings:
+      - BACKBONE_MINIMAL_PIANO: "too gentle"
+      - C5_GUFENG: "too ambient"
+      - A2_ASIAN_ELECTRONIC_AMBIENT: "too slow"
+      - BACKBONE_MINIMAL_PERCUSSIVE: "too sparse"
+      - K2_KRNB: "too smooth"
+  
+  form_safety_rule:
+    description: "Styles whose musical FORM inherently implies melody-first development, emotional arc, nostalgia, or thematic resolution MUST NOT be selected"
+  
+  required_elements:
+    - "Instrumental declaration suffix"
+    - "Total duration in style body"
+    - "Style name first"
+    - "Separate exclusions field"
+
+# =============================================================================
+# 8. KNOWN_ISSUES
+# =============================================================================
+
+KNOWN_ISSUES:
+
+  issue_1:
+    description: "Current metatags are custom, not Suno-native"
+    details: |
+      Our structure metatags like [Hook], [Sustain], [Transition], [Arrive], [Settle], [Close]
+      are NOT recognized by Suno. Suno only recognizes its native vocabulary:
+      [Intro], [Verse], [Pre-Chorus], [Chorus], [Bridge], [Outro], [Build], [Drop], [Break], [Fade]
+    impact: "HIGH - Suno likely ignores our custom tags entirely, making them wasted tokens"
+    resolution: "Use Suno-native tags instead (see SUNO_NATIVE_TAGS section)"
+
+  issue_2:
+    description: "Internal dynamics are template-based, not content-aware"
+    details: |
+      Structure templates are fixed per production section type:
+      - HOOK always gets [Hook][Sustain][Transition]
+      - BUILD always gets [Establish][Accumulate][Intensify][Prepare]
+      - etc.
+      This ignores actual script content - where peaks fall, inline markers like [LAND], intensity scores.
+    impact: "RESOLVED - step 12E derives dynamics from content"
+    resolution: "Step 12E (Music Dynamics Mapping) derives internal dynamics from BEAT_GRAPH emotional_function, STEP3B intensity scores, and AV_SCRIPT inline markers"
+
+  issue_3:
+    description: "MUSIC_DURATIONS.js uses hardcoded section_name→function mapping"
+    details: "Should read from MUSIC_FUNCTION_MAP.yaml instead of hardcoding HOOK→ORIENT, etc."
+    impact: "Low - names are standardized in structure_thematic step 5"
+
+  issue_4:
+    description: "Emotion token divergence between components"
+    details: "MUSIC_DURATIONS extracts emotion from BEAT_GRAPH moods (beat-level), SUNO_PROMPT_SET uses function-derived tokens (section-level)"
+    impact: "Low - both approaches are reasonable"
+
+  issue_5:
+    description: "Function mapping inconsistency"
+    details: "MUSIC_DURATIONS uses hardcoded mapping, MUSIC_FUNCTION_MAP uses decision tree"
+    impact: "Low - unlikely to diverge in practice"
+
+  issue_6:
+    description: "No validation of production_sections structure"
+    details: "Doesn't validate that names match [HOOK, BUILD, ESCALATE, LAND] or that beat ranges don't overlap"
+    impact: "Medium - could cause runtime errors"
+
+  issue_7:
+    description: "Duration calculations don't validate against AV_SCRIPT"
+    details: "Music durations calculated independently of actual video timing"
+    impact: "Medium - could cause timing mismatches"
+
+  issue_8:
+    description: "Production sections ≠ song structure - category error in metatag mapping"
+    details: |
+      Production sections (HOOK/BUILD/ESCALATE/LAND) are DOCUMENTARY NARRATIVE STRUCTURE.
+      Suno tags (Intro/Verse/Chorus/Bridge/Outro) are POP SONG STRUCTURE.
+      These don't map 1:1:
+      - BUILD is 180 seconds, a Verse is ~30 seconds
+      - Documentary never repeats, songs are built for repetition
+      - Documentary follows cognitive journey, songs follow tension/release
+      Mapping by FUNCTION (ORIENT/EXPLAIN/INVESTIGATE/etc.) is more appropriate than mapping by section.
+    impact: "HIGH - wrong mental model leads to inappropriate tag choices"
+
+# =============================================================================
+# 8a. SUNO_NATIVE_TAGS (Research findings)
+# =============================================================================
+
+SUNO_NATIVE_TAGS:
+  description: "Tags that Suno v5 actually recognizes and interprets"
+  source: "Suno documentation and community research (2025)"
+
+  recognized_tags:
+    - tag: "[Intro]"
+      energy: "low-medium"
+      position: "beginning"
+      musical_role: "Establish sonic world"
+
+    - tag: "[Verse]"
+      energy: "medium"
+      position: "after intro, between choruses"
+      musical_role: "Narrative content, supportive"
+
+    - tag: "[Pre-Chorus]"
+      energy: "medium-high"
+      position: "before chorus"
+      musical_role: "Runway to climax, building"
+
+    - tag: "[Chorus]"
+      energy: "high (peak)"
+      position: "central, repeated"
+      musical_role: "Emotional payoff, hook - AVOID for documentary (no cheese rule)"
+
+    - tag: "[Bridge]"
+      energy: "variable"
+      position: "after 2nd chorus"
+      musical_role: "Contrast, new perspective, weight"
+
+    - tag: "[Outro]"
+      energy: "descending"
+      position: "end"
+      musical_role: "Satisfying conclusion"
+
+    - tag: "[Break]"
+      energy: "low-medium"
+      position: "after high energy"
+      musical_role: "Dynamic contrast, breather"
+
+    - tag: "[Build]"
+      energy: "rising"
+      position: "before drop/climax"
+      musical_role: "Create anticipation"
+
+    - tag: "[Drop]"
+      energy: "very high"
+      position: "climax (EDM)"
+      musical_role: "Physical catharsis - AVOID for documentary (no cheese rule)"
+
+    - tag: "[Fade]"
+      energy: "descending"
+      position: "end"
+      musical_role: "Lingering, unresolved ending"
+
+  tags_to_avoid_for_documentary:
+    - "[Chorus]"  # Implies emotional payoff
+    - "[Drop]"    # Implies catharsis
+
+  recommended_function_to_tag_mapping:
+    ORIENT: "[Intro]"       # Establishing but alert
+    EXPLAIN: "[Verse]"      # Supportive, clear
+    INVESTIGATE: "[Build]"  # Tension, forward pressure
+    TRANSITION: "[Break]"   # Suspended, liminal
+    CONSEQUENCE: "[Bridge]" # Weight, gravity
+    UNRESOLVED_CLOSE: "[Fade]"  # Lingering, open
+
+  placement_options:
+    style_field: "Current approach - put tags in style prompt"
+    lyrics_field: "Alternative - Suno v5 may interpret structural tags in lyrics field better for instrumental"
+    note: "For instrumental, lyrics field can contain ONLY bracketed tags like [Instrumental Intro], [Instrumental Bridge]"
+
+# =============================================================================
+# 8b. CONTENT_MARKERS (Available signals for content-aware dynamics)
+# =============================================================================
+
+CONTENT_MARKERS:
+  description: "Existing signals in pipeline outputs that could drive internal music dynamics"
+  purpose: "Replace template-based dynamics with content-aware dynamics"
+
+  markers_by_source:
+
+    BEAT_GRAPH_yaml:
+      emotional_function:
+        description: "Per-beat emotional trajectory"
+        values:
+          - "setup"           # Low tension, introductory
+          - "tension_building" # Escalating engagement
+          - "tension_peak"    # Maximum emotional pressure
+          - "contrast"        # Juxtaposition between ideas
+          - "reveal"          # Key revelation/plot twist
+          - "insight_aha"     # Breakthrough moment
+          - "deepening"       # Extending previous insight
+          - "evidence_lock"   # Proof/confirmation
+          - "urgency"         # Time pressure
+          - "stakes_escalation" # Raising the stakes
+          - "resolution"      # Conclusion/transformation
+        usage: "Map to Suno tags based on energy level"
+
+      intensity_score:
+        description: "0-10 engagement intensity per beat"
+        source: "STEP3B_engagement_strategy.yaml"
+        usage: |
+          5-6 → [Verse], [Intro] (moderate)
+          7   → [Build], [Pre-Chorus] (rising)
+          8   → [Bridge], sustained [Build] (high)
+          9-10 → [Bridge] with density (peak weight)
+
+      peak_moments:
+        description: "Explicitly flagged climactic beats"
+        types:
+          - "emotional_peak"  # Climactic emotional moment
+          - "insight_peak"    # Revelation moment
+        usage: "These beats get maximum dynamic range"
+
+    AV_SCRIPT_md:
+      section_headers:
+        description: "TONE, PACE, PURPOSE per section"
+        example: |
+          ## BUILD [0:30-4:15]
+          **TONE:** Human face for statistics - tragic irony hooks emotionally
+          **PACE:** steady narrative flow
+          **PURPOSE:** Human face for statistics
+        usage: "PACE field directly informs internal dynamics (steady vs building)"
+
+      inline_markers:
+        description: "Dramatic moment markers within narration"
+        markers:
+          "[LAND]":
+            meaning: "Emphasis point; let statement land; pause for effect"
+            musical_treatment: "Sustain → brief [Break] → continue"
+          "[SINK IN]":
+            meaning: "Extended pause; let complex implication settle"
+            musical_treatment: "Extended sparse space, instrumentation pulls back"
+          "[PAUSE for effect]":
+            meaning: "Director-level timing instruction"
+            musical_treatment: "Musical breath, single note sustain"
+        usage: "Insert musical space/breath at these points"
+
+    engagement_strategy_yaml:
+      pattern_interrupts:
+        description: "Register shifts requiring sudden musical/tonal changes"
+        example:
+          position: "BEAT_06"
+          type: "register_shift"
+          description: "Shift from business narrative to science explanation"
+        usage: "Trigger texture/timbre change in music"
+
+      open_loops:
+        description: "Questions that create anticipatory tension"
+        example:
+          loop_id: "LOOP_01"
+          opens_at: "BEAT_01"
+          question: "Why would a company that invented something refuse to use it?"
+          closes_at: "BEAT_03"
+        usage: "Music builds during open loop, releases slightly when closed"
+
+  proposed_dynamics_derivation:
+    description: "How to translate markers into internal music shape"
+    steps:
+      1: "For each production section, gather its beats' markers"
+      2: "Map emotional_function to Suno tags"
+      3: "Map intensity scores to energy envelope"
+      4: "Insert [Break] or sparse space at inline markers ([LAND], [SINK IN])"
+      5: "Flag peak_moments for maximum dynamic range"
+      6: "Construct internal dynamic sequence with timing"
+    example: |
+      BUILD section (180s) containing BEAT_03, BEAT_04, BEAT_05:
+      - BEAT_03: tension_building (7/10) → [Verse] 0-60s
+      - BEAT_04: contrast (6/10) → [Build] 60-140s
+      - BEAT_05: reveal (8/10) + emotional_peak + [LAND] marker
+        → [Bridge] 140-175s, [Break] 175-180s
+
+# =============================================================================
+# 9. LANE LIBRARY REFERENCE
+# =============================================================================
+
+LANE_LIBRARY_REFERENCE:
+  total_allowed_lanes: 20
+  total_forbidden_lanes: 4
+  
+  backbone_lanes:
+    - BACKBONE_ANALYTICAL_ELECTRONIC: "Minimal electronic"
+    - BACKBONE_MINIMAL_PIANO: "Minimal piano"
+    - BACKBONE_PULSING_SYNTH: "Pulsing synth"
+    - BACKBONE_MINIMAL_PERCUSSIVE: "Percussive underscore"
+  
+  chinese_lanes:
+    - C1_CHINESE_HIPHOP_FUSION: "Chinese hip-hop fusion"
+    - C4_GUOCHAO: "Guochao electronic"
+    - C5_GUFENG: "Gufeng ambient"
+    - C6_MODERN_CINEMATIC_CHINESE: "Modern cinematic Chinese"
+  
+  japanese_lanes:
+    - J1_WAFU_HIPHOP: "Japanese hip-hop"
+    - J2_WAMONO: "Wamono funk-jazz"
+    - J3_TRAPANESE: "Trapanese"
+    - J4_CITY_POP: "Japanese city pop instrumental"
+  
+  korean_lanes:
+    - K1_KOREAN_HIPHOP: "Korean hip-hop"
+    - K2_KRNB: "Korean R&B instrumental"
+    - K3_KOREAN_ELECTRONIC: "Korean electronic"
+    - K4_KOREAN_TRADITIONAL_FUSION: "Korean traditional fusion"
+  
+  pan_asian_lanes:
+    - A1_ASIAN_LOFI: "Asian lo-fi beats"
+    - A2_ASIAN_ELECTRONIC_AMBIENT: "Asian electronic ambient"
+  
+  southeast_asian_lanes:
+    - SEA1_THAI_ELECTRONIC: "Thai electronic molam fusion"
+    - SEA2_INDONESIAN_FUNK: "Indonesian funk electronic"
+
+# =============================================================================
+# 10. EMOTION TOKEN ROTATION TABLES
+# =============================================================================
+
+EMOTION_TOKEN_ROTATION:
+  function_emotion_mapping:
+    ORIENT:
+      primary: "watchful"
+      alternates: ["alert", "anticipatory", "poised"]
+    EXPLAIN:
+      primary: "steady"
+      alternates: ["measured", "clear", "focused"]
+    INVESTIGATE:
+      primary: "uneasy"
+      alternates: ["probing", "tense", "searching"]
+    TRANSITION:
+      primary: "suspended"
+      alternates: ["drifting", "liminal", "passing"]
+    CONSEQUENCE:
+      primary: "grave"
+      alternates: ["weighty", "sober", "heavy"]
+    UNRESOLVED_CLOSE:
+      primary: "lingering"
+      alternates: ["unsettled", "suspended", "open"]
+  
+  rotation_logic: |
+    - Use PRIMARY for FIRST occurrence of each function
+    - Use ALTERNATES (in order) for subsequent occurrences of SAME function
+    - Cycle back to PRIMARY after exhausting alternates
+    - Example: INVESTIGATE (1st) → "uneasy", INVESTIGATE (2nd) → "probing", INVESTIGATE (3rd) → "tense", INVESTIGATE (4th) → "searching", INVESTIGATE (5th) → "uneasy"
+
+# =============================================================================
+# 11. FUNCTION → MODIFIER MAPPING
+# =============================================================================
+
+FUNCTION_MODIFIER_MAPPING:
+  ORIENT: "underscore, establishing"
+  EXPLAIN: "underscore, analytical"
+  INVESTIGATE: "tension score, probing"
+  TRANSITION: "underscore, transitional"
+  CONSEQUENCE: "underscore, weighted"
+  UNRESOLVED_CLOSE: "underscore, unresolved ending"
+
+# =============================================================================
+# 12. PRODUCTION SECTION → FUNCTION GUIDANCE
+# =============================================================================
+
+PRODUCTION_SECTION_GUIDANCE:
+  typical_distribution:
+    HOOK: "ORIENT"
+    BUILD: "EXPLAIN or INVESTIGATE"
+    ESCALATE: "INVESTIGATE"
+    LAND: "CONSEQUENCE or UNRESOLVED_CLOSE"
+  
+  five_section_structure:
+    HOOK: "ORIENT"
+    BUILD: "EXPLAIN or INVESTIGATE"
+    ESCALATE_1: "INVESTIGATE"
+    ESCALATE_2: "INVESTIGATE"
+    LAND: "UNRESOLVED_CLOSE"
+
+# =============================================================================
+# 13. PROPOSED_IMPROVEMENTS
+# =============================================================================
+
+PROPOSED_IMPROVEMENTS:
+  description: "Prioritized improvements to address known issues"
+
+  improvement_1:
+    name: "Replace custom metatags with Suno-native tags"
+    priority: "HIGH"
+    addresses: "issue_1, issue_8"
+    change: |
+      Replace:
+        [Hook], [Sustain], [Transition]
+        [Establish], [Accumulate], [Intensify], [Prepare]
+        [Rise], [Push], [Peak]
+        [Arrive], [Settle], [Close]
+      With Suno-native:
+        [Intro], [Verse], [Build], [Bridge], [Break], [Fade], [Outro]
+      Map by FUNCTION not by section name.
+
+  improvement_2:
+    name: "Content-aware internal dynamics"
+    priority: "HIGH"
+    status: "IMPLEMENTED"
+    addresses: "issue_2"
+    implemented_as: "Step 12E - Music Dynamics Mapping"
+    inputs:
+      - "BEAT_GRAPH.yaml (emotional_function, intensity per beat)"
+      - "AV_SCRIPT.md (inline markers: [LAND], [SINK IN], PACE headers)"
+      - "STEP3B_engagement_strategy.yaml (peak_moments, pattern_interrupts)"
+    outputs:
+      - "MUSIC_DYNAMICS.yaml (internal shape per section)"
+    logic: |
+      For each production section:
+      1. Get beats within section
+      2. Look at intensity scores and emotional_function
+      3. Find inline markers ([LAND], [SINK IN]) in script
+      4. Identify peak_moments
+      5. Generate Suno-native tags with timing based on content
+
+  improvement_3:
+    name: "Versioned prompt schema"
+    priority: "MEDIUM"
+    purpose: "A/B test different prompt formats without code changes"
+    file: "PROMPT_SCHEMA_VERSIONS.yaml"
+    versions_to_test:
+      v1_current: "Custom metatags (baseline)"
+      v2_suno_native: "Suno-native tags in style field"
+      v3_no_metatags: "No metatags at all"
+      v4_lyrics_field: "Metatags in lyrics field for instrumental"
+      v5_emotion_arc: "Suno v5 emotion arc syntax"
+    implementation: |
+      - Create PROMPT_SCHEMA_VERSIONS.yaml with active_version selector
+      - Update 12C to read active version
+      - Switch versions by changing active_version
+      - Track which version generated each output
+
+  improvement_4:
+    name: "HOOK special handling"
+    priority: "MEDIUM"
+    rationale: "HOOK is short (30s) and needs immediate grab - different from other sections"
+    proposal: |
+      HOOK gets mode selection based on TONE from AV_SCRIPT header:
+      - impact_first: [Intro] 0-5s, [Build] 5-25s, [Break] 25-30s (for shocking opener)
+      - mystery_first: [Intro] 0-15s, [Build] 15-30s (for curiosity-driven opener)
+      - statement_first: [Bridge] 0-20s, [Break] 20-30s (for bold claim opener)
+
+# =============================================================================
+# 14. QUICK REFERENCE
+# =============================================================================
+
+QUICK_REFERENCE:
+  suno_ui_fields:
+    style_of_music: "style field from SUNO_PROMPT_SET.yaml"
+    lyrics: "Currently empty for instrumental (future: structural tags only)"
+    exclude_from_song: "exclusions field from SUNO_PROMPT_SET.yaml - MANDATORY"
+
+  what_works_now:
+    - "Duration inline in style prompt"
+    - "Style name first"
+    - "Exclusions field"
+    - "Genre lanes"
+    - "Function-based emotion tokens"
+    - "Production section structure (HOOK/BUILD/ESCALATE/LAND)"
+
+  what_needs_fixing:
+    - "Custom metatags → Suno-native tags"
+    - "Template-based dynamics → content-aware dynamics"
+
+  key_constraint: "No cheese rule - music amplifies tension/gravity, avoids sentimentality/payoff"
+
+# =============================================================================
+# END OF SPECIFICATION
+# =============================================================================

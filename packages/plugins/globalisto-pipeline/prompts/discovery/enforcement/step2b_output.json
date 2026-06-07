@@ -1,0 +1,185 @@
+{
+  "status": "SUFFICIENT",
+  "discourse_items": [
+    {
+      "id": "D_01",
+      "content": "What used to be a completely hardware-dependent network transformed into a complete software-dependent network. That shift has given operators more flexibility to add services or tweak products, but it has come at the expense of reliability.",
+      "source": "NPR",
+      "source_type": "article",
+      "url": "https://www.npr.org/2026/01/15/nx-s1-5678889/verizon-outage-what-happened",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_02",
+      "content": "With cloud- and software-based networks, there are more opportunities for glitches and attacks. The telecom companies haven't yet adjusted their training to that reality — that their staff have to be expert not just in cell towers and wireless but about cloud services.",
+      "source": "NPR",
+      "source_type": "article",
+      "url": "https://www.npr.org/2026/01/15/nx-s1-5678889/verizon-outage-what-happened",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_03",
+      "content": "Outages are a fact of life these days for major telecommunications firms. Modern telecom networks are cloud networks. 5G networks are mainly, like, hundreds of different cloud services.",
+      "source": "NPR",
+      "source_type": "article",
+      "url": "https://www.npr.org/2026/01/15/nx-s1-5678889/verizon-outage-what-happened",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_04",
+      "content": "Verizon went all in on the highly specialized 5G millimeter wave high-band frequency which limited its 5G geographic coverage to high-density hotspots such as sports stadiums, shopping malls, or convention centers, hardly convenient for most consumers.",
+      "source": "Fortune",
+      "source_type": "article",
+      "url": "https://fortune.com/2023/07/24/why-att-verizon-infrastructure-woes/",
+      "date": "2023-07",
+      "is_hot": false
+    },
+    {
+      "id": "D_05",
+      "content": "AT&T underinvested in 5G by an estimated 50% compared to peers while capital was diverted toward failed acquisitions. Verizon's millimeter wave bet left it with a poorly deployed 5G network lacking broad coverage.",
+      "source": "Fortune",
+      "source_type": "article",
+      "url": "https://fortune.com/2023/07/24/why-att-verizon-infrastructure-woes/",
+      "date": "2023-07",
+      "is_hot": false
+    },
+    {
+      "id": "D_06",
+      "content": "I thought I got sim swapped and had a heart attack when my phone showed SOS mode during the outage.",
+      "source": "Reddit r/sysadmin",
+      "source_type": "reddit",
+      "url": "https://reddit.com/r/sysadmin/comments/verizon",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_07",
+      "content": "I have 5 phone lines and they are ALL DOWN or go IN AND OUT. This is unacceptable for a major carrier.",
+      "source": "Reddit r/verizon",
+      "source_type": "reddit",
+      "url": "https://reddit.com/r/verizon/comments/outage",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_08",
+      "content": "Weirdly 1 of my 3 phones on this account IS working but other two show SOS mode. Makes no sense.",
+      "source": "Reddit r/verizon",
+      "source_type": "reddit",
+      "url": "https://reddit.com/r/verizon/comments/sos",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_09",
+      "content": "The sharpest fault line in the debate emerged around account size. Verizon's credit is issued per account, not per line, meaning a single-line customer and a family with six phones receive the same $20.",
+      "source": "Washington Times",
+      "source_type": "article",
+      "url": "https://www.washingtontimes.com/news/2026/jan/16/verizons-20-outage-credit/",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_10",
+      "content": "One Reddit user received $40 in credits after asking for more, while another received $100. One user got approved for $200 in credits after losing out on a day's worth of gig work due to the outage.",
+      "source": "Android Authority",
+      "source_type": "article",
+      "url": "https://www.androidauthority.com/verizon-network-outage-higher-compensation-3633498/",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_11",
+      "content": "After living in a rural area for years with excellent service, the last couple of years have brought a very different experience with internet data being night and day difference, much slower.",
+      "source": "Verizon Community",
+      "source_type": "forum",
+      "url": "https://community.verizon.com/t5/Mobile-Network-Archive/Cell-service-quality-diminished/td-p/1224281",
+      "date": "2025",
+      "is_hot": false
+    },
+    {
+      "id": "D_12",
+      "content": "We had a vehicle emergency at the cabin and had to walk a mile to get clear voice service. Will not feel comfortable with the boys hunting with no quality cell service.",
+      "source": "Verizon Community",
+      "source_type": "forum",
+      "url": "https://community.verizon.com/t5/Verizon-Wireless-Services/rural-areas-paying/td-p/982963",
+      "date": "2025",
+      "is_hot": false
+    },
+    {
+      "id": "D_13",
+      "content": "Beyond angry: For parents trying to track college-age children or spouses commuting home, the outage created hours of anxiety.",
+      "source": "Washington Times",
+      "source_type": "article",
+      "url": "https://www.washingtontimes.com/news/2026/jan/14/beyond-angry-people-saying-verizon-outage/",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_14",
+      "content": "The FCC is continuing to actively investigate and monitor the situation to determine next steps after Verizon stated that the outage has been resolved.",
+      "source": "FCC",
+      "source_type": "other",
+      "url": "https://twitter.com/FCC/status/2011858395846832429",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_15",
+      "content": "More than 40,000 public safety entities were affected, and the outage affected components of the federal government, with more than 2.3 million outage reports filed.",
+      "source": "House Homeland Security",
+      "source_type": "other",
+      "url": "https://homeland.house.gov/2026/01/16/chairman-garbarino-requests-briefings/",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_16",
+      "content": "In Logan, Iowa, firefighters and EMTs rely on apps to respond to emergencies, but the system isn't working properly. One EMT described the phone just spinning and spinning, saying it will delay response time.",
+      "source": "WOWT",
+      "source_type": "article",
+      "url": "https://www.wowt.com/2023/09/28/lack-service-frustrates-verizon-customers-rural-iowa-town/",
+      "date": "2023-09",
+      "is_hot": false
+    },
+    {
+      "id": "D_17",
+      "content": "The Wednesday incident was the second time within six months Verizon has undergone a service disruption due to a software mishap. It blamed an August 2025 outage on a software-related issue.",
+      "source": "BankInfoSecurity",
+      "source_type": "article",
+      "url": "https://www.bankinfosecurity.com/breach-roundup-software-update-caused-verizon-outage-a-30535",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_18",
+      "content": "It looks like their 5G SA Standalone core went down during a minor feature change according to telecom analyst Roger Entner.",
+      "source": "CNET via Recon Analytics",
+      "source_type": "article",
+      "url": "https://www.cnet.com/tech/mobile/verizon-outage-cause/",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_19",
+      "content": "New York City told residents the outage could affect some users trying to call 911 for emergency help. Washington DC alerted residents that some callers on Verizon might not reach 911.",
+      "source": "NBC News",
+      "source_type": "article",
+      "url": "https://www.nbcnews.com/business/consumer/verizon-outage-new-york-washington-rcna254050",
+      "date": "2026-01",
+      "is_hot": true
+    },
+    {
+      "id": "D_20",
+      "content": "The proportion of outages costing over $100,000 has soared. Over 60% of failures now result in at least $100,000 in total losses, up from 39% in 2019.",
+      "source": "Uptime Institute",
+      "source_type": "other",
+      "url": "https://uptimeinstitute.com/about-ui/press-releases/2022-outage-analysis",
+      "date": "2022",
+      "is_hot": false
+    }
+  ]
+}

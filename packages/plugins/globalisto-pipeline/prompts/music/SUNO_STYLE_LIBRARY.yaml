@@ -1,0 +1,528 @@
+version: suno_v5_documentary_v4
+description: >
+  Expanded canonical Suno v5 style library.
+  ENGLISH-FIRST naming for optimal Suno parsing.
+  Now includes Korean, Southeast Asian, and pan-Asian lanes.
+  Separate style and exclusions fields (Suno v5 format).
+  Atomic, read-only, Suno-native style blocks.
+
+# ════════════════════════════════════════════════════════════════
+# EMOTION TOKEN REFERENCE (used by Phase 12C)
+# ════════════════════════════════════════════════════════════════
+#
+# | Function         | Primary    | Alt 1        | Alt 2      | Alt 3     |
+# |------------------|------------|--------------|------------|-----------|
+# | ORIENT           | watchful   | alert        | anticipatory | poised  |
+# | EXPLAIN          | steady     | measured     | clear      | focused   |
+# | INVESTIGATE      | uneasy     | probing      | tense      | searching |
+# | TRANSITION       | suspended  | drifting     | liminal    | passing   |
+# | CONSEQUENCE      | grave      | weighty      | sober      | heavy     |
+# | UNRESOLVED_CLOSE | lingering  | unsettled    | suspended  | open      |
+#
+# ════════════════════════════════════════════════════════════════
+
+lanes:
+
+  # ══════════════════════════════════════════════════════════════
+  # CHINESE-DERIVED CHARACTER LANES
+  # ══════════════════════════════════════════════════════════════
+
+  C1_CHINESE_HIPHOP_FUSION:
+    suno_name: "Chinese hip-hop fusion"
+    style: >
+      Chinese hip-hop fusion, {EMOTION} tone, mid-tempo 75-90 BPM,
+      steady hip-hop groove with clear downbeat and restrained swing,
+      melodic pentatonic phrasing, plucked traditional instruments layered with piano,
+      light sustained strings, clean pop-hip-hop structure with controlled dynamics
+      and minimal ornamentation.
+    excludes: >
+      aggressive trap drums, distorted bass, EDM drops, rock guitars,
+      cinematic trailer scoring, free-tempo rubato, heavy reverb washes,
+      experimental jazz harmony.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: poor
+      INVESTIGATE: good
+      TRANSITION: possible
+      CONSEQUENCE: possible
+      UNRESOLVED_CLOSE: poor
+
+  C4_GUOCHAO:
+    suno_name: "Guochao electronic"
+    style: >
+      Guochao electronic, {EMOTION} tone, mid-tempo 95-115 BPM,
+      rhythm-first structure with strong pulse,
+      modern electronic beats fused with short traditional Chinese motifs,
+      punchy articulation, concise melodic phrases,
+      tight contemporary production.
+    excludes: >
+      romantic orchestral scoring, long legato string passages,
+      slow ballad pacing, vintage lo-fi textures,
+      jazz swing, Western folk or rock aesthetics.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: poor
+      INVESTIGATE: good
+      TRANSITION: possible
+      CONSEQUENCE: poor
+      UNRESOLVED_CLOSE: poor
+
+  C5_GUFENG:
+    suno_name: "Gufeng ambient"
+    style: >
+      Gufeng ambient, {EMOTION} tone, slow to mid-tempo 60-85 BPM,
+      free-flowing rhythmic pacing, airy textures,
+      traditional Chinese instruments with sustained lyrical phrasing,
+      spacious fantasy-oriented ambience and minimal rhythmic density.
+    excludes: >
+      hip-hop beats, trap rhythms, pop song structures,
+      EDM energy, funk grooves, heavy percussion,
+      cinematic trailer effects.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: good
+      INVESTIGATE: excellent
+      TRANSITION: excellent
+      CONSEQUENCE: excellent
+      UNRESOLVED_CLOSE: excellent
+
+  C6_MODERN_CINEMATIC_CHINESE:
+    suno_name: "Modern cinematic Chinese"
+    style: >
+      Modern cinematic Chinese, {EMOTION} tone, slow to mid-tempo 65-85 BPM,
+      sparse rhythmic pulse, restrained articulation,
+      hybrid of traditional Chinese motifs with minimal cinematic synth pads
+      and low percussion, controlled dynamics and clean modern mix.
+    excludes: >
+      busy pop arrangements, strong hip-hop swing,
+      EDM drops, folk strumming,
+      jazz harmony, overly romantic classical phrasing.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: poor
+      INVESTIGATE: good
+      TRANSITION: possible
+      CONSEQUENCE: excellent
+      UNRESOLVED_CLOSE: possible
+
+  # ══════════════════════════════════════════════════════════════
+  # JAPANESE-DERIVED CHARACTER LANES
+  # ══════════════════════════════════════════════════════════════
+
+  J1_WAFU_HIPHOP:
+    suno_name: "Japanese hip-hop"
+    style: >
+      Japanese hip-hop, {EMOTION} tone, mid-tempo 80-95 BPM,
+      tight hip-hop rhythm with crisp timing,
+      strong plucked and percussive articulation using shamisen-style strings
+      and taiko-like hits, short motifs and dry focused mix.
+    excludes: >
+      sustained bowed Chinese strings, long legato orchestral pads,
+      cinematic scoring, funk basslines,
+      EDM drops, lo-fi haze.
+    function_fit:
+      ORIENT: good
+      EXPLAIN: possible
+      INVESTIGATE: poor
+      TRANSITION: good
+      CONSEQUENCE: poor
+      UNRESOLVED_CLOSE: good
+
+  J2_WAMONO:
+    suno_name: "Wamono funk-jazz"
+    style: >
+      Wamono funk-jazz, {EMOTION} tone, mid-tempo 90-110 BPM,
+      groove-first rhythmic focus, syncopated funk-jazz influence,
+      tight drumming, plucked guitar and keyboard stabs,
+      warm but controlled analog feel.
+    excludes: >
+      trap hi-hats, cinematic ambience,
+      sustained bowed strings, EDM production,
+      pop ballad pacing, heavy distortion.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: poor
+      INVESTIGATE: possible
+      TRANSITION: good
+      CONSEQUENCE: poor
+      UNRESOLVED_CLOSE: poor
+
+  J3_TRAPANESE:
+    suno_name: "Trapanese"
+    style: >
+      Trapanese, {EMOTION} tone, slow to mid-tempo 65-80 BPM,
+      minimal trap rhythm with precise grid timing,
+      sharp percussive articulation,
+      plucked Japanese motifs over deep bass and sparse synth layers,
+      restrained structure.
+    excludes: >
+      lush orchestral strings, sustained Chinese string phrasing,
+      bright pop hooks, jazz harmony,
+      funk grooves, aggressive EDM energy.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: poor
+      INVESTIGATE: excellent
+      TRANSITION: possible
+      CONSEQUENCE: good
+      UNRESOLVED_CLOSE: possible
+
+  J4_CITY_POP:
+    suno_name: "Japanese city pop instrumental"
+    style: >
+      Japanese city pop instrumental, {EMOTION} tone, mid-tempo 95-115 BPM,
+      smooth groove-first rhythm with light funk influence,
+      clean electric piano and guitar, warm analog synths,
+      polished 80s production aesthetic, tight but relaxed feel,
+      minimal vocal-style melodic hooks.
+    excludes: >
+      trap beats, heavy bass drops, cinematic scoring,
+      orchestral elements, aggressive distortion,
+      lo-fi degradation, ambient drones, ballad pacing.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: poor
+      INVESTIGATE: poor
+      TRANSITION: good
+      CONSEQUENCE: poor
+      UNRESOLVED_CLOSE: poor
+
+  # ══════════════════════════════════════════════════════════════
+  # KOREAN-DERIVED CHARACTER LANES (NEW)
+  # ══════════════════════════════════════════════════════════════
+
+  K1_KOREAN_HIPHOP:
+    suno_name: "Korean hip-hop"
+    style: >
+      Korean hip-hop, {EMOTION} tone, mid-tempo 80-100 BPM,
+      hard-hitting drums with crisp snare and punchy kick,
+      modern trap-influenced rhythm with clean K-hip-hop production,
+      minimal melodic content, emphasis on groove and flow,
+      tight compressed mix with controlled bass.
+    excludes: >
+      ballad pacing, emotional strings, cinematic swells,
+      traditional instruments, jazz harmony,
+      lo-fi textures, ambient pads, EDM drops.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: poor
+      INVESTIGATE: good
+      TRANSITION: possible
+      CONSEQUENCE: good
+      UNRESOLVED_CLOSE: poor
+
+  K2_KRNB:
+    suno_name: "Korean R&B instrumental"
+    style: >
+      Korean R&B instrumental, {EMOTION} tone, mid-slow tempo 70-90 BPM,
+      smooth groove with laid-back swing,
+      clean electric piano, soft synth pads, muted guitar,
+      modern R&B drum programming with subtle hi-hat work,
+      warm polished mix, understated and controlled.
+    excludes: >
+      aggressive trap drums, rock guitars, orchestral scoring,
+      EDM energy, heavy bass distortion,
+      cinematic impacts, uptempo dance beats, ballad crescendos.
+    function_fit:
+      ORIENT: good
+      EXPLAIN: possible
+      INVESTIGATE: poor
+      TRANSITION: excellent
+      CONSEQUENCE: good
+      UNRESOLVED_CLOSE: excellent
+
+  K3_KOREAN_ELECTRONIC:
+    suno_name: "Korean electronic"
+    style: >
+      Korean electronic, {EMOTION} tone, mid-tempo 100-120 BPM,
+      driving electronic beat with K-pop influenced production polish,
+      clean synth textures, tight sidechain compression,
+      minimal melodic hooks, rhythm-first structure,
+      bright modern mix without excessive drops or builds.
+    excludes: >
+      ballad pacing, orchestral elements, traditional instruments,
+      lo-fi aesthetics, jazz harmony, ambient drones,
+      aggressive EDM drops, rock guitars.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: good
+      INVESTIGATE: excellent
+      TRANSITION: excellent
+      CONSEQUENCE: possible
+      UNRESOLVED_CLOSE: excellent
+
+  K4_KOREAN_TRADITIONAL_FUSION:
+    suno_name: "Korean traditional fusion"
+    style: >
+      Korean traditional fusion, {EMOTION} tone, mid-tempo 85-105 BPM,
+      modern beat combined with gayageum or haegeum textures,
+      traditional Korean melodic fragments over electronic rhythm,
+      clean production blending old and new,
+      restrained ornamentation, pulse-forward structure.
+    excludes: >
+      full traditional ensemble, pansori vocals, ballad form,
+      Western orchestral scoring, trap aggression,
+      EDM drops, romantic string swells, ambient formlessness.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: good
+      INVESTIGATE: excellent
+      TRANSITION: excellent
+      CONSEQUENCE: excellent
+      UNRESOLVED_CLOSE: excellent
+
+  # ══════════════════════════════════════════════════════════════
+  # PAN-ASIAN / CROSS-REGIONAL LANES (NEW)
+  # ══════════════════════════════════════════════════════════════
+
+  A1_ASIAN_LOFI:
+    suno_name: "Asian lo-fi beats"
+    style: >
+      Asian lo-fi beats, {EMOTION} tone, slow tempo 60-75 BPM,
+      dusty vinyl texture with subtle crackle,
+      muted piano or plucked string samples with Asian pentatonic flavor,
+      soft boom-bap drums, warm bass, lo-fi tape saturation,
+      repetitive hypnotic loop structure, minimal variation.
+    excludes: >
+      clean modern production, aggressive drums, EDM elements,
+      cinematic scoring, bright mixing, orchestral instruments,
+      uptempo energy, dramatic builds or drops.
+    function_fit:
+      ORIENT: good
+      EXPLAIN: possible
+      INVESTIGATE: poor
+      TRANSITION: excellent
+      CONSEQUENCE: poor
+      UNRESOLVED_CLOSE: excellent
+
+  A2_ASIAN_ELECTRONIC_AMBIENT:
+    suno_name: "Asian electronic ambient"
+    style: >
+      Asian electronic ambient, {EMOTION} tone, slow tempo 55-70 BPM,
+      sparse atmospheric texture with subtle Asian melodic hints,
+      soft pad drones, gentle pulsing bass, minimal percussion,
+      spacious mix with long reverb tails,
+      meditative pacing, no rhythmic drive.
+    excludes: >
+      drums, trap beats, pop structure, uptempo energy,
+      bright melodic hooks, aggressive bass,
+      cinematic impacts, vocal samples, dense arrangements.
+    function_fit:
+      ORIENT: possible
+      EXPLAIN: excellent
+      INVESTIGATE: good
+      TRANSITION: excellent
+      CONSEQUENCE: good
+      UNRESOLVED_CLOSE: excellent
+
+  # ══════════════════════════════════════════════════════════════
+  # SOUTHEAST ASIAN LANES (NEW)
+  # ══════════════════════════════════════════════════════════════
+
+  SEA1_THAI_ELECTRONIC:
+    suno_name: "Thai electronic molam fusion"
+    style: >
+      Thai electronic molam fusion, {EMOTION} tone, mid-tempo 95-115 BPM,
+      driving rhythm with molam-influenced syncopation,
+      electronic beats fused with phin or khaen-like textures,
+      punchy and hypnotic groove, repetitive melodic cells,
+      modern production with Southeast Asian character.
+    excludes: >
+      slow ballad pacing, Western orchestral scoring,
+      jazz harmony, ambient formlessness, lo-fi degradation,
+      trap aggression, cinematic swells.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: poor
+      INVESTIGATE: good
+      TRANSITION: possible
+      CONSEQUENCE: possible
+      UNRESOLVED_CLOSE: poor
+
+  SEA2_INDONESIAN_FUNK:
+    suno_name: "Indonesian funk electronic"
+    style: >
+      Indonesian funk electronic, {EMOTION} tone, mid-tempo 100-115 BPM,
+      groove-first rhythm with gamelan-influenced percussive texture,
+      funky bassline, tight drums, syncopated keyboard stabs,
+      warm analog character with modern electronic polish,
+      danceable pulse without excessive melodic hooks.
+    excludes: >
+      traditional gamelan ensemble, ballad pacing, cinematic scoring,
+      trap hi-hats, ambient drones, orchestral strings,
+      aggressive EDM drops, lo-fi degradation.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: poor
+      INVESTIGATE: poor
+      TRANSITION: good
+      CONSEQUENCE: poor
+      UNRESOLVED_CLOSE: poor
+
+  # ══════════════════════════════════════════════════════════════
+  # BACKBONE LANES (culturally neutral)
+  # ══════════════════════════════════════════════════════════════
+
+  BACKBONE_ANALYTICAL_ELECTRONIC:
+    suno_name: "Minimal electronic"
+    style: >
+      Minimal electronic, {EMOTION} tone, mid-tempo 70-90 BPM,
+      steady clock-like pulse, clean minimal electronic texture,
+      neutral synth tones with limited harmonic movement,
+      precise articulation, restrained dynamics,
+      modern documentary mix optimized for clarity and repetition.
+    excludes: >
+      emotional swells, cinematic scoring,
+      trap hi-hats, distorted bass,
+      EDM drops, melodic hooks,
+      lush pads, organic instruments,
+      lo-fi noise or saturation.
+    function_fit:
+      ORIENT: good
+      EXPLAIN: excellent
+      INVESTIGATE: good
+      TRANSITION: excellent
+      CONSEQUENCE: possible
+      UNRESOLVED_CLOSE: excellent
+
+  BACKBONE_MINIMAL_PIANO:
+    suno_name: "Minimal piano"
+    style: >
+      Minimal piano, {EMOTION} tone, slow to mid-tempo 60-75 BPM,
+      restrained repetitive piano motif,
+      strict rhythmic consistency,
+      sparse accompaniment with minimal harmonic change,
+      dry articulation,
+      neutral journalistic documentary mix.
+    excludes: >
+      lyrical melody, emotional payoff,
+      romantic phrasing, rubato timing,
+      lush strings, cinematic crescendos,
+      jazz voicings, reverb-heavy ambience.
+    function_fit:
+      ORIENT: possible
+      EXPLAIN: excellent
+      INVESTIGATE: good
+      TRANSITION: excellent
+      CONSEQUENCE: good
+      UNRESOLVED_CLOSE: excellent
+
+  BACKBONE_PULSING_SYNTH:
+    suno_name: "Pulsing synth"
+    style: >
+      Pulsing synth, {EMOTION} tone, mid-tempo 80-100 BPM,
+      simple repeating synth pulse,
+      minimal harmonic movement,
+      even dynamics, smooth continuous flow,
+      clean documentary mix designed for transitions and time passage.
+    excludes: >
+      trap drums, dramatic risers,
+      melodic leads,
+      chord progressions with tension-release,
+      cinematic effects, ambient drones,
+      emotional modulation.
+    function_fit:
+      ORIENT: excellent
+      EXPLAIN: good
+      INVESTIGATE: excellent
+      TRANSITION: excellent
+      CONSEQUENCE: possible
+      UNRESOLVED_CLOSE: good
+
+  BACKBONE_MINIMAL_PERCUSSIVE:
+    suno_name: "Percussive underscore"
+    style: >
+      Percussive underscore, {EMOTION} tone, slow tempo 55-70 BPM,
+      muted percussive elements,
+      subtle rhythmic texture,
+      minimal tonal content,
+      grounded pacing,
+      dry and realistic documentary mix.
+    excludes: >
+      melodic instruments, harmonic pads,
+      trap rhythms, cinematic impacts,
+      EDM energy, syncopated funk grooves,
+      emotional buildup or release.
+    function_fit:
+      ORIENT: good
+      EXPLAIN: possible
+      INVESTIGATE: excellent
+      TRANSITION: excellent
+      CONSEQUENCE: poor
+      UNRESOLVED_CLOSE: good
+
+# ════════════════════════════════════════════════════════════════
+# FORBIDDEN LANES (never select - form implies emotional authorship)
+# ════════════════════════════════════════════════════════════════
+
+  C2_CLASSICAL_CHINESE_ORCHESTRAL:
+    suno_name: null
+    status: FORBIDDEN
+    reason: "Melody-first form implies emotional arc and resolution"
+    style: null
+    excludes: null
+
+  C3_MANDAPOP_BALLAD:
+    suno_name: null
+    status: FORBIDDEN
+    reason: "Ballad form implies emotional payoff and nostalgia"
+    style: null
+    excludes: null
+
+  K5_KPOP_BALLAD:
+    suno_name: null
+    status: FORBIDDEN
+    reason: "Ballad form implies emotional payoff and catharsis"
+    style: null
+    excludes: null
+
+  K6_KPOP_DANCE:
+    suno_name: null
+    status: FORBIDDEN
+    reason: "Hook-driven chorus structure implies emotional payoff"
+    style: null
+    excludes: null
+
+# ════════════════════════════════════════════════════════════════
+# LANE SUMMARY
+# ════════════════════════════════════════════════════════════════
+#
+# CHINESE (4 allowed, 2 forbidden):
+#   ✅ C1_CHINESE_HIPHOP_FUSION
+#   ✅ C4_GUOCHAO
+#   ✅ C5_GUFENG
+#   ✅ C6_MODERN_CINEMATIC_CHINESE
+#   🚫 C2_CLASSICAL_CHINESE_ORCHESTRAL
+#   🚫 C3_MANDAPOP_BALLAD
+#
+# JAPANESE (4 allowed):
+#   ✅ J1_WAFU_HIPHOP
+#   ✅ J2_WAMONO
+#   ✅ J3_TRAPANESE
+#   ✅ J4_CITY_POP
+#
+# KOREAN (4 allowed, 2 forbidden):
+#   ✅ K1_KOREAN_HIPHOP
+#   ✅ K2_KRNB
+#   ✅ K3_KOREAN_ELECTRONIC
+#   ✅ K4_KOREAN_TRADITIONAL_FUSION
+#   🚫 K5_KPOP_BALLAD
+#   🚫 K6_KPOP_DANCE
+#
+# PAN-ASIAN (2 allowed):
+#   ✅ A1_ASIAN_LOFI
+#   ✅ A2_ASIAN_ELECTRONIC_AMBIENT
+#
+# SOUTHEAST ASIAN (2 allowed):
+#   ✅ SEA1_THAI_ELECTRONIC
+#   ✅ SEA2_INDONESIAN_FUNK
+#
+# BACKBONE (4 allowed):
+#   ✅ BACKBONE_ANALYTICAL_ELECTRONIC
+#   ✅ BACKBONE_MINIMAL_PIANO
+#   ✅ BACKBONE_PULSING_SYNTH
+#   ✅ BACKBONE_MINIMAL_PERCUSSIVE
+#
+# TOTAL: 20 allowed lanes, 4 forbidden lanes
+#
+# ════════════════════════════════════════════════════════════════

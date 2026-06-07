@@ -188,7 +188,9 @@ describe("conductor integration smoke (harness)", () => {
     expect(invokeCalls.length).toBe(1);
     const firstCall = invokeCalls[0];
     expect(firstCall.agentId).toBe(qwen37AgentId); // sonnet → qwen37 in "mixed"
-    expect(firstCall.prompt).toContain("discovery:step_1");
+    // The conductor feeds the FULL prompt CONTENT (read from the vendored prompts)
+    // plus the appended output-artifact contract — not the step-id path string.
+    expect(firstCall.prompt).toContain("Write your output artifact");
 
     // Record the worker runId returned from mock invoke
     const workerRunId = "mock-run-1";

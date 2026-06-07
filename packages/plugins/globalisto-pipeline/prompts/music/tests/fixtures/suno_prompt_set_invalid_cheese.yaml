@@ -1,0 +1,36 @@
+# INVALID SUNO_PROMPT_SET - Uses CHEESE tags that violate no-cheese rule
+# Tests should DETECT [Chorus] and [Drop] tags and FAIL validation
+# These tags imply emotional payoff/catharsis which is forbidden for documentary
+
+SUNO_PROMPT_SET:
+  topic: "Test Invalid Cheese Tags"
+  total_production_sections: 2
+  schema_version: "invalid_test"
+  production_sections:
+    - section_id: 1
+      section_name: "HOOK"
+      lane_id: K1_KOREAN_HIPHOP
+      function: ORIENT
+      emotion_token: "watchful"
+      target_duration: "30 seconds"
+      style: |
+        Korean hip-hop underscore, establishing, watchful tone, mid-tempo 80-95 BPM. Total duration: 30 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Intro] Establish sonic world, 0-10s
+        [Chorus] Big emotional payoff moment, 10-25s
+        [Outro] Wind down, 25-30s
+      exclusions: "traditional Korean instruments, K-pop vocal hooks."
+
+    - section_id: 2
+      section_name: "ESCALATE"
+      lane_id: K3_KOREAN_ELECTRONIC
+      function: INVESTIGATE
+      emotion_token: "uneasy"
+      target_duration: "60 seconds"
+      style: |
+        Korean electronic tension score, probing, uneasy tone, mid-tempo 100-120 BPM. Total duration: 60 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Build] Rising tension, 0-30s
+        [Drop] Massive cathartic release, 30-50s
+        [Fade] Wind down, 50-60s
+      exclusions: "ballad pacing, orchestral elements."
