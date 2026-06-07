@@ -9,13 +9,33 @@ const manifest: PaperclipPluginManifestV1 = {
   author: "openclaw-fleet",
   categories: ["automation"],
   capabilities: [
+    "agents.invoke",
+    "agents.read",
+    "issues.create",
+    "issues.read",
+    "issue.documents.read",
+    "issue.documents.write",
+    "database.namespace.migrate",
+    "database.namespace.read",
+    "database.namespace.write",
+    "jobs.schedule",
     "events.subscribe",
-    "plugin.state.read",
-    "plugin.state.write"
+  ],
+  database: {
+    namespaceSlug: "globalisto_pipeline",
+    migrationsDir: "migrations",
+    coreReadTables: ["issues", "agents"],
+  },
+  jobs: [
+    {
+      jobKey: "conductor",
+      displayName: "Globalisto Pipeline Conductor",
+      schedule: "*/2 * * * *",
+    },
   ],
   entrypoints: {
     worker: "./dist/worker.js",
-    ui: "./dist/ui"
+    ui: "./dist/ui",
   },
   ui: {
     slots: [
@@ -23,10 +43,10 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "dashboardWidget",
         id: "health-widget",
         displayName: "Globalisto Content Pipeline Health",
-        exportName: "DashboardWidget"
-      }
-    ]
-  }
+        exportName: "DashboardWidget",
+      },
+    ],
+  },
 };
 
 export default manifest;
