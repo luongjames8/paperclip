@@ -17,8 +17,9 @@ export interface StepSpec {
   inputs: string[];
   /** Declared output artifact filenames this step writes. */
   outputs: string[];
-  /** Abstract model role; mapped to a worker agent id via the active profile. */
-  requiredModel: ModelRole;
+  /** Abstract model role; mapped to a worker agent id via the active profile.
+   *  "human" indicates a human-pause step in the canonical pipeline spec. */
+  requiredModel: ModelRole | "human";
   /** Gate ids to run after this step completes. */
   gatesAfter: string[];
 }
