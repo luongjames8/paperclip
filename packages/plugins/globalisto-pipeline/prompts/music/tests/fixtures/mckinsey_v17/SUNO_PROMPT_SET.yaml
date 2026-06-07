@@ -1,0 +1,196 @@
+SUNO_PROMPT_SET:
+  topic: "mckinsey_opioid_v17"
+  total_sections: 14
+  sections:
+    - section_id: S1
+      section_name: "The Price Tag"
+      lane_id: J3_TRAPANESE
+      function: ORIENT
+      emotion_token: "watchful"
+      duration_target: "35 seconds"
+      style: |
+        Trapanese underscore, establishing, watchful tone, slow to mid-tempo 65-80 BPM, minimal trap rhythm with precise grid timing, sharp percussive articulation, plucked Japanese motifs over deep bass and sparse synth layers, restrained structure. Total duration: 35 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Full] Immediate presence, full energy from beat one, alert tension sustained, 0-25s
+        [Outro] Beat sustains, cuttable extension, 25-35s
+      exclusions: "lush orchestral strings, sustained Chinese string phrasing, bright pop hooks, jazz harmony, funk grooves, aggressive EDM energy."
+
+    - section_id: S2
+      section_name: "The Headline You Saw"
+      lane_id: K1_KOREAN_HIPHOP
+      function: ORIENT
+      emotion_token: "alert"
+      duration_target: "36 seconds"
+      style: |
+        Korean hip-hop underscore, establishing, alert tone, mid-tempo 80-100 BPM, hard-hitting drums with crisp snare and punchy kick, modern trap-influenced rhythm with clean K-hip-hop production, minimal melodic content, emphasis on groove and flow, tight compressed mix with controlled bass. Total duration: 36 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Full] Immediate presence, full energy from beat one, alert tension sustained, 0-26s
+        [Outro] Beat sustains, cuttable extension, 26-36s
+      exclusions: "ballad pacing, emotional strings, cinematic swells, traditional instruments, jazz harmony, lo-fi textures, ambient pads, EDM drops."
+
+    - section_id: S3
+      section_name: "The Pediatrician's Irony"
+      lane_id: BACKBONE_ANALYTICAL_ELECTRONIC
+      function: EXPLAIN
+      emotion_token: "steady"
+      duration_target: "46 seconds"
+      style: |
+        Minimal electronic underscore, analytical, steady tone, mid-tempo 70-90 BPM, steady clock-like pulse, clean minimal electronic texture, neutral synth tones with limited harmonic movement, precise articulation, restrained dynamics, modern documentary mix optimized for clarity and repetition. Total duration: 46 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Sustain] Flat, steady pulse throughout, minimal variation, single sustained bed, 0-36s
+        [Outro] Pulse continues, cuttable, 36-46s
+      exclusions: "emotional swells, cinematic scoring, trap hi-hats, distorted bass, EDM drops, melodic hooks, lush pads, organic instruments, lo-fi noise or saturation."
+
+    - section_id: S4
+      section_name: "The Body Count Forecast"
+      lane_id: C4_GUOCHAO
+      function: INVESTIGATE
+      emotion_token: "uneasy"
+      duration_target: "41 seconds"
+      style: |
+        Guochao electronic tension score, probing, uneasy tone, mid-tempo 95-115 BPM, rhythm-first structure with strong pulse, modern electronic beats fused with short traditional Chinese motifs, punchy articulation, concise melodic phrases, tight contemporary production. Total duration: 41 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Sparse] Minimal elements, space and unease, 0-12s
+        [Build] Layers accumulate, texture thickens, 12-22s
+        [Pressure] Peak tension sustained, no release, 22-31s
+        [Outro] Tension holds, cuttable, 31-41s
+      exclusions: "romantic orchestral scoring, long legato string passages, slow ballad pacing, vintage lo-fi textures, jazz swing, Western folk or rock aesthetics."
+
+    - section_id: S5
+      section_name: "The Settlement That Wasn't"
+      lane_id: K3_KOREAN_ELECTRONIC
+      function: INVESTIGATE
+      emotion_token: "probing"
+      duration_target: "42 seconds"
+      style: |
+        Korean electronic tension score, probing, probing tone, mid-tempo 100-120 BPM, driving electronic beat with K-pop influenced production polish, clean synth textures, tight sidechain compression, minimal melodic hooks, rhythm-first structure, bright modern mix without excessive drops or builds. Total duration: 42 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Sparse] Minimal elements, space and probing energy, 0-12s
+        [Build] Layers accumulate, texture thickens, 12-23s
+        [Pressure] Peak tension sustained, no release, 23-32s
+        [Outro] Tension holds, cuttable, 32-42s
+      exclusions: "ballad pacing, orchestral elements, traditional instruments, lo-fi aesthetics, jazz harmony, ambient drones, aggressive EDM drops, rock guitars."
+
+    - section_id: S6
+      section_name: "The Second Headline"
+      lane_id: J3_TRAPANESE
+      function: EXPLAIN
+      emotion_token: "measured"
+      duration_target: "43 seconds"
+      style: |
+        Trapanese underscore, analytical, measured tone, slow to mid-tempo 65-80 BPM, minimal trap rhythm with precise grid timing, sharp percussive articulation, plucked Japanese motifs over deep bass and sparse synth layers, restrained structure. Total duration: 43 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Sustain] Flat, steady pulse throughout, minimal variation, single sustained bed, 0-33s
+        [Outro] Pulse continues, cuttable, 33-43s
+      exclusions: "lush orchestral strings, sustained Chinese string phrasing, bright pop hooks, jazz harmony, funk grooves, aggressive EDM energy."
+
+    - section_id: S7
+      section_name: "The Fine Print"
+      lane_id: BACKBONE_ANALYTICAL_ELECTRONIC
+      function: INVESTIGATE
+      emotion_token: "tense"
+      duration_target: "33 seconds"
+      style: |
+        Minimal electronic tension score, probing, tense tone, mid-tempo 70-90 BPM, steady clock-like pulse, clean minimal electronic texture, neutral synth tones with limited harmonic movement, precise articulation, restrained dynamics, modern documentary mix optimized for clarity and repetition. Total duration: 33 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Sparse] Minimal elements, space and tension, 0-8s
+        [Build] Layers accumulate, texture thickens, 8-16s
+        [Pressure] Peak tension sustained, no release, 16-23s
+        [Outro] Tension holds, cuttable, 23-33s
+      exclusions: "emotional swells, cinematic scoring, trap hi-hats, distorted bass, EDM drops, melodic hooks, lush pads, organic instruments, lo-fi noise or saturation."
+
+    - section_id: S8
+      section_name: "Convicted for the Cover-Up"
+      lane_id: C6_MODERN_CINEMATIC_CHINESE
+      function: INVESTIGATE
+      emotion_token: "searching"
+      duration_target: "37 seconds"
+      style: |
+        Modern cinematic Chinese tension score, probing, searching tone, slow to mid-tempo 65-85 BPM, sparse rhythmic pulse, restrained articulation, hybrid of traditional Chinese motifs with minimal cinematic synth pads and low percussion, controlled dynamics and clean modern mix. Total duration: 37 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Sparse] Minimal elements, space and searching quality, 0-10s
+        [Build] Layers accumulate, texture thickens, 10-19s
+        [Pressure] Peak tension sustained, no release, 19-27s
+        [Outro] Tension holds, cuttable, 27-37s
+      exclusions: "busy pop arrangements, strong hip-hop swing, EDM drops, folk strumming, jazz harmony, overly romantic classical phrasing."
+
+    - section_id: S9
+      section_name: "Punished for Apologizing"
+      lane_id: K1_KOREAN_HIPHOP
+      function: INVESTIGATE
+      emotion_token: "uneasy"
+      duration_target: "54 seconds"
+      style: |
+        Korean hip-hop tension score, probing, uneasy tone, mid-tempo 80-100 BPM, hard-hitting drums with crisp snare and punchy kick, modern trap-influenced rhythm with clean K-hip-hop production, minimal melodic content, emphasis on groove and flow, tight compressed mix with controlled bass. Total duration: 54 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Sparse] Minimal elements, space and unease, 0-14s
+        [Build] Layers accumulate, texture thickens, 14-29s
+        [Pressure] Peak tension sustained, no release, 29-44s
+        [Outro] Tension holds, cuttable, 44-54s
+      exclusions: "ballad pacing, emotional strings, cinematic swells, traditional instruments, jazz harmony, lo-fi textures, ambient pads, EDM drops."
+
+    - section_id: S10
+      section_name: "This Is the Pattern"
+      lane_id: BACKBONE_PULSING_SYNTH
+      function: EXPLAIN
+      emotion_token: "clear"
+      duration_target: "47 seconds"
+      style: |
+        Pulsing synth underscore, analytical, clear tone, mid-tempo 80-100 BPM, simple repeating synth pulse, minimal harmonic movement, even dynamics, smooth continuous flow, clean documentary mix designed for transitions and time passage. Total duration: 47 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Sustain] Flat, steady pulse throughout, minimal variation, single sustained bed, 0-37s
+        [Outro] Pulse continues, cuttable, 37-47s
+      exclusions: "trap drums, dramatic risers, melodic leads, chord progressions with tension-release, cinematic effects, ambient drones, emotional modulation."
+
+    - section_id: S11
+      section_name: "Victims Demand Accountability"
+      lane_id: BACKBONE_MINIMAL_PERCUSSIVE
+      function: CONSEQUENCE
+      emotion_token: "grave"
+      duration_target: "53 seconds"
+      style: |
+        Percussive underscore, weighted, grave tone, slow tempo 55-70 BPM, muted percussive elements, subtle rhythmic texture, minimal tonal content, grounded pacing, dry and realistic documentary mix. Total duration: 53 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Weight] Gravity lands immediately and stays heavy, no lift, sustained weight throughout, 0-43s
+        [Outro] Weight sustains, cuttable extension, 43-53s
+      exclusions: "melodic instruments, harmonic pads, trap rhythms, cinematic impacts, EDM energy, syncopated funk grooves, emotional buildup or release."
+
+    - section_id: S12
+      section_name: "Where Is Kevin Sneader Now?"
+      lane_id: C6_MODERN_CINEMATIC_CHINESE
+      function: CONSEQUENCE
+      emotion_token: "weighty"
+      duration_target: "46 seconds"
+      style: |
+        Modern cinematic Chinese underscore, weighted, weighty tone, slow to mid-tempo 65-85 BPM, sparse rhythmic pulse, restrained articulation, hybrid of traditional Chinese motifs with minimal cinematic synth pads and low percussion, controlled dynamics and clean modern mix. Total duration: 46 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Weight] Gravity lands immediately and stays heavy, no lift, sustained weight throughout, 0-36s
+        [Outro] Weight sustains, cuttable extension, 36-46s
+      exclusions: "busy pop arrangements, strong hip-hop swing, EDM drops, folk strumming, jazz harmony, overly romantic classical phrasing."
+
+    - section_id: S13
+      section_name: "Where Is Martin Elling Now?"
+      lane_id: BACKBONE_MINIMAL_PIANO
+      function: CONSEQUENCE
+      emotion_token: "sober"
+      duration_target: "47 seconds"
+      style: |
+        Minimal piano underscore, weighted, sober tone, slow to mid-tempo 60-75 BPM, restrained repetitive piano motif, strict rhythmic consistency, sparse accompaniment with minimal harmonic change, dry articulation, neutral journalistic documentary mix. Total duration: 47 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Weight] Gravity lands immediately and stays heavy, no lift, sustained weight throughout, 0-37s
+        [Outro] Weight sustains, cuttable extension, 37-47s
+      exclusions: "lyrical melody, emotional payoff, romantic phrasing, rubato timing, lush strings, cinematic crescendos, jazz voicings, reverb-heavy ambience."
+
+    - section_id: S14
+      section_name: "This Isn't Over"
+      lane_id: C5_GUFENG
+      function: UNRESOLVED_CLOSE
+      emotion_token: "lingering"
+      duration_target: "63 seconds"
+      style: |
+        Gufeng ambient underscore, unresolved ending, lingering tone, slow to mid-tempo 60-85 BPM, free-flowing rhythmic pacing, airy textures, traditional Chinese instruments with sustained lyrical phrasing, spacious fantasy-oriented ambience and minimal rhythmic density. Total duration: 63 seconds. Purely instrumental, no vocals, no humming, no vocal samples, no spoken word.
+
+        [Sustain] Texture established, ambient quality, 0-40s
+        [Thin] Progressively thins toward the end, 40-53s
+        [Fade] Fades without resolution, cuttable extension, 53-63s
+      exclusions: "hip-hop beats, trap rhythms, pop song structures, EDM energy, funk grooves, heavy percussion, cinematic trailer effects."

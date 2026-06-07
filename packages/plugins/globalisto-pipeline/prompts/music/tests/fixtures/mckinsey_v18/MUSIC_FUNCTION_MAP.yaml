@@ -1,0 +1,15 @@
+MUSIC_FUNCTION_MAP:
+  topic: "McKinsey Opioid Crisis"
+  total_production_sections: 4
+  functions:
+    SECTION_1: ORIENT
+    SECTION_2: INVESTIGATE
+    SECTION_3: INVESTIGATE
+    SECTION_4: UNRESOLVED_CLOSE
+  function_distribution:
+    ORIENT: 1
+    EXPLAIN: 0
+    INVESTIGATE: 2
+    TRANSITION: 0
+    CONSEQUENCE: 0
+    UNRESOLVED_CLOSE: 1

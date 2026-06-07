@@ -1,0 +1,156 @@
+# Structure Module Configuration Schema
+# Per-project settings that control structure building behavior
+
+# Example usage in consumer project:
+# ```yaml
+# # globalisto/config/structure_config.yaml
+# structure:
+#   content_class: mirror
+#   medium: video
+#   domain: general
+# ```
+
+schema:
+  structure:
+    type: object
+    properties:
+
+      content_class:
+        type: string
+        enum: [detonator, mirror]
+        required: true
+        description: |
+          Determines belief final state requirement.
+          - detonator: Belief must fully collapse, no ambiguity
+          - mirror: Belief destabilizes but doesn't resolve, tension remains
+
+      medium:
+        type: string
+        enum: [video, web_page, article]
+        required: true
+        description: |
+          Content medium affects unit types and validation rules.
+          - video: Units are "beats", linear narrative, emotional arc critical
+          - web_page: Units are "modules", cross-page linking, PRIMARY/REFERENCE roles
+          - article: Units are "sections", linear with internal navigation
+
+      domain:
+        type: string
+        enum: [general, legal, financial, commercial]
+        default: general
+        description: |
+          Domain lens for tone guardrails in validation.
+          - general: Not too negative, not preachy
+          - legal: No fear language, DIY-first positioning
+          - financial: No fear language, no outcome guarantees
+          - commercial: Not too salesy
+
+      page_type:
+        type: string
+        enum: [structure, situation, reference, action, standard]
+        default: standard
+        description: |
+          Page type for web content (affects target unit counts and routing).
+          - structure: 8-12 modules, PRIMARY evidence, no routing
+          - situation: 6-8 modules, REFERENCE evidence, includes routing
+          - reference: 6-10 modules, synthesizes across structures
+          - action: 5-8 modules, practical focus
+          - standard: Default for non-web content
+
+      target_unit_count:
+        type: object
+        description: |
+          Optional override for default unit count targets.
+          Defaults derived from medium and page_type.
+        properties:
+          min:
+            type: integer
+            default: 5
+          max:
+            type: integer
+            default: 12
+
+      discard_rate_warning:
+        type: object
+        description: |
+          Thresholds for discard rate warnings.
+        properties:
+          low:
+            type: number
+            default: 0.4
+            description: Warn if discard rate below this (over-selected)
+          high:
+            type: number
+            default: 0.8
+            description: Warn if discard rate above this (under-selected)
+
+---
+
+# Project-specific configurations
+
+projects:
+
+  globalisto:
+    content_class: mirror  # or detonator based on video_class
+    medium: video
+    domain: general
+    page_type: standard
+    notes: |
+      Video content. video_class from upstream determines content_class:
+      - video_class: mirror → content_class: mirror
+      - video_class: detonator → content_class: detonator
+
+  clearframe:
+    content_class: detonator
+    medium: web_page
+    domain: legal
+    page_type: structure  # or situation, depending on page
+    notes: |
+      Web content with cross-page linking.
+      page_type varies: T.* pages are structure, S.* pages are situation.
+      Legal domain: no fear language, DIY-first positioning.
+
+  surplus-kb:
+    content_class: detonator
+    medium: web_page
+    domain: general
+    page_type: structure
+    notes: |
+      Knowledge base content.
+      Similar to clearframe but general domain.
+
+  hinomaru:
+    content_class: mirror
+    medium: article
+    domain: general
+    page_type: standard
+    notes: |
+      Long-form articles.
+      Currently weak on structure - see roadmap for upgrade.
+
+  investment-tube:
+    content_class: detonator
+    medium: video
+    domain: financial
+    page_type: standard
+    notes: |
+      Video content with financial domain guardrails.
+      No fear language, no outcome guarantees.
+
+---
+
+# Default target counts by medium and page_type
+
+target_counts:
+  video:
+    standard: { min: 6, max: 10 }
+    short: { min: 3, max: 5 }
+
+  web_page:
+    structure: { min: 8, max: 12 }
+    situation: { min: 6, max: 8 }
+    reference: { min: 6, max: 10 }
+    action: { min: 5, max: 8 }
+
+  article:
+    standard: { min: 5, max: 8 }

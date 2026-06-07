@@ -1,0 +1,17 @@
+{
+  "name": "discovery-verification",
+  "version": "2.0.0",
+  "description": "Deterministic quote verification for Discovery Module v2",
+  "type": "module",
+  "main": "deterministic.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc"
+  },
+  "keywords": ["discovery", "verification", "quotes"],
+  "license": "ISC",
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

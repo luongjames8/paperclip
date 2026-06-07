@@ -1,0 +1,136 @@
+# Writing Module Configuration Schema
+# Per-project settings that override module defaults
+
+# Example usage in consumer project:
+# ```yaml
+# # globalisto/config/writing_config.yaml
+# writing:
+#   content_class: mirror
+#   emotional_rules: enabled
+#   ending_logic: leave_tension
+#   medium: video
+# ```
+
+schema:
+  writing:
+    type: object
+    properties:
+
+      content_class:
+        type: string
+        enum: [detonator, mirror]
+        required: true
+        description: |
+          Determines belief resolution behavior.
+          - detonator: Belief fully collapsed, viewer leaves certain
+          - mirror: Belief destabilized, tension remains open
+
+      emotional_rules:
+        type: string
+        enum: [enabled, disabled]
+        default: enabled
+        description: |
+          Whether to apply beat-specific emotional delivery techniques.
+          - enabled: INTRIGUE, RECOGNITION, COLLAPSE, WEIGHT rules applied
+          - disabled: Standard prose, emotional landing deferred to polish
+
+      ending_logic:
+        type: string
+        enum: [collapse_belief, leave_tension, funnel, none]
+        default: leave_tension
+        description: |
+          How final section should end.
+          - collapse_belief: Complete destruction (DETONATOR)
+          - leave_tension: Destabilize without resolution (MIRROR)
+          - funnel: Drive to action/CTA
+          - none: No special treatment
+
+      medium:
+        type: string
+        enum: [video, article, web_page, podcast]
+        default: video
+        description: |
+          Content medium affects pacing and delivery.
+          - video: Breath-length sentences, spoken rhythm
+          - article: Flowing prose, longer paragraphs OK
+          - web_page: Scannable, short paragraphs
+          - podcast: Conversational, audio-only clarity
+
+      evidence_roles:
+        type: string
+        enum: [enabled, disabled]
+        default: disabled
+        description: |
+          Whether to use PRIMARY/REFERENCE evidence treatment.
+          Only applicable to web content that can link between pages.
+          - enabled: Facts marked PRIMARY get full treatment, REFERENCE gets link
+          - disabled: All facts treated equally (video/linear content)
+
+      model:
+        type: string
+        enum: [opus, deepseek]
+        default: opus
+        description: |
+          Model to use for writing execution.
+          - opus: Production use (emotional precision)
+          - deepseek: Integration testing only
+
+---
+
+# Project-specific configurations
+
+projects:
+
+  globalisto:
+    content_class: mirror  # or detonator based on video_class
+    emotional_rules: enabled
+    ending_logic: leave_tension  # varies by video_class
+    medium: video
+    evidence_roles: disabled
+    model: opus
+    notes: |
+      video_class from beat graph determines content_class:
+      - video_class: mirror → content_class: mirror, ending_logic: leave_tension
+      - video_class: detonator → content_class: detonator, ending_logic: collapse_belief
+
+  clearframe:
+    content_class: detonator
+    emotional_rules: enabled
+    ending_logic: collapse_belief
+    medium: web_page
+    evidence_roles: enabled
+    model: opus
+    notes: |
+      Web content with cross-page linking.
+      Uses PRIMARY/REFERENCE evidence roles.
+
+  hinomaru:
+    content_class: mirror
+    emotional_rules: disabled  # defers to polish
+    ending_logic: leave_tension
+    medium: article
+    evidence_roles: enabled
+    model: opus
+    notes: |
+      Long-form articles. Emotional delivery handled in polish phase.
+
+  surplus-kb:
+    content_class: detonator
+    emotional_rules: enabled
+    ending_logic: funnel
+    medium: web_page
+    evidence_roles: enabled
+    model: opus
+    notes: |
+      Knowledge base content. Ends with clear action/next steps.
+
+  investment-tube:
+    content_class: detonator
+    emotional_rules: enabled
+    ending_logic: collapse_belief
+    medium: video
+    evidence_roles: disabled
+    model: opus
+    notes: |
+      Video content with belief resolution.
+      Similar to globalisto detonator class.

@@ -1,0 +1,14 @@
+{
+  "has_interesting": true,
+  "novelty_ratings": [
+    {"belief_id": "B_01", "novelty": "INTERESTING"},
+    {"belief_id": "B_02", "novelty": "PREDICTABLE"},
+    {"belief_id": "B_03", "novelty": "INTERESTING"},
+    {"belief_id": "B_04", "novelty": "PREDICTABLE"},
+    {"belief_id": "B_05", "novelty": "INTERESTING"},
+    {"belief_id": "B_06", "novelty": "INTERESTING"},
+    {"belief_id": "B_07", "novelty": "PREDICTABLE"},
+    {"belief_id": "B_08", "novelty": "INTERESTING"}
+  ],
+  "recommendation": "STOP"
+}

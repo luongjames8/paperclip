@@ -1,0 +1,605 @@
+# Thumbnail Composition Archetypes
+# Machine-readable reference for LLM-driven thumbnail concept generation
+# Based on analysis of 172 real thumbnails from high-performing YouTube videos
+# Generated 2026-01-30 from thumbnail_examples.yaml
+
+# CROSS-ARCHETYPE RULES (based on actual data)
+cross_archetype_rules:
+  visual_hierarchy:
+    typical_elements: "3-5 elements (60% of thumbnails have 3-5 elements)"
+    max_elements: 8
+    description: "Single focal point — viewer knows where to look within 0.5 seconds"
+
+  spatial_rules:
+    subject_placement_patterns:
+      - "center, occupying middle 50%: most common (41.9% of curiosity_gap, 69.2% of reaction_shot)"
+      - "center, occupying middle 40-60%: combined 76% of all thumbnails"
+      - "rule-of-thirds: less common than expected (only 7.6% explicitly off-center)"
+    avoid_zones:
+      - zone: "lower_right_quadrant"
+        reason: "Video duration timestamp overlay"
+    subject_coverage: "30-60% of frame (average: 45.4%)"
+
+  color:
+    most_common_colors:
+      - "white: 88.6% of curiosity_gap, 61.5% of reaction_shot"
+      - "black: 61.9% of curiosity_gap, 46.2% of reaction_shot"
+      - "blue: 59% of curiosity_gap"
+    contrast: "High-contrast complementary pairs drive 20-30% higher CTR"
+    separation_techniques:
+      - "Background blur (most common in reaction_shot)"
+      - "Solid backgrounds (observed in 4.8% of curiosity_gap)"
+      - "Subject cutout"
+
+  text:
+    usage: "72.1% of thumbnails have text overlay"
+    word_count_distribution:
+      - "1 word: 17.7%"
+      - "2 words: 20.2%"
+      - "3 words: 19.4%"
+      - "4 words: 16.1%"
+      - "5+ words: 26.6%"
+    average_words: 3.7
+    median_words: 3
+    max_words_guideline: 5
+    placement_patterns:
+      - "bottom-center: 26.6%"
+      - "upper-center: 16.9%"
+      - "upper-left: 16.1%"
+      - "center: 16.1%"
+    legibility_test: "Must be legible at 320x180px (mobile thumbnail size)"
+    fonts:
+      - "Bebas Neue"
+      - "Impact"
+      - "Montserrat Black"
+    rule: "Text must COMPLEMENT title, never duplicate it"
+
+  mobile:
+    test_size: "10% of full size"
+    requirement: "All key elements must be identifiable"
+    face_requirement: "Face/emotion must be readable at phone screen size"
+
+# PROMISE TYPE → ARCHETYPE MAPPING (updated based on data)
+promise_archetype_mapping:
+  transformation:
+    primary: "split_screen"
+    secondary:
+      - "reaction_shot"
+
+  revelation:
+    primary: "curiosity_gap"
+    secondary:
+      - "reaction_shot"
+
+  confrontation:
+    primary: "split_screen"
+    note: "Only 5 examples total — split_screen serves both transformation and versus"
+
+  authority_expertise:
+    primary: "reaction_shot"
+    secondary:
+      - "isolation_play"
+    note: "Most authority content uses faces (reaction_shot), not isolated objects"
+
+  entertainment:
+    primary: "reaction_shot"
+    secondary:
+      - "shock_awe"
+
+  results_proof:
+    primary: "numbers_play"
+    secondary:
+      - "curiosity_gap"
+
+  product_showcase:
+    primary: "isolation_play"
+    secondary:
+      - "reaction_shot"
+
+  urgency_news:
+    primary: "shock_awe"
+    secondary:
+      - "curiosity_gap"
+
+  mystery_secrets:
+    primary: "curiosity_gap"
+    secondary:
+      - "reaction_shot"
+
+  how_to_tutorial:
+    primary: "curiosity_gap"
+    secondary:
+      - "reaction_shot"
+    note: "Tutorial content rarely uses attention_director — most use text-heavy curiosity_gap"
+
+  warning_danger:
+    primary: "shock_awe"
+    secondary:
+      - "reaction_shot"
+
+# ARCHETYPES (based on actual data patterns)
+archetypes:
+  - id: "curiosity_gap"
+    name: "CURIOSITY GAP (Text + Visual Hook)"
+
+    promise_types:
+      - "revelation"
+      - "secrets"
+      - "hidden_knowledge"
+      - "mysteries"
+      - "how_to"
+      - "tutorial"
+      - "explanation"
+
+    composition:
+      usage: "61% of all thumbnails (105/172)"
+
+      subject_placement:
+        center_occupying_middle: "41.9% at 50% coverage, 9.5% at 60% coverage"
+        typical_coverage: "30-60% of frame"
+        note: "Highly variable — this archetype encompasses many visual styles"
+
+      text_overlay:
+        usage: "91.4% have text"
+        average_words: 3.5
+        typical_word_count: "2-5 words"
+        placement_distribution:
+          - "bottom-center: most common"
+          - "upper-center: second most common"
+          - "center: third most common"
+
+      background_treatment:
+        note: "Highly variable — no dominant pattern"
+        common_approaches:
+          - "Solid black (4.8%)"
+          - "Gradient with abstract shapes (2.9%)"
+          - "Contextual to subject (most common)"
+
+      color_palette:
+        dominant_colors:
+          - "white: 88.6%"
+          - "black: 61.9%"
+          - "blue: 59%"
+          - "red: 41%"
+          - "green: 29.5%"
+
+      element_count:
+        average: 4.1
+        range: "1-15"
+        typical: "3-5 elements"
+
+      emotion:
+        no_face: "61.9% have no face"
+        with_face: "38.1% include faces with emotions"
+        common_emotions:
+          - "excitement: 19%"
+          - "concern: 9.5%"
+
+      eye_path:
+        most_common:
+          - "text → subject → background"
+          - "subject → text → background"
+          - "face → text → background"
+
+    sub_patterns:
+      - pattern: "text_dominant"
+        description: "Large text overlay as primary visual element (no face)"
+        frequency: "61.9% of curiosity_gap"
+        examples:
+          - "China's Geography Problem"
+          - "How Aircraft Carriers Work"
+          - "Why Russia's Logistics Failed"
+
+      - pattern: "face_plus_text"
+        description: "Face with expression + supporting text"
+        frequency: "38.1% of curiosity_gap"
+        examples:
+          - "The Oldest Videos on YouTube"
+          - "MrBeast on losing $500,000"
+          - "A Brutally Honest Conversation with MrBeast"
+
+    real_examples:
+      - video: "China's Geography Problem"
+        pattern: "text_dominant"
+      - video: "How Aircraft Carriers Work"
+        pattern: "text_dominant"
+      - video: "The Oldest Videos on YouTube"
+        pattern: "face_plus_text"
+      - video: "A Brutally Honest Conversation with MrBeast"
+        pattern: "face_plus_text"
+
+    failure_modes:
+      - mode: "Text too small or too many words"
+        impact: "Unreadable at mobile size"
+      - mode: "Generic text that duplicates title"
+        impact: "Wastes opportunity to complement title"
+      - mode: "Cluttered composition with 6+ elements"
+        impact: "No clear focal point"
+
+  - id: "reaction_shot"
+    name: "REACTION SHOT (Emotional Close-Up)"
+
+    promise_types:
+      - "revelation"
+      - "entertainment"
+      - "authority_expertise"
+      - "surprising_discovery"
+
+    composition:
+      usage: "7.6% of all thumbnails (13/172)"
+
+      subject_placement:
+        center_occupying_middle_50: "69.2%"
+        center_occupying_middle_40: "15.4%"
+        typical_coverage: "40% of frame"
+        off_center: "15.4% (uncommon)"
+
+      emotion:
+        distribution:
+          - "excitement: 53.8%"
+          - "concern: 23.1%"
+          - "determination, focus, no_face: 23.1%"
+        note: "High-arousal emotions dominate"
+
+      background_treatment:
+        note: "Highly variable — no single pattern dominates"
+        approaches:
+          - "Natural settings with soft lighting"
+          - "Concrete walls"
+          - "Blurred indoor settings"
+          - "Urban environments"
+
+      text_overlay:
+        usage: "23.1% have text (much lower than curiosity_gap)"
+        average_words: 3.3
+        note: "Faces carry most of the message — text is secondary"
+
+      color_palette:
+        common_colors:
+          - "white: 61.5%"
+          - "gray: 53.8%"
+          - "black: 46.2%"
+          - "green: 38.5%"
+          - "brown: 38.5%"
+
+      element_count:
+        average: 3.8
+        range: "2-8"
+        typical: "3-4 elements"
+
+      eye_path:
+        pattern: "Face → emotion → text/secondary element (if present)"
+
+    real_examples:
+      - "Driving Xiaomi's Electric Car: Are we Cooked?"
+      - "I tried using AI. It scared me."
+      - "WE MOVED BACK TO NEW YORK CITY"
+
+    failure_modes:
+      - mode: "Neutral or low-energy expressions"
+        impact: "Substantially lower CTR"
+      - mode: "No clear emotion visible"
+        impact: "Lost opportunity for emotional connection"
+      - mode: "Face too small (less than 30% coverage)"
+        impact: "Emotion unreadable at mobile size"
+      - mode: "Used for non-personal content"
+        impact: "Archetype mismatch (faces don't fit product/tech content)"
+
+  - id: "shock_awe"
+    name: "SHOCK & AWE (High-Energy Urgency)"
+
+    promise_types:
+      - "breaking_news"
+      - "controversy"
+      - "exposé"
+      - "urgent_information"
+      - "warning_danger"
+
+    composition:
+      usage: "5.8% of all thumbnails (10/172)"
+
+      subject_placement:
+        center_occupying_middle_50: "60%"
+        center_right_40: "20%"
+        typical_coverage: "40-50% of frame"
+
+      emotion:
+        distribution:
+          - "shock: 40%"
+          - "excitement: 30%"
+          - "no_face: 30%"
+        note: "When faces present, expressions are extreme"
+
+      text_overlay:
+        usage: "80% have text"
+        average_words: 2.5
+        typical_style: "Short, urgent keywords"
+        examples:
+          - "f*ck it"
+          - "Insanity."
+          - "FAIL"
+          - "DEEP SEA NUKE"
+          - "ALL THE BOMBS"
+
+      color_palette:
+        dominant_colors:
+          - "black: 60%"
+          - "blue: 50%"
+          - "yellow: 40%"
+          - "orange: 40%"
+          - "white: 40%"
+        note: "High-contrast, high-saturation combinations"
+
+      element_count:
+        average: 3.7
+        range: "2-6"
+        typical: "3-4 elements"
+
+      background_treatment:
+        common_approaches:
+          - "Dark starry sky"
+          - "Bright explosions with gradients"
+          - "Dark with gradient effects"
+          - "Blurred to emphasize subject"
+
+      eye_path:
+        pattern: "Intense visual (explosion/face) → text → supporting elements"
+
+    real_examples:
+      - "The Full Story of MrBeast"
+      - "What If You Detonated a Nuclear Bomb In The Marianas Trench?"
+      - "What If We Detonated All Nuclear Bombs at Once?"
+      - "Uh oh… AI-search engine for developers has emerged"
+
+    failure_modes:
+      - mode: "Overuse ('Boy who cried wolf')"
+        impact: "Audience desensitization, credibility damage"
+      - mode: "Non-urgent content using shock visual"
+        impact: "Damages long-term credibility"
+      - mode: "Too visually chaotic (6+ elements)"
+        impact: "Fails mobile legibility test"
+
+  - id: "split_screen"
+    name: "SPLIT-SCREEN (Before/After or Versus)"
+
+    promise_types:
+      - "transformation"
+      - "comparison"
+      - "progress"
+      - "confrontation"
+
+    composition:
+      usage: "2.9% of all thumbnails (5/172)"
+      note: "Rare but distinctive pattern — used for very specific promise types"
+
+      subject_placement:
+        left_right_halves: "40%"
+        center_occupying_middle_50: "40%"
+        three_way_split: "20%"
+
+      text_overlay:
+        usage: "100% have text"
+        average_words: 4.8
+        common_text:
+          - "BEFORE / AFTER"
+          - "VS"
+          - "2012 / 2022"
+          - Camera/product names on each side
+
+      background_treatment:
+        approaches:
+          - "Outdoor settings with natural landscapes"
+          - "Contrasting backgrounds per side"
+          - "Same location, different times/treatments"
+
+      color_palette:
+        common_colors:
+          - "white: 80%"
+          - "gray: 60%"
+          - "green: 60%"
+          - "blue: 60%"
+          - "brown: 40%"
+
+      element_count:
+        average: 3.0
+        range: "2-4"
+        note: "Lower than most archetypes — clean composition"
+
+      emotion:
+        no_face: "80%"
+        excitement: "20%"
+        note: "Usually object/scene-focused, not face-focused"
+
+    real_examples:
+      - "Ten years ago, I predicted 2022. Did I get it right?"
+      - "Editing YOUR Photos!!"
+      - "TOURIST VS PRO PHOTOGRAPHER"
+      - "DJi MAVIC vs. PHANTOM 4 vs. GOPRO KARMA"
+
+    failure_modes:
+      - mode: "Reversed before/after placement"
+        impact: "Confusing narrative (viewers expect left = before)"
+      - mode: "Insufficient visual contrast between sides"
+        impact: "Comparison not apparent"
+      - mode: "Used for non-comparative content"
+        impact: "Archetype mismatch"
+
+  - id: "numbers_play"
+    name: "NUMBERS PLAY (Data/Statistics Emphasis)"
+
+    promise_types:
+      - "results"
+      - "case_study"
+      - "quantified_outcome"
+      - "credibility"
+
+    composition:
+      usage: "2.3% of all thumbnails (4/172)"
+      note: "Very rare in dataset — may indicate limited use cases or undersampling"
+
+      subject_placement:
+        center_occupying_middle_50: "75%"
+        center_occupying_middle_70: "25%"
+
+      text_overlay:
+        usage: "100% have text"
+        average_words: 8.0
+        note: "Much higher than other archetypes — numbers + context words"
+        examples:
+          - "90%"
+          - "9 HOURS / 2 HOURS / A+"
+          - "$0 / $1M"
+          - "3,000,001 subscribers"
+
+      background_treatment:
+        approaches:
+          - "Geometric patterns with muted colors"
+          - "Blurred indoor settings"
+          - "Solid light colors"
+
+      color_palette:
+        dominant_colors:
+          - "white: 100%"
+          - "black: 75%"
+          - "blue: 75%"
+          - "red: 50%"
+
+      element_count:
+        average: 3.0
+        range: "1-4"
+        note: "Clean composition — numbers dominate"
+
+      emotion:
+        excitement: "50%"
+        neutral: "25%"
+        no_face: "25%"
+
+    real_examples:
+      - "The iPhone MOST People ACTUALLY Buy! (90%)"
+      - "How to Study for Exams - An Evidence-Based Masterclass"
+      - "If I Wanted to Be a Millionaire Before 30, I'd Do This"
+
+    failure_modes:
+      - mode: "Arbitrary or unbelievable numbers"
+        impact: "Credibility damage"
+      - mode: "Numbers too small or low-contrast"
+        impact: "Lost impact, competing with other elements"
+      - mode: "Video doesn't deliver quantified content"
+        impact: "Retention collapse, trust broken"
+
+  - id: "isolation_play"
+    name: "ISOLATION PLAY (Single Subject + Negative Space)"
+
+    promise_types:
+      - "product_review"
+      - "product_showcase"
+      - "authority_expertise"
+
+    composition:
+      usage: "2.3% of all thumbnails (4/172)"
+      note: "Rare pattern — mostly used for product-focused content"
+
+      subject_placement:
+        center_occupying_middle_40: "50%"
+        center_occupying_middle_50: "50%"
+        note: "Consistently centered (no off-center examples in dataset)"
+
+      text_overlay:
+        usage: "25% have text"
+        average_words: 1.0
+        note: "Minimal text — visual clarity is priority"
+
+      background_treatment:
+        approaches:
+          - "Blurred dark background"
+          - "Soft gradient gray"
+          - "Blurred natural elements (water, rocks)"
+          - "Crowd/context, slightly blurred"
+
+      color_palette:
+        common_colors:
+          - "white: 50%"
+          - "black: 50%"
+          - "skin tone: 50%"
+          - "gray: 50%"
+        note: "Neutral palette to avoid competing with subject"
+
+      element_count:
+        average: 2.5
+        range: "2-3"
+        note: "Extremely clean — lowest element count of all archetypes"
+
+      emotion:
+        no_face: "75%"
+        concern: "25%"
+        note: "Object-focused, not emotion-focused"
+
+    real_examples:
+      - "Why Putin Feared Navalny"
+      - "A $350 miniature magnet camera"
+      - "CANON EOS R REVIEW - I'm Switching."
+
+    failure_modes:
+      - mode: "Subject too small"
+        impact: "Doesn't dominate composition"
+      - mode: "Background still competing for attention"
+        impact: "Lost isolation benefit"
+      - mode: "Used for non-product content"
+        impact: "Better served by reaction_shot or curiosity_gap"
+
+  - id: "attention_director"
+    name: "ATTENTION DIRECTOR (Pointing/Highlighting)"
+
+    promise_types:
+      - "demonstration"
+      - "guided_reveal"
+      - "instructional"
+
+    composition:
+      usage: "2.3% of all thumbnails (4/172)"
+      note: "Rare pattern — tutorial/how-to content usually uses curiosity_gap instead"
+
+      subject_placement:
+        center_occupying_middle_50: "100%"
+
+      text_overlay:
+        usage: "25% have text"
+        average_words: 4.0
+        note: "Visual cues (arrows, circles) replace text in many cases"
+
+      background_treatment:
+        approaches:
+          - "Cityscape at night"
+          - "Natural landscape"
+          - "Dark with subtle patterns"
+          - "Blurred background with colorful elements"
+
+      color_palette:
+        common_colors:
+          - "blue: 75%"
+          - "black: 75%"
+          - "white: 50%"
+          - "green: 50%"
+          - "gray: 50%"
+
+      element_count:
+        average: 6.5
+        range: "3-15"
+        note: "Highest element count — includes pointing arrows, circles, labels"
+
+      emotion:
+        no_face: "75%"
+        neutral: "25%"
+
+    real_examples:
+      - "Samsung's Dangerous Dominance over South Korea"
+      - "The shooting range where you fire over a busy road"
+      - "I Read 107 Productivity Books. Here's What Actually Works."
+
+    failure_modes:
+      - mode: "Pointing at nothing specific"
+        impact: "Confusing, no clear focal point"
+      - mode: "Too many arrows/circles (8+ elements)"
+        impact: "Cluttered, overwhelming"
+      - mode: "Used when text-heavy curiosity_gap would be clearer"
+        impact: "Inefficient — curiosity_gap performs better for most tutorial content"

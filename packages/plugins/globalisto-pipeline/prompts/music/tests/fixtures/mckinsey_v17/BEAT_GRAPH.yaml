@@ -1,0 +1,222 @@
+# BEAT GRAPH
+# Beat sequence optimized for YouTube retention
+# Dependencies indicate required setup before each beat can land
+
+beat_sequence:
+  # HOOK ZONE (0:00 - 0:30)
+  - beat_id: "BEAT_01"
+    position: 1
+    timing: "0:00-0:15"
+    unit_ids: ["UNIT_001"]
+    function: "HOOK"
+    description: "$14,810 per overdose death - McKinsey's Excel spreadsheet pricing"
+    retention_purpose: "Immediate visceral stakes with specific dollar figure"
+    dependencies: []
+    estimated_duration: "15 seconds"
+
+  - beat_id: "BEAT_02"
+    position: 2
+    timing: "0:15-0:30"
+    unit_ids: ["UNIT_011"]
+    function: "IMPLICATE"
+    description: "NYT headline: 'McKinsey Settles for Nearly $600 Million' - you saw this"
+    retention_purpose: "Viewer recognition - 'I remember that headline'"
+    dependencies: ["BEAT_01"]
+    estimated_duration: "15 seconds"
+
+  # L_MAIN - PROVE ARC (0:30 - 8:00)
+  - beat_id: "BEAT_03"
+    position: 3
+    timing: "0:30-1:30"
+    unit_ids: ["UNIT_006"]
+    function: "GROUND"
+    description: "Retired pediatrician who refused to prescribe OxyContin became addicted in his 80s"
+    retention_purpose: "Human face for statistics - tragic irony hooks emotionally"
+    dependencies: ["BEAT_01"]
+    estimated_duration: "60 seconds"
+
+  - beat_id: "BEAT_04"
+    position: 4
+    timing: "1:30-2:30"
+    unit_ids: ["UNIT_001"]
+    function: "PROVE"
+    description: "Deep dive: 2,484 CVS customers projected to overdose - operational planning"
+    retention_purpose: "Escalate horror - not just pricing, but body count forecasting"
+    dependencies: ["BEAT_01", "BEAT_03"]
+    estimated_duration: "60 seconds"
+
+  - beat_id: "BEAT_05"
+    position: 5
+    timing: "2:30-3:30"
+    unit_ids: ["UNIT_004"]
+    function: "PROVE"
+    description: "$650M settlement was 85x fees earned, but DPA means no conviction"
+    retention_purpose: "First reversal - big number sounds like accountability, but isn't"
+    dependencies: ["BEAT_02"]
+    estimated_duration: "60 seconds"
+
+  - beat_id: "BEAT_06"
+    position: 6
+    timing: "3:30-4:15"
+    unit_ids: ["UNIT_013", "UNIT_014"]
+    function: "IMPLICATE"
+    description: "December 2024: Another $650M settlement, DOJ called it 'historic accountability'"
+    retention_purpose: "You believed THIS one was real - 'first criminal responsibility' framing"
+    dependencies: ["BEAT_05"]
+    estimated_duration: "45 seconds"
+
+  - beat_id: "BEAT_07"
+    position: 7
+    timing: "4:15-5:00"
+    unit_ids: ["UNIT_015"]
+    function: "IMPLICATE"
+    description: "But no admission of liability; executives shielded from prosecution"
+    retention_purpose: "Gap revealed - what headlines promised vs what actually happened"
+    dependencies: ["BEAT_06"]
+    estimated_duration: "45 seconds"
+
+  - beat_id: "BEAT_08"
+    position: 8
+    timing: "5:00-6:00"
+    unit_ids: ["UNIT_003"]
+    function: "PROVE"
+    description: "Martin Elling: 6 months for destroying emails, not for 'turbocharge' advice"
+    retention_purpose: "Absurdity escalation - convicted for cover-up, not the deaths"
+    dependencies: ["BEAT_07"]
+    estimated_duration: "60 seconds"
+
+  - beat_id: "BEAT_09"
+    position: 9
+    timing: "6:00-6:45"
+    unit_ids: ["UNIT_002"]
+    function: "PROVE"
+    description: "Kevin Sneader fired for apologizing, later defended Elling as 'aberration'"
+    retention_purpose: "Irony layer - punished for remorse, not for the crime"
+    dependencies: ["BEAT_08"]
+    estimated_duration: "45 seconds"
+
+  - beat_id: "BEAT_10"
+    position: 10
+    timing: "6:45-7:30"
+    unit_ids: ["UNIT_005"]
+    function: "PROVE"
+    description: "Pharma already worst industry; Merck/Vioxx killed 60,000 and continued"
+    retention_purpose: "Perspective shift - this isn't aberrant, it's the pattern"
+    dependencies: ["BEAT_08", "BEAT_09"]
+    estimated_duration: "45 seconds"
+
+  - beat_id: "BEAT_11"
+    position: 11
+    timing: "7:30-8:15"
+    unit_ids: ["UNIT_007", "UNIT_009"]
+    function: "GROUND"
+    description: "Victims confront perpetrators - 'How many grandkids know withdrawal?'"
+    retention_purpose: "Emotional weight - human voices demanding accountability"
+    dependencies: ["BEAT_03"]
+    estimated_duration: "45 seconds"
+
+  # LAND SEQUENCE (8:15 - 10:00)
+  - beat_id: "BEAT_12"
+    position: 12
+    timing: "8:15-9:00"
+    unit_ids: ["UNIT_016"]
+    function: "LAND"
+    description: "Sneader landed at Goldman Sachs 6 months after ouster - co-president Asia-Pacific"
+    retention_purpose: "Where are they now - elite class protects its own"
+    dependencies: ["BEAT_09"]
+    estimated_duration: "45 seconds"
+
+  - beat_id: "BEAT_13"
+    position: 13
+    timing: "9:00-9:30"
+    unit_ids: ["UNIT_017", "UNIT_018"]
+    function: "LAND"
+    description: "Elling in Thailand since 2019, promises to 'regain trust' after 6 months"
+    retention_purpose: "Minimal consequences - exile + PR redemption"
+    dependencies: ["BEAT_08"]
+    estimated_duration: "30 seconds"
+
+  - beat_id: "BEAT_14"
+    position: 14
+    timing: "9:30-10:00"
+    unit_ids: ["UNIT_019", "UNIT_021"]
+    function: "LAND"
+    description: "McKinsey still consulting for 35+ pharma companies in 2025 - business as usual"
+    retention_purpose: "Final punch - this isn't over, they're still doing it"
+    dependencies: ["BEAT_05", "BEAT_07", "BEAT_12"]
+    estimated_duration: "30 seconds"
+
+# Retention curve design
+retention_design:
+  hook_strength: "HIGH"
+  first_30_seconds:
+    - "Dollar figure per death (visceral)"
+    - "Headline you saw (recognition)"
+  midpoint_hooks:
+    - position: "4:15"
+      hook: "Second settlement headline - 'this time it's real'"
+    - position: "6:00"
+      hook: "Only person imprisoned was for obstruction, not deaths"
+  resolution_landing:
+    - "Where they are now (no consequences stuck)"
+    - "Business as usual (still consulting pharma)"
+
+# Structural notes
+structure_notes:
+  arc_type: "detonator"
+  opening_strategy: "specific_number_hook"
+  implicate_placement: "early (BEAT_02) and mid-arc (BEAT_06-07)"
+  ground_placement: "after hook (BEAT_03) and before land (BEAT_11)"
+  land_strategy: "where_are_they_now + this_isnt_over"
+
+  retention_risks:
+    - risk: "Settlement complexity (two settlements, $573M and $650M)"
+      mitigation: "Focus on DPA structure, not dollar amounts"
+    - risk: "Multiple characters (Sneader, Elling, Sacklers)"
+      mitigation: "Keep focus on McKinsey executives only in main arc"
+
+  emotional_arc:
+    - phase: "Hook"
+      emotion: "shock (dollar figure)"
+    - phase: "Ground"
+      emotion: "grief (victim story)"
+    - phase: "Prove"
+      emotion: "revelation → outrage → absurdity"
+    - phase: "Land"
+      emotion: "dark irony → resignation → urgency"
+
+# Unit coverage
+unit_coverage:
+  units_used: 16
+  units_available: 21
+  units_held_back:
+    - unit_id: "UNIT_008"
+      reason: "TJ Walden story redundant with UNIT_006 (both victim stories)"
+    - unit_id: "UNIT_010"
+      reason: "Sackler demeanor detail doesn't advance McKinsey-specific narrative"
+    - unit_id: "UNIT_012"
+      reason: "February 2021 settlement framing covered by UNIT_011 headline"
+    - unit_id: "UNIT_020"
+      reason: "Pharma consulting firm rankings redundant with UNIT_019"
+    - unit_id: "UNIT_015"
+      reason: "Used in BEAT_07 but as secondary detail to DPA revelation"
+
+# Dependency map
+dependency_reasoning:
+  BEAT_02_depends_on_BEAT_01: "Can't say 'you saw this settlement' before establishing what McKinsey did"
+  BEAT_05_depends_on_BEAT_02: "DPA revelation needs settlement headline setup"
+  BEAT_06_depends_on_BEAT_05: "Second settlement makes sense only after first settlement context"
+  BEAT_07_depends_on_BEAT_06: "Gap reveal needs the 'historic accountability' framing to subvert"
+  BEAT_08_depends_on_BEAT_07: "Elling conviction only lands after viewer knows executives were shielded"
+  BEAT_12_depends_on_BEAT_09: "Sneader at Goldman only ironic after knowing he was fired for apologizing"
+  BEAT_14_depends_on_multiple: "Business-as-usual punch needs settlement context + executive outcomes"
+
+# Metadata
+metadata:
+  step: structure_thematic_step_5_beat_graph
+  generated_at: "2026-01-25T22:15:00.000Z"
+  input_file: candidate_units.yaml
+  target_duration: "10:00"
+  actual_duration: "10:00"
+  beats_total: 14
+  retention_strategy: "high_hook_early_implicate_strong_land"
