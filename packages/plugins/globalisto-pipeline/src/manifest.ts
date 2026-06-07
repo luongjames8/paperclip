@@ -20,6 +20,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "database.namespace.write",
     "jobs.schedule",
     "events.subscribe",
+    "ui.dashboardWidget.register",
   ],
   database: {
     namespaceSlug: "globalisto_pipeline",
