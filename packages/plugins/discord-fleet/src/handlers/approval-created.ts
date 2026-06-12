@@ -11,6 +11,7 @@ import { buildApprovalActionRow, buildApprovalEmbed } from "../render/embeds.js"
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
+import { matchChannelByType } from "../routing/route.js";
 import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
 import { PaperclipClient } from "../api/paperclip.js";
 
@@ -63,23 +64,6 @@ function chunkBySection(text: string): string[] {
   return chunks;
 }
 
-export function matchChannelByType(
-  routes: ChannelTypeRoute[] | undefined,
-  candidate: string | undefined,
-): string | null {
-  if (!routes || routes.length === 0 || !candidate) return null;
-  for (const [pattern, channelId] of routes) {
-    let re: RegExp;
-    try {
-      re = new RegExp(pattern);
-    } catch {
-      continue;
-    }
-    if (re.test(candidate)) return channelId;
-  }
-  return null;
-}
-
 export async function handleApprovalCreated(
   ctx: PluginContext,
   event: PluginEvent,
@@ -127,7 +111,7 @@ export async function handleApprovalCreated(
   //      approvalFallbackChannelId is absent).
   const matchedChannelId = matchChannelByType(
     config.approvalsChannelsByType?.[companyId],
-    approvalTitle,
+    [approvalTitle],
   );
   let destinationChannelId: string;
   if (matchedChannelId) {

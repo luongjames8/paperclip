@@ -100,46 +100,16 @@ export class PaperclipClient {
     return body as PaperclipIssue;
   }
 
-  // Bypasses request<T>() because /api/issues/:id/documents returns a bare
-  // JSON array, not the { data: T } envelope request<T>() unwraps.
   async listIssueDocuments(issueId: string): Promise<PaperclipDocument[]> {
-    const url = `${this.baseUrl}/api/issues/${issueId}/documents`;
-    const res = await this.ctx.http.fetch(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-    });
-    if (res.status >= 400) {
-      throw new Error(`paperclip API error: ${res.status} ${url}`);
-    }
-    return (await res.json()) as PaperclipDocument[];
+    return this.request<PaperclipDocument[]>(`${this.baseUrl}/api/issues/${issueId}/documents`);
   }
 
-  // Bypasses request<T>() because /api/approvals/:id/issues returns a bare
-  // JSON array, not the { data: T } envelope request<T>() unwraps.
   async getApprovalIssues(approvalId: string): Promise<PaperclipIssue[]> {
-    const url = `${this.baseUrl}/api/approvals/${approvalId}/issues`;
-    const res = await this.ctx.http.fetch(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-    });
-    if (res.status >= 400) {
-      throw new Error(`paperclip API error: ${res.status} ${url}`);
-    }
-    return (await res.json()) as PaperclipIssue[];
+    return this.request<PaperclipIssue[]>(`${this.baseUrl}/api/approvals/${approvalId}/issues`);
   }
 
-  // Bypasses request<T>() because /api/companies/:id/approvals returns a bare
-  // JSON array, not the { data: T } envelope request<T>() unwraps.
   async getPendingApprovals(companyId: string): Promise<PaperclipApproval[]> {
-    const url = `${this.baseUrl}/api/companies/${companyId}/approvals?status=pending`;
-    const res = await this.ctx.http.fetch(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-    });
-    if (res.status >= 400) {
-      throw new Error(`paperclip API error: ${res.status} ${url}`);
-    }
-    return (await res.json()) as PaperclipApproval[];
+    return this.request<PaperclipApproval[]>(`${this.baseUrl}/api/companies/${companyId}/approvals?status=pending`);
   }
 
   async approveApproval(approvalId: string, decisionNote?: string): Promise<void> {

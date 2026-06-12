@@ -1,7 +1,7 @@
 import type { Client } from "discord.js";
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import type { ChannelTypeRoute, DiscordFleetConfig } from "../config/schema.js";
-import { routeIssue } from "../routing/route.js";
+import { matchChannelByType, routeIssue } from "../routing/route.js";
 import { postToChannel, postEmbedToChannel, postToThread } from "../discord/rest.js";
 import { buildSeedIssueEmbed } from "../render/embeds.js";
 import { formatChildIssueCreated } from "../render/plain.js";
@@ -20,25 +20,6 @@ interface IssueCreatedPayload {
 
 function issueUrl(baseUrl: string, companyPrefix: string, identifier: string): string {
   return `${baseUrl}/${companyPrefix}/issues/${identifier}`;
-}
-
-function matchChannelByType(
-  routes: ChannelTypeRoute[] | undefined,
-  candidates: Array<string | undefined>,
-): string | null {
-  if (!routes || routes.length === 0) return null;
-  for (const [pattern, channelId] of routes) {
-    let re: RegExp;
-    try {
-      re = new RegExp(pattern);
-    } catch {
-      continue;
-    }
-    for (const value of candidates) {
-      if (value && re.test(value)) return channelId;
-    }
-  }
-  return null;
 }
 
 export async function handleIssueCreated(
