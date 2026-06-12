@@ -18,6 +18,16 @@ export interface PaperclipIssue {
   createdAt: string;
 }
 
+export interface PaperclipApproval {
+  id: string;
+  type: string;
+  status: string;
+  createdAt: string;
+  payload?: {
+    title?: string;
+  } | null;
+}
+
 export interface PaperclipRoutine {
   id: string;
   name: string;
@@ -106,6 +116,20 @@ export class PaperclipClient {
       throw new Error(`paperclip API error: ${res.status} ${url}`);
     }
     return (await res.json()) as PaperclipIssue[];
+  }
+
+  // Bypasses request<T>() because /api/companies/:id/approvals returns a bare
+  // JSON array, not the { data: T } envelope request<T>() unwraps.
+  async getPendingApprovals(companyId: string): Promise<PaperclipApproval[]> {
+    const url = `${this.baseUrl}/api/companies/${companyId}/approvals?status=pending`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+    });
+    if (res.status >= 400) {
+      throw new Error(`paperclip API error: ${res.status} ${url}`);
+    }
+    return (await res.json()) as PaperclipApproval[];
   }
 
   async approveApproval(approvalId: string, decisionNote?: string): Promise<void> {
