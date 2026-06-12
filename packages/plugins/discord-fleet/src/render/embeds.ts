@@ -135,6 +135,7 @@ export function buildApprovalReminderEmbed(opts: {
   title?: string;
   issueUrl: string;
   ageHours: number;
+  now?: Date;
 }): APIEmbed {
   const shortId = opts.approvalId.slice(0, 8);
   const headline = opts.title ? safe(opts.title, 200) : `Approval ${shortId}`;
