@@ -80,16 +80,20 @@ elif [[ ! -t 0 ]]; then
   comment="$(cat)"
 fi
 
-require_command jq
+require_command python3
 
 payload="$(
-  jq -nc \
-    --arg status "$status" \
-    --arg comment "$comment" \
-    '
-      (if $status == "" then {} else {status: $status} end) +
-      (if $comment == "" then {} else {comment: $comment} end)
-    '
+  STATUS="$status" COMMENT="$comment" python3 -c '
+import json, os, sys
+out = {}
+status = os.environ.get("STATUS", "")
+comment = os.environ.get("COMMENT", "")
+if status:
+    out["status"] = status
+if comment:
+    out["comment"] = comment
+sys.stdout.write(json.dumps(out))
+'
 )"
 
 if [[ "$dry_run" == "1" ]]; then
@@ -110,7 +114,9 @@ if [[ -z "${PAPERCLIP_RUN_ID:-}" ]]; then
   PAPERCLIP_RUN_ID="manual-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
 
-curl -sS -X PATCH \
+# --fail-with-body: HTTP 4xx/5xx exits non-zero (so callers notice a rejected
+# update) while still printing the error body for diagnosis.
+curl -sS --fail-with-body -X PATCH \
   "$PAPERCLIP_API_URL/api/issues/$issue_id" \
   -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
   -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" \
