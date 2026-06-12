@@ -11,6 +11,7 @@ import { handleApprovalButton } from "./handlers/approval-button.js";
 import { runDigest } from "./jobs/digest.js";
 import { runStuckDetector } from "./jobs/stuck-detector.js";
 import { runRoutineHealth } from "./jobs/routine-health.js";
+import { runApprovalsReminder } from "./jobs/approvals-reminder.js";
 import { handleStatusCommand } from "./slash/status.js";
 import { PaperclipClient } from "./api/paperclip.js";
 import { CoalesceBuffer } from "./util/coalesce.js";
@@ -114,6 +115,14 @@ const plugin = definePlugin({
     ctx.jobs.register(JOB_KEYS.routineHealth, async () => {
       if (!discordClient) return;
       await runRoutineHealth(ctx, discordClient, config, async (id) => paperclipFactory(id));
+    });
+
+    ctx.jobs.register(JOB_KEYS.approvalsReminder, async () => {
+      if (!discordClient) return;
+      for (const company of config.companies) {
+        const paperclip = await paperclipFactory(company.companyId);
+        await runApprovalsReminder(ctx, company.companyId, discordClient, company, config, paperclip);
+      }
     });
 
     ctx.logger.info("discord-fleet: setup complete", { companies: config.companies.length });

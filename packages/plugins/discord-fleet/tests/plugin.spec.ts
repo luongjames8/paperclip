@@ -14,7 +14,9 @@ vi.mock("../src/discord/slash.js", () => ({
 }));
 
 describe("plugin worker", () => {
-  it("sets up event handlers and job handlers with a valid config", async () => {
+  // 15s timeout: this test imports the full worker module (discord.js included)
+  // and intermittently exceeds the 5s default while the suite transforms in parallel.
+  it("sets up event handlers and job handlers with a valid config", { timeout: 15_000 }, async () => {
     const plugin = (await import("../src/worker.js")).default;
 
     const harness = createTestHarness({
