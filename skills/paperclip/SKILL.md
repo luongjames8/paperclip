@@ -21,7 +21,26 @@ In Paperclip, **task** and **issue** refer to the same work item. The UI may use
 
 ## Authentication
 
-Env vars auto-injected: `PAPERCLIP_AGENT_ID`, `PAPERCLIP_COMPANY_ID`, `PAPERCLIP_API_URL`, `PAPERCLIP_RUN_ID`. Optional wake-context vars may also be present: `PAPERCLIP_TASK_ID` (issue/task that triggered this wake), `PAPERCLIP_WAKE_REASON` (why this run was triggered), `PAPERCLIP_WAKE_COMMENT_ID` (specific comment that triggered this wake), `PAPERCLIP_APPROVAL_ID`, `PAPERCLIP_APPROVAL_STATUS`, and `PAPERCLIP_LINKED_ISSUE_IDS` (comma-separated). For local adapters, `PAPERCLIP_API_KEY` is auto-injected as a short-lived run JWT. For non-local adapters, your operator should set `PAPERCLIP_API_KEY` in adapter config. All requests use `Authorization: Bearer $PAPERCLIP_API_KEY`. All endpoints under `/api`, all JSON. Never hard-code the API URL.
+Env vars auto-injected on heartbeat wakes: `PAPERCLIP_AGENT_ID`, `PAPERCLIP_COMPANY_ID`, `PAPERCLIP_API_URL`, `PAPERCLIP_RUN_ID`. Optional wake-context vars may also be present: `PAPERCLIP_TASK_ID` (issue/task that triggered this wake), `PAPERCLIP_WAKE_REASON` (why this run was triggered), `PAPERCLIP_WAKE_COMMENT_ID` (specific comment that triggered this wake), `PAPERCLIP_APPROVAL_ID`, `PAPERCLIP_APPROVAL_STATUS`, and `PAPERCLIP_LINKED_ISSUE_IDS` (comma-separated). For local adapters, `PAPERCLIP_API_KEY` is auto-injected as a short-lived run JWT. For cloud adapters (e.g. `openclaw_gateway`), heartbeat wakes bake a load instruction into the wake text — but on non-heartbeat wakes (chat/Discord-driven, command-driven, manual) `PAPERCLIP_API_KEY` and the other core vars are EMPTY. Bootstrap them from the on-disk claim file before any API call. The bootstrap is idempotent — it no-ops when `$PAPERCLIP_API_KEY` is already set (heartbeat wake) and populates from the claim file otherwise:
+
+```bash
+if [ -z "$PAPERCLIP_API_KEY" ]; then
+  _kf="$PWD/paperclip-claimed-api-key.json"
+  if [ ! -f "$_kf" ]; then
+    _d="$PWD"
+    while [ "$_d" != "/" ]; do
+      if [ -f "$_d/paperclip-claimed-api-key.json" ]; then _kf="$_d/paperclip-claimed-api-key.json"; break; fi
+      _d="$(dirname "$_d")"
+    done
+  fi
+  export PAPERCLIP_API_KEY="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["apiKey"])' "$_kf")"
+  export PAPERCLIP_API_URL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["apiUrl"])' "$_kf")"
+  export PAPERCLIP_AGENT_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["agentId"])' "$_kf")"
+  export PAPERCLIP_COMPANY_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["companyId"])' "$_kf")"
+fi
+```
+
+The claim file at `$WORKSPACE/paperclip-claimed-api-key.json` carries `apiKey`, `apiUrl`, `agentId`, and `companyId` — written there at pair time. Run this block once at the start of any Paperclip-touching action, on every wake type. All requests use `Authorization: Bearer $PAPERCLIP_API_KEY`. All endpoints under `/api`, all JSON. Never hard-code the API URL — read it from `$PAPERCLIP_API_URL`.
 
 Some adapters also inject `PAPERCLIP_WAKE_PAYLOAD_JSON` on comment-driven wakes. When present, it contains the compact issue summary and the ordered batch of new comment payloads for this wake. Use it first. For comment wakes, treat that batch as the highest-priority new context in the heartbeat: in your first task update or response, acknowledge the latest comment and say how it changes your next action before broad repo exploration or generic wake boilerplate. Only fetch the thread/comments API immediately when `fallbackFetchNeeded` is true or you need broader context than the inline batch provides.
 
