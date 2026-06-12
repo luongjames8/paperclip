@@ -129,6 +129,24 @@ export function buildApprovalEmbed(opts: {
   });
 }
 
+export function buildApprovalReminderEmbed(opts: {
+  approvalId: string;
+  approvalType: string;
+  title?: string;
+  issueUrl: string;
+  ageHours: number;
+}): APIEmbed {
+  const shortId = opts.approvalId.slice(0, 8);
+  const headline = opts.title ? safe(opts.title, 200) : `Approval ${shortId}`;
+  return enforceEmbedLimits({
+    color: 0xffa500,
+    title: safe(`\u23f0 Still pending (${opts.ageHours}h): ${headline}`, 256),
+    url: opts.issueUrl,
+    description: safe(`**Type**: ${opts.approvalType}\n**ID**: ${shortId}...\n\n[View & Approve in Paperclip](${opts.issueUrl})\n\nThis approval is still waiting on a decision \u2014 reminders repeat until it is decided.`),
+    timestamp: new Date().toISOString(),
+  });
+}
+
 export function buildStuckIssueEmbed(opts: {
   identifier: string;
   title: string;

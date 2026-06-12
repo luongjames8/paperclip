@@ -63,7 +63,7 @@ function chunkBySection(text: string): string[] {
   return chunks;
 }
 
-function matchChannelByType(
+export function matchChannelByType(
   routes: ChannelTypeRoute[] | undefined,
   candidate: string | undefined,
 ): string | null {
@@ -142,7 +142,10 @@ export async function handleApprovalCreated(
       companyConfig.channels.orphan;
   }
 
-  await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
+  const headerMessageId = await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
+  // Success is logged explicitly so an absent card in Discord can always be
+  // distinguished from a posted-then-buried card during incident triage.
+  ctx.logger.info("approval-created: card posted", { approvalId, destinationChannelId, headerMessageId });
 
   let bundle: IssueDocsBundle = { issues: [] };
   try {

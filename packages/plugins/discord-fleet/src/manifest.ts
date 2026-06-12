@@ -5,6 +5,7 @@ const JOB_KEYS = {
   digest: "discord-fleet.digest",
   stuckDetector: "discord-fleet.stuck-detector",
   routineHealth: "discord-fleet.routine-health",
+  approvalsReminder: "discord-fleet.approvals-reminder",
 } as const;
 
 export { JOB_KEYS };
@@ -12,7 +13,7 @@ export { JOB_KEYS };
 const manifest: PaperclipPluginManifestV1 = {
   id: "openclaw.discord-fleet",
   apiVersion: 1,
-  version: "0.1.0",
+  version: "0.2.0",
   displayName: "Discord Fleet",
   description: "Routes Paperclip issue and approval events to per-company Discord channels.",
   author: "openclaw",
@@ -141,6 +142,12 @@ const manifest: PaperclipPluginManifestV1 = {
       jobKey: JOB_KEYS.routineHealth,
       displayName: "Routine Health Monitor",
       description: "Flags routines that have not fired within their expected window.",
+      schedule: "*/30 * * * *",
+    },
+    {
+      jobKey: JOB_KEYS.approvalsReminder,
+      displayName: "Pending Approvals Reminder",
+      description: "Re-posts actionable cards for pending approvals (from the Paperclip API) until they are decided.",
       schedule: "*/30 * * * *",
     },
   ],
