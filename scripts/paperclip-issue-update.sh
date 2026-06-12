@@ -97,9 +97,17 @@ if [[ "$dry_run" == "1" ]]; then
   exit 0
 fi
 
-if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" || -z "${PAPERCLIP_RUN_ID:-}" ]]; then
-  printf 'Missing PAPERCLIP_API_URL, PAPERCLIP_API_KEY, or PAPERCLIP_RUN_ID.\n' >&2
+if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" ]]; then
+  printf 'Missing PAPERCLIP_API_URL or PAPERCLIP_API_KEY.\n' >&2
   exit 1
+fi
+
+# PAPERCLIP_RUN_ID is set by paperclip's heartbeat runner, but chat/Discord and
+# manual wakes don't have one. Synthesize a unique fallback so the
+# X-Paperclip-Run-Id header is always present (the audit trail still gets a
+# traceable value, just not tied to a heartbeat run).
+if [[ -z "${PAPERCLIP_RUN_ID:-}" ]]; then
+  PAPERCLIP_RUN_ID="manual-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
 
 curl -sS -X PATCH \
