@@ -50,9 +50,10 @@ function approval(overrides: Partial<PaperclipApproval>): PaperclipApproval {
   };
 }
 
-function makePaperclip(pending: PaperclipApproval[]): PaperclipClient {
+function makePaperclip(pending: PaperclipApproval[], approvalIssues: Array<{ id: string }> = []): PaperclipClient {
   return {
     getPendingApprovals: vi.fn().mockResolvedValue(pending),
+    getApprovalIssues: vi.fn().mockResolvedValue(approvalIssues),
   } as unknown as PaperclipClient;
 }
 
@@ -152,6 +153,28 @@ describe("runApprovalsReminder", () => {
 
     const [, channelId] = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(channelId).toBe("channel-orphan");
+  });
+
+  it("reminds into the linked issue's work thread when no type route matches", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { setThreadForIssue } = await import("../src/routing/thread-state.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await setThreadForIssue(harness.ctx, "company-1", "issue-9", {
+      threadId: "thread-9",
+      channelId: "thread-9",
+      createdAt: NOW.toISOString(),
+    });
+    const unrouted = approval({ payload: { title: "Some unrelated approval" } });
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([unrouted], [{ id: "issue-9" }]), NOW,
+    );
+
+    const [, channelId] = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("thread-9");
   });
 
   it("does not mark an approval reminded when the Discord post fails", async () => {
