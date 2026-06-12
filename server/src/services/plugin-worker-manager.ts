@@ -508,6 +508,12 @@ export function createPluginWorkerHandle(
     method: HostToWorkerMethodName | string,
     params: unknown,
   ): PluginInvocationScope | null {
+    // Scheduled jobs iterate every configured company, so they get a
+    // host-trusted invocation with no companyId restriction. Without this,
+    // a job's company-scoped host calls carry no invocation id and are
+    // rejected whenever any other invocation is concurrently active.
+    if (method === "runJob") return {};
+
     if (!isRecord(params)) return null;
 
     const directCompanyId = readNonEmptyString(params.companyId);

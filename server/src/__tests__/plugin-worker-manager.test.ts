@@ -238,6 +238,59 @@ describe("plugin-worker-manager stderr failure context", () => {
     }
   });
 
+  it("registers an unrestricted invocation for runJob so job host calls stay valid", async () => {
+    const companiesGet = vi.fn(async (
+      params: { companyId: string },
+      context?: { invocationScope?: { companyId?: string | null } | null },
+    ) => ({
+      id: params.companyId,
+      scopedCompanyId: context?.invocationScope?.companyId ?? null,
+    }));
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: {
+        instanceId: "instance-1",
+        hostVersion: "1.0.0",
+      },
+      apiVersion: 1,
+      hostHandlers: {
+        "companies.get": companiesGet as never,
+      },
+    });
+
+    try {
+      await handle.start();
+
+      // Jobs carry no companyId (they iterate every configured company), so the
+      // host must still register a live invocation for them — otherwise their
+      // nested company-scoped calls are rejected whenever any other invocation
+      // is concurrently active.
+      await expect(handle.call("runJob", {
+        job: {
+          jobKey: "digest",
+          runId: "run-1",
+          trigger: "schedule",
+          scheduledAt: "2026-01-01T00:00:00.000Z",
+        },
+        params: {
+          mode: "echo",
+          requestedCompanyId: "company-a",
+        },
+      } as unknown as HostToWorkerMethods["runJob"][0])).resolves.toEqual({
+        id: "company-a",
+        scopedCompanyId: null,
+      });
+      expect(companiesGet).toHaveBeenCalledWith(
+        { companyId: "company-a" },
+        { invocationScope: {} },
+      );
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
   it("passes echoed invocation scope to worker-to-host handlers", async () => {
     const companiesGet = vi.fn(async () => ({ id: "company-1" }));
     const handle = createPluginWorkerHandle("test.plugin", {
