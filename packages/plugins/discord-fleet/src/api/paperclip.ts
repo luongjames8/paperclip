@@ -54,8 +54,15 @@ export class PaperclipClient {
     if (res.status >= 400) {
       throw new Error(`paperclip API error: ${res.status} ${url}`);
     }
-    const body = (await res.json()) as { data: T };
-    return body.data;
+    const body = (await res.json()) as unknown;
+    // Current list routes (issues, routines) return bare JSON arrays; older
+    // routes wrapped responses in { data: T }. Accept both so a server-side
+    // envelope change cannot silently break every consumer again
+    // ("issues is not iterable", Jun 2026).
+    if (body && typeof body === "object" && !Array.isArray(body) && "data" in body) {
+      return (body as { data: T }).data;
+    }
+    return body as T;
   }
 
   async getInProgressIssues(companyId: string): Promise<PaperclipIssue[]> {
@@ -86,8 +93,11 @@ export class PaperclipClient {
     if (res.status >= 400) {
       throw new Error(`paperclip API error: ${res.status} ${url}`);
     }
-    const body = (await res.json()) as { data: PaperclipIssue };
-    return body.data;
+    const body = (await res.json()) as unknown;
+    if (body && typeof body === "object" && "data" in body) {
+      return (body as { data: PaperclipIssue }).data;
+    }
+    return body as PaperclipIssue;
   }
 
   // Bypasses request<T>() because /api/issues/:id/documents returns a bare
