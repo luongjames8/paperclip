@@ -4,7 +4,7 @@ import type { CompanyConfig, DiscordFleetConfig } from "../config/schema.js";
 import type { PaperclipClient } from "../api/paperclip.js";
 import { postEmbedToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
-import { matchChannelByType } from "../handlers/approval-created.js";
+import { matchChannelByType } from "../routing/route.js";
 
 export const APPROVAL_REMINDERS_KEY = "approval-reminders";
 
@@ -44,6 +44,7 @@ export async function runApprovalsReminder(
     return;
   }
 
+  const nowMs = now.getTime();
   const stateKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: APPROVAL_REMINDERS_KEY };
   const reminders = ((await ctx.state.get(stateKey)) as Record<string, string> | null) ?? {};
 
@@ -56,17 +57,17 @@ export async function runApprovalsReminder(
   for (const approval of pending) {
     const createdMs = Date.parse(approval.createdAt);
     if (!Number.isFinite(createdMs)) continue;
-    const ageMs = now.getTime() - createdMs;
+    const ageMs = nowMs - createdMs;
     if (ageMs < REMIND_AFTER_MS) continue;
 
     const lastReminded = reminders[approval.id] ? Date.parse(reminders[approval.id]) : null;
-    if (lastReminded !== null && now.getTime() - lastReminded < REMIND_EVERY_MS) continue;
+    if (lastReminded !== null && nowMs - lastReminded < REMIND_EVERY_MS) continue;
 
     const title = approval.payload?.title ?? undefined;
     const url = `${config.paperclipApiUrl}/${config.companyPrefix}/approvals/${approval.id}`;
     const ageHours = Math.floor(ageMs / 3_600_000);
     const destinationChannelId =
-      matchChannelByType(fleetConfig.approvalsChannelsByType?.[companyId], title) ??
+      matchChannelByType(fleetConfig.approvalsChannelsByType?.[companyId], [title]) ??
       config.approvalFallbackChannelId ??
       config.channels.orphan;
 
@@ -76,6 +77,7 @@ export async function runApprovalsReminder(
       title,
       issueUrl: url,
       ageHours,
+      now,
     });
     const actionRow = buildApprovalActionRow({ approvalId: approval.id, issueUrl: url });
 
