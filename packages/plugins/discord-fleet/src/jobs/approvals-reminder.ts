@@ -5,6 +5,7 @@ import type { PaperclipClient } from "../api/paperclip.js";
 import { postEmbedToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
 import { matchChannelByType } from "../routing/route.js";
+import { getThreadForAncestors } from "../routing/thread-state.js";
 
 export const APPROVAL_REMINDERS_KEY = "approval-reminders";
 
@@ -66,10 +67,28 @@ export async function runApprovalsReminder(
     const title = approval.payload?.title ?? undefined;
     const url = `${config.paperclipApiUrl}/${config.companyPrefix}/approvals/${approval.id}`;
     const ageHours = Math.floor(ageMs / 3_600_000);
-    const destinationChannelId =
-      matchChannelByType(fleetConfig.approvalsChannelsByType?.[companyId], [title]) ??
-      config.approvalFallbackChannelId ??
-      config.channels.orphan;
+    // Mirror handleApprovalCreated's routing tiers: explicit type route, then
+    // the linked issue's work thread (so reminders land where the original
+    // card did), then the per-company fallback/orphan channel.
+    let destinationChannelId = matchChannelByType(
+      fleetConfig.approvalsChannelsByType?.[companyId],
+      [title],
+    );
+    if (!destinationChannelId) {
+      try {
+        const issues = await paperclip.getApprovalIssues(approval.id);
+        const thread = issues.length
+          ? await getThreadForAncestors(ctx, companyId, issues.map((i) => i.id))
+          : null;
+        destinationChannelId = thread?.threadId ?? null;
+      } catch (err) {
+        ctx.logger.warn("approvals-reminder: work-thread lookup failed, using fallback channel", {
+          approvalId: approval.id,
+          error: String(err),
+        });
+      }
+    }
+    destinationChannelId ??= config.approvalFallbackChannelId ?? config.channels.orphan;
 
     const embed = buildApprovalReminderEmbed({
       approvalId: approval.id,
