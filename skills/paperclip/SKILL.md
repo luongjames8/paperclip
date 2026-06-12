@@ -37,6 +37,9 @@ if [ -z "$PAPERCLIP_API_KEY" ]; then
   export PAPERCLIP_API_URL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["apiUrl"])' "$_kf")"
   export PAPERCLIP_AGENT_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["agentId"])' "$_kf")"
   export PAPERCLIP_COMPANY_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["companyId"])' "$_kf")"
+  # No heartbeat run exists on these wakes; synthesize a traceable run id so the
+  # mandatory X-Paperclip-Run-Id header on mutating calls is never empty.
+  export PAPERCLIP_RUN_ID="${PAPERCLIP_RUN_ID:-manual-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 fi
 ```
 
