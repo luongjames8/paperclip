@@ -123,50 +123,17 @@ describe("conductor integration smoke (harness)", () => {
       ],
     });
 
-    // Stub config.get + secrets.resolve so buildRestClient works
-    vi.spyOn(harness.ctx.config, "get").mockResolvedValue({
-      paperclipApiUrl: "http://paperclip:3100",
-      paperclipApiKeySecretRef: "sec-uuid",
-    });
-    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("fake-key");
-
-    // Track wakeup calls recorded via http.fetch
-    const wakeupCalls: Array<{ agentId: string; body: { source: string; reason: string; payload: { prompt: string } } }> = [];
+    // Track worker invocations via the SDK agents.invoke client (the conductor
+    // talks to the host in-process — there is no REST/base-URL path anymore).
+    const wakeupCalls: Array<{ agentId: string; prompt: string; reason?: string }> = [];
     let wakeupCallCount = 0;
-
-    vi.spyOn(harness.ctx.http, "fetch").mockImplementation(async (url: string, opts?: RequestInit) => {
-      const urlStr = String(url);
-      if (opts?.method === "POST" && urlStr.includes("/wakeup")) {
-        // Extract agentId from URL: /api/agents/<id>/wakeup
-        const match = urlStr.match(/\/api\/agents\/([^/]+)\/wakeup/);
-        const agentId = match?.[1] ?? "";
-        wakeupCallCount++;
-        const body = JSON.parse(opts.body as string);
-        wakeupCalls.push({ agentId, body });
-        return {
-          status: 200,
-          json: async () => ({ id: `mock-run-${wakeupCallCount}` }),
-        } as Response;
-      }
-      if (opts?.method === "GET" && urlStr.includes("/api/companies/") && urlStr.includes("/agents")) {
-        // Return the two seeded agents as a bare array
-        return {
-          status: 200,
-          json: async () => [
-            { id: glm5AgentId, name: "globalisto-worker-glm5" },
-            { id: qwen37AgentId, name: "globalisto-worker-qwen37" },
-          ],
-        } as Response;
-      }
-      if (opts?.method === "GET" && urlStr.includes("/api/issues/") && urlStr.includes("/documents")) {
-        return {
-          status: 200,
-          json: async () => [],
-        } as Response;
-      }
-      // Fallback
-      return { status: 200, json: async () => ({}) } as Response;
+    vi.spyOn(harness.ctx.agents, "invoke").mockImplementation(async (agentId, _companyId, opts) => {
+      wakeupCallCount++;
+      wakeupCalls.push({ agentId, prompt: opts.prompt, reason: opts.reason });
+      return { runId: `mock-run-${wakeupCallCount}` };
     });
+    // No artifact documents exist in this smoke — every doc read misses.
+    vi.spyOn(harness.ctx.issues.documents, "get").mockResolvedValue(null);
 
     await plugin.definition.setup(harness.ctx);
 
@@ -222,7 +189,7 @@ describe("conductor integration smoke (harness)", () => {
     expect(firstCall.agentId).toBe(qwen37AgentId); // sonnet → qwen37 in "mixed"
     // The conductor feeds the FULL prompt CONTENT (read from the vendored prompts)
     // plus the appended output-artifact contract — not the step-id path string.
-    expect(firstCall.body.payload.prompt).toContain("Write your output artifact");
+    expect(firstCall.prompt).toContain("Write your output artifact");
 
     // Record the worker runId returned from mock wakeup
     const workerRunId = "mock-run-1";

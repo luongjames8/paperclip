@@ -10,7 +10,7 @@ import { assemblePrompt } from "./engine/prompt.js";
 import { PROFILES } from "./engine/profiles.js";
 import { assembleGateInput } from "./engine/gate-input.js";
 import { readStepPrompt } from "./engine/load-prompt.js";
-import { PaperclipRestClient } from "./engine/paperclip-rest.js";
+import { PaperclipHostClient } from "./engine/paperclip-host.js";
 import { fileURLToPath } from "node:url";
 import { basename } from "node:path";
 
@@ -168,7 +168,7 @@ const plugin = definePlugin({
       // Per-tick agent list cache: keyed by company_id to avoid N identical list calls.
       const agentListCache = new Map<string, Array<{ id: string; name: string }>>();
 
-      const rest = await buildRestClient(ctx);
+      const rest = new PaperclipHostClient(ctx);
 
       for (const row of rows) {
         try {
@@ -192,17 +192,13 @@ const plugin = definePlugin({
   },
 });
 
-async function buildRestClient(ctx: Parameters<typeof plugin.definition.setup>[0]): Promise<PaperclipRestClient> {
-  const cfg = await ctx.config.get();
-  const apiKey = await ctx.secrets.resolve((cfg as { paperclipApiKeySecretRef?: string }).paperclipApiKeySecretRef ?? "");
-  return new PaperclipRestClient(ctx, (cfg as { paperclipApiUrl?: string }).paperclipApiUrl ?? "http://paperclip:3100", apiKey);
-}
+
 
 async function processPipelineRun(
   ctx: Parameters<typeof plugin.definition.setup>[0],
   row: PipelineRow,
   agentListCache: Map<string, Array<{ id: string; name: string }>>,
-  rest: PaperclipRestClient,
+  rest: PaperclipHostClient,
 ): Promise<void> {
   const runState: RunState = {
     completedStepIds: parseCompletedStepIds(row.completed_step_ids),
@@ -277,7 +273,7 @@ async function processPipelineRun(
       if (row.active_issue_id) {
         const issueId = row.active_issue_id;
         const docs = await Promise.all(
-          step.inputs.map((n) => rest.getDocument(issueId, artifactDocKey(n))),
+          step.inputs.map((n) => rest.getDocument(issueId, artifactDocKey(n), row.company_id)),
         );
         step.inputs.forEach((n, i) => {
           if (docs[i]) inputsMap[n] = docs[i]!.body;
@@ -289,7 +285,7 @@ async function processPipelineRun(
       const promptContent = `${promptBody}\n\n---\n\nWrite your output artifact(s) ${JSON.stringify(outputKeys)} as issue documents keyed "artifact:<name>".`;
       const prompt = assemblePrompt(promptContent, inputsMap);
 
-      const { runId: workerRunId } = await rest.invokeAgent(agent.id, prompt, `globalisto-pipeline:${step.id}`);
+      const { runId: workerRunId } = await rest.invokeAgent(agent.id, row.company_id, prompt, `globalisto-pipeline:${step.id}`);
 
       await ctx.db.execute(
         `UPDATE ${TABLE}
@@ -315,7 +311,7 @@ async function processPipelineRun(
       const artifacts: Record<string, string> = {};
       if (issueId) {
         const docs = await Promise.all(
-          step.outputs.map((n) => rest.getDocument(issueId, artifactDocKey(n))),
+          step.outputs.map((n) => rest.getDocument(issueId, artifactDocKey(n), row.company_id)),
         );
         step.outputs.forEach((n, i) => {
           if (docs[i]) artifacts[n] = docs[i]!.body;

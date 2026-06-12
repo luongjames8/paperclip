@@ -78,45 +78,17 @@ describe("artifact key reconciliation — wiring (D11)", () => {
       ],
     });
 
-    // Stub config.get + secrets.resolve so buildRestClient works
-    vi.spyOn(harness.ctx.config, "get").mockResolvedValue({
-      paperclipApiUrl: "http://paperclip:3100",
-      paperclipApiKeySecretRef: "sec-uuid",
+    // Track SDK documents.get calls — the conductor reads inputs through the
+    // SDK with NORMALIZED keys (artifact:<basename>); a "../"-prefixed key must
+    // never reach the host.
+    const requestedKeys: string[] = [];
+    vi.spyOn(harness.ctx.issues.documents, "get").mockImplementation(async (_issueId, key) => {
+      requestedKeys.push(key);
+      return key === expectedKey
+        ? ({ key, body: "x" } as unknown as Awaited<ReturnType<typeof harness.ctx.issues.documents.get>>)
+        : null;
     });
-    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("fake-key");
-
-    // Track SDK documents.get calls (should be zero — REST path replaces them)
-    const sdkDocGetSpy = vi.spyOn(harness.ctx.issues.documents, "get");
-
-    // Track REST fetch calls to assert list-documents is called
-    const documentListFetches: string[] = [];
-    vi.spyOn(harness.ctx.http, "fetch").mockImplementation(async (url: string, opts?: RequestInit) => {
-      const urlStr = String(url);
-      if (opts?.method === "GET" && urlStr.includes("/api/issues/") && urlStr.includes("/documents")) {
-        documentListFetches.push(urlStr);
-        // Return the artifact the step needs so the conductor doesn't skip it
-        return {
-          status: 200,
-          json: async () => [{ key: expectedKey, body: "x" }],
-        } as Response;
-      }
-      if (opts?.method === "GET" && urlStr.includes("/api/companies/") && urlStr.includes("/agents")) {
-        return {
-          status: 200,
-          json: async () => [
-            { id: randomUUID(), name: "globalisto-worker-glm5" },
-            { id: randomUUID(), name: "globalisto-worker-qwen37" },
-          ],
-        } as Response;
-      }
-      if (opts?.method === "POST" && urlStr.includes("/wakeup")) {
-        return {
-          status: 200,
-          json: async () => ({ id: `mock-${randomUUID()}` }),
-        } as Response;
-      }
-      return { status: 200, json: async () => ({}) } as Response;
-    });
+    vi.spyOn(harness.ctx.agents, "invoke").mockResolvedValue({ runId: `mock-${randomUUID()}` });
 
     await plugin.definition.setup(harness.ctx);
 
@@ -143,11 +115,9 @@ describe("artifact key reconciliation — wiring (D11)", () => {
 
     await harness.runJob("conductor");
 
-    // The SDK documents.get should NOT have been called (REST path replaces it)
-    expect(sdkDocGetSpy).not.toHaveBeenCalled();
-
-    // The REST list-documents endpoint IS fetched (at least once for the target step)
-    expect(documentListFetches.length).toBeGreaterThan(0);
-    expect(documentListFetches.some((u) => u.includes(issueId))).toBe(true);
+    // The normalized key was requested, and no raw "../"-prefixed key ever
+    // reached the host.
+    expect(requestedKeys).toContain(expectedKey);
+    expect(requestedKeys.every((k) => !k.includes("../"))).toBe(true);
   });
 });
