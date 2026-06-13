@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { Agent } from "@paperclipai/shared";
 import manifest from "../src/manifest.js";
@@ -46,9 +46,14 @@ describe("artifact key reconciliation — wiring (D11)", () => {
   it("conductor fetches a prefixed input by basename, never by the raw prefix", async () => {
     /**
      * Layer: integration (conductor input-resolution via SDK harness)
-     * Assertion type: semantic invariant (no '../'-prefixed doc key is ever requested; basename is)
-     * Call site pinned: src/worker.ts input read — ctx.issues.documents.get(issueId, artifactDocKey(n), ...)
-     * Mutation result: revert artifactDocKey(n) → `artifact:${n}` at the input read → RED (a '../' key is requested)
+     * Assertion type: semantic invariant (no '../'-prefixed doc key is ever requested via SDK;
+     *   the conductor goes through the REST list-documents endpoint and filters client-side)
+     * Call site pinned: src/worker.ts input read — rest.getDocument(issueId, artifactDocKey(n))
+     * Mutation result: revert artifactDocKey(n) → `artifact:${n}` at the input read →
+     *   the list-documents URL is still fetched but the find() returns null for prefixed keys
+     *   (no documents in the empty response match "../..." key anyway — but more importantly,
+     *   reverting artifactDocKey means the GET URL carries `artifact:../...` instead of basename,
+     *   which is wrong — this test guards the correct normalized key in find())
      */
     const steps = loadThematicSpec() as Array<{ id: string; inputs: string[]; prompt: string; requiredModel: string }>;
     // First LLM step (real .md prompt, non-human) that consumes a prefixed input.
@@ -64,6 +69,7 @@ describe("artifact key reconciliation — wiring (D11)", () => {
     const expectedKey = artifactDocKey(prefixedInput);
 
     const companyId = randomUUID();
+    const issueId = randomUUID();
     const harness = createTestHarness({ manifest });
     harness.seed({
       agents: [
@@ -72,12 +78,17 @@ describe("artifact key reconciliation — wiring (D11)", () => {
       ],
     });
 
+    // Track SDK documents.get calls — the conductor reads inputs through the
+    // SDK with NORMALIZED keys (artifact:<basename>); a "../"-prefixed key must
+    // never reach the host.
     const requestedKeys: string[] = [];
-    harness.ctx.issues.documents.get = async (_issueId: string, key: string) => {
+    vi.spyOn(harness.ctx.issues.documents, "get").mockImplementation(async (_issueId, key) => {
       requestedKeys.push(key);
-      return { body: "x" } as any;
-    };
-    harness.ctx.agents.invoke = async () => ({ runId: `mock-${randomUUID()}` });
+      return key === expectedKey
+        ? ({ key, body: "x" } as unknown as Awaited<ReturnType<typeof harness.ctx.issues.documents.get>>)
+        : null;
+    });
+    vi.spyOn(harness.ctx.agents, "invoke").mockResolvedValue({ runId: `mock-${randomUUID()}` });
 
     await plugin.definition.setup(harness.ctx);
 
@@ -93,7 +104,7 @@ describe("artifact key reconciliation — wiring (D11)", () => {
             completed_step_ids: JSON.stringify(steps.slice(0, targetIdx).map((s) => s.id)),
             active_step_id: null,
             active_worker_run_id: null,
-            active_issue_id: randomUUID(),
+            active_issue_id: issueId,
             step_complete: false,
             error: null,
           },
@@ -104,7 +115,9 @@ describe("artifact key reconciliation — wiring (D11)", () => {
 
     await harness.runJob("conductor");
 
+    // The normalized key was requested, and no raw "../"-prefixed key ever
+    // reached the host.
     expect(requestedKeys).toContain(expectedKey);
-    expect(requestedKeys.some((k) => k.includes("../"))).toBe(false);
+    expect(requestedKeys.every((k) => !k.includes("../"))).toBe(true);
   });
 });

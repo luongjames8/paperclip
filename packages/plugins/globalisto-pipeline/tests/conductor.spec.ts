@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { Agent } from "@paperclipai/shared";
 import { nextAction, type RunState } from "../src/engine/conductor.js";
@@ -123,14 +123,17 @@ describe("conductor integration smoke (harness)", () => {
       ],
     });
 
-    // Track invoke calls
-    const invokeCalls: Array<{ agentId: string; companyId: string; prompt: string }> = [];
-    let invokeCallCount = 0;
-    harness.ctx.agents.invoke = async (agentId, cId, opts) => {
-      invokeCalls.push({ agentId, companyId: cId, prompt: opts.prompt });
-      invokeCallCount++;
-      return { runId: `mock-run-${invokeCallCount}` };
-    };
+    // Track worker invocations via the SDK agents.invoke client (the conductor
+    // talks to the host in-process — there is no REST/base-URL path anymore).
+    const wakeupCalls: Array<{ agentId: string; prompt: string; reason?: string }> = [];
+    let wakeupCallCount = 0;
+    vi.spyOn(harness.ctx.agents, "invoke").mockImplementation(async (agentId, _companyId, opts) => {
+      wakeupCallCount++;
+      wakeupCalls.push({ agentId, prompt: opts.prompt, reason: opts.reason });
+      return { runId: `mock-run-${wakeupCallCount}` };
+    });
+    // No artifact documents exist in this smoke — every doc read misses.
+    vi.spyOn(harness.ctx.issues.documents, "get").mockResolvedValue(null);
 
     await plugin.definition.setup(harness.ctx);
 
@@ -154,10 +157,6 @@ describe("conductor integration smoke (harness)", () => {
     expect(insertExec).toBeTruthy();
 
     // ── Step 1: conductor runs, discovers first step → invoke ────────────────
-    // Reset dbExecutes tracking between conductor runs isn't needed — just check total growth
-    const execCountBefore = harness.dbExecutes.length;
-
-    // Patch db.query to return the pipeline_runs row we "inserted"
     const mockRunId = result.runId;
     const mockIssueId = result.issueId;
 
@@ -185,14 +184,14 @@ describe("conductor integration smoke (harness)", () => {
     await harness.runJob("conductor");
 
     // First non-human step in THEMATIC_STEPS is discovery:step_1 (sonnet → globalisto-worker-qwen37 in mixed)
-    expect(invokeCalls.length).toBe(1);
-    const firstCall = invokeCalls[0];
+    expect(wakeupCalls.length).toBe(1);
+    const firstCall = wakeupCalls[0];
     expect(firstCall.agentId).toBe(qwen37AgentId); // sonnet → qwen37 in "mixed"
     // The conductor feeds the FULL prompt CONTENT (read from the vendored prompts)
     // plus the appended output-artifact contract — not the step-id path string.
     expect(firstCall.prompt).toContain("Write your output artifact");
 
-    // Record the worker runId returned from mock invoke
+    // Record the worker runId returned from mock wakeup
     const workerRunId = "mock-run-1";
 
     // ── Step 2: fire agent.run.finished → marks step_complete=true ───────────
@@ -266,8 +265,8 @@ describe("conductor integration smoke (harness)", () => {
     await harness.runJob("conductor");
 
     // Should have invoked the second step now
-    expect(invokeCalls.length).toBe(2);
-    const secondCall = invokeCalls[1];
+    expect(wakeupCalls.length).toBe(2);
+    const secondCall = wakeupCalls[1];
     expect(secondCall.agentId).toBe(qwen37AgentId); // discovery:step_1_5 is also sonnet → qwen37
   });
 

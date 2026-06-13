@@ -10,6 +10,7 @@ import { assemblePrompt } from "./engine/prompt.js";
 import { PROFILES } from "./engine/profiles.js";
 import { assembleGateInput } from "./engine/gate-input.js";
 import { readStepPrompt } from "./engine/load-prompt.js";
+import { PaperclipHostClient } from "./engine/paperclip-host.js";
 import { fileURLToPath } from "node:url";
 import { basename } from "node:path";
 
@@ -165,11 +166,13 @@ const plugin = definePlugin({
       ctx.logger.info("Conductor tick", { runCount: rows.length });
 
       // Per-tick agent list cache: keyed by company_id to avoid N identical list calls.
-      const agentListCache = new Map<string, Awaited<ReturnType<typeof ctx.agents.list>>>();
+      const agentListCache = new Map<string, Array<{ id: string; name: string }>>();
+
+      const rest = new PaperclipHostClient(ctx);
 
       for (const row of rows) {
         try {
-          await processPipelineRun(ctx, row, agentListCache);
+          await processPipelineRun(ctx, row, agentListCache, rest);
         } catch (err) {
           ctx.logger.error("Conductor error for run", {
             runId: row.id,
@@ -189,10 +192,13 @@ const plugin = definePlugin({
   },
 });
 
+
+
 async function processPipelineRun(
   ctx: Parameters<typeof plugin.definition.setup>[0],
   row: PipelineRow,
-  agentListCache: Map<string, Awaited<ReturnType<typeof ctx.agents.list>>>,
+  agentListCache: Map<string, Array<{ id: string; name: string }>>,
+  rest: PaperclipHostClient,
 ): Promise<void> {
   const runState: RunState = {
     completedStepIds: parseCompletedStepIds(row.completed_step_ids),
@@ -254,7 +260,7 @@ async function processPipelineRun(
 
       // Use per-tick cache to avoid N identical list calls per tick.
       if (!agentListCache.has(row.company_id)) {
-        agentListCache.set(row.company_id, await ctx.agents.list({ companyId: row.company_id }));
+        agentListCache.set(row.company_id, await rest.listAgents(row.company_id));
       }
       const agentList = agentListCache.get(row.company_id)!;
       const agent = agentList.find((a) => a.name === agentName);
@@ -267,7 +273,7 @@ async function processPipelineRun(
       if (row.active_issue_id) {
         const issueId = row.active_issue_id;
         const docs = await Promise.all(
-          step.inputs.map((n) => ctx.issues.documents.get(issueId, artifactDocKey(n), row.company_id)),
+          step.inputs.map((n) => rest.getDocument(issueId, artifactDocKey(n), row.company_id)),
         );
         step.inputs.forEach((n, i) => {
           if (docs[i]) inputsMap[n] = docs[i]!.body;
@@ -279,10 +285,7 @@ async function processPipelineRun(
       const promptContent = `${promptBody}\n\n---\n\nWrite your output artifact(s) ${JSON.stringify(outputKeys)} as issue documents keyed "artifact:<name>".`;
       const prompt = assemblePrompt(promptContent, inputsMap);
 
-      const { runId: workerRunId } = await ctx.agents.invoke(agent.id, row.company_id, {
-        prompt,
-        reason: `globalisto-pipeline:${step.id}`,
-      });
+      const { runId: workerRunId } = await rest.invokeAgent(agent.id, row.company_id, prompt, `globalisto-pipeline:${step.id}`);
 
       await ctx.db.execute(
         `UPDATE ${TABLE}
@@ -308,7 +311,7 @@ async function processPipelineRun(
       const artifacts: Record<string, string> = {};
       if (issueId) {
         const docs = await Promise.all(
-          step.outputs.map((n) => ctx.issues.documents.get(issueId, artifactDocKey(n), row.company_id)),
+          step.outputs.map((n) => rest.getDocument(issueId, artifactDocKey(n), row.company_id)),
         );
         step.outputs.forEach((n, i) => {
           if (docs[i]) artifacts[n] = docs[i]!.body;

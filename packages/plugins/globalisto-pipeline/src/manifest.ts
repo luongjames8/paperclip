@@ -22,6 +22,10 @@ const manifest: PaperclipPluginManifestV1 = {
     "events.subscribe",
     "ui.dashboardWidget.register",
   ],
+  instanceConfigSchema: {
+    type: "object",
+    properties: {},
+  },
   database: {
     namespaceSlug: "globalisto_pipeline",
     migrationsDir: "migrations",
