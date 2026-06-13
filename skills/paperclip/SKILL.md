@@ -24,7 +24,7 @@ In Paperclip, **task** and **issue** refer to the same work item. The UI may use
 Env vars auto-injected on heartbeat wakes: `PAPERCLIP_AGENT_ID`, `PAPERCLIP_COMPANY_ID`, `PAPERCLIP_API_URL`, `PAPERCLIP_RUN_ID`. Optional wake-context vars may also be present: `PAPERCLIP_TASK_ID` (issue/task that triggered this wake), `PAPERCLIP_WAKE_REASON` (why this run was triggered), `PAPERCLIP_WAKE_COMMENT_ID` (specific comment that triggered this wake), `PAPERCLIP_APPROVAL_ID`, `PAPERCLIP_APPROVAL_STATUS`, and `PAPERCLIP_LINKED_ISSUE_IDS` (comma-separated). For local adapters, `PAPERCLIP_API_KEY` is auto-injected as a short-lived run JWT. For cloud adapters (e.g. `openclaw_gateway`), heartbeat wakes bake a load instruction into the wake text — but on non-heartbeat wakes (chat/Discord-driven, command-driven, manual) `PAPERCLIP_API_KEY` and the other core vars are EMPTY. Bootstrap them from the on-disk claim file before any API call. The bootstrap is idempotent — it no-ops when `$PAPERCLIP_API_KEY` is already set (heartbeat wake) and populates from the claim file otherwise:
 
 ```bash
-if [ -z "$PAPERCLIP_API_KEY" ]; then
+if [ -z "${PAPERCLIP_API_KEY:-}" ]; then
   _kf="$PWD/paperclip-claimed-api-key.json"
   if [ ! -f "$_kf" ]; then
     _d="$PWD"
