@@ -6413,6 +6413,12 @@ export function issueRoutes(
           }
           : {}),
         ...buildCreateIssueActivityStatusDetails(issue, res),
+        // Fleet patch: enrich issue.created payload so helper-runner trigger
+        // filters can discriminate without an extra GET.
+        projectId: issue.projectId ?? null,
+        parentId: issue.parentId ?? null,
+        originKind: issue.originKind ?? "manual",
+        assigneeAgentId: issue.assigneeAgentId ?? null,
         ...(Array.isArray(req.body.blockedByIssueIds) ? { blockedByIssueIds: req.body.blockedByIssueIds } : {}),
         ...summarizeIssueReferenceActivityDetails({
           addedReferencedIssues: referenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),

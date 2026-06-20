@@ -80,10 +80,6 @@ import {
   requireLocalFolderDeclaration,
   setStoredLocalFolder,
 } from "../services/plugin-local-folders.js";
-import {
-  extractSecretRefPathsFromConfig,
-  PLUGIN_SECRET_REFS_DISABLED_MESSAGE,
-} from "../services/plugin-secrets-handler.js";
 import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 
 /** UI slot declaration extracted from plugin manifest */
@@ -2201,12 +2197,11 @@ export function pluginRoutes(
     }
 
     try {
-      const secretRefsByPath = extractSecretRefPathsFromConfig(body.configJson, schema);
-      if (secretRefsByPath.size > 0) {
-        res.status(422).json({ error: PLUGIN_SECRET_REFS_DISABLED_MESSAGE });
-        return;
-      }
-
+      // Fleet patch: upstream v2026.529.0 rejects (422) any plugin config that
+      // contains a secret ref "until company-scoped plugin config lands". The
+      // fleet's helper-runner / discord-fleet configs rely on ${secret:...}
+      // refs today, so we allow them through; they resolve at execution time
+      // via the (fleet-restored) plugin-secrets-handler resolve() path.
       const result = await registry.upsertConfig(plugin.id, {
         configJson: body.configJson,
       });

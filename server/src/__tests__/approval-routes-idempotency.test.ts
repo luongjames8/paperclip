@@ -328,7 +328,7 @@ describe("approval routes idempotent retries", () => {
       requestedByAgentId: "agent-1",
       requestedByUserId: null,
       status: "pending",
-      payload: { title: "Approve hosting spend" },
+      payload: { title: "Approve hosting spend", proposedComment: "## Section\nProposed body" },
       decisionNote: null,
       decidedByUserId: null,
       decidedAt: null,
@@ -341,7 +341,7 @@ describe("approval routes idempotent retries", () => {
       .send({
         type: "request_board_approval",
         issueIds: ["00000000-0000-0000-0000-000000000001"],
-        payload: { title: "Approve hosting spend" },
+        payload: { title: "Approve hosting spend", proposedComment: "## Section\nProposed body" },
       });
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
@@ -365,6 +365,17 @@ describe("approval routes idempotent retries", () => {
         actorType: "agent",
         actorId: "agent-1",
         action: "approval.created",
+        // Downstream consumers (discord-fleet plugin's approvalsChannelsByType
+        // regex routing + chunked-comment posting) match on details.title and
+        // read details.proposedComment; if either is dropped from the emit,
+        // routes fall through to the orphan fallback and the proposedComment
+        // is silently dropped.
+        details: expect.objectContaining({
+          type: "request_board_approval",
+          issueIds: ["00000000-0000-0000-0000-000000000001"],
+          title: "Approve hosting spend",
+          proposedComment: "## Section\nProposed body",
+        }),
       }),
     );
   });
