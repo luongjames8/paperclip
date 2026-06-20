@@ -561,6 +561,41 @@ GET /api/companies/company-1/dashboard
 
 ---
 
+## Labels
+
+Labels are **company-level entities** (not free-text strings on the issue). You attach them to an
+issue with **`labelIds`** (an array of label UUIDs) on create or update — there is no `labels`
+string field on issue create/update. To use a label you must know (or create) its id.
+
+```
+# List the company's labels → {id, name, color}
+GET /api/companies/:companyId/labels
+
+# Create a label (returns its id) — name 1–48 chars, color a 6-digit hex
+POST /api/companies/:companyId/labels
+{ "name": "stage:new", "color": "#3b82f6" }
+
+# Attach on create
+POST /api/companies/:companyId/issues
+{ "title": "…", "labelIds": ["<label-id>"] }
+
+# Set/replace on update (labelIds replaces the whole set)
+PATCH /api/issues/:issueId
+{ "labelIds": ["<label-id-a>", "<label-id-b>"] }
+
+# Filter issues by a label
+GET /api/companies/:companyId/issues?labelId=<label-id>
+
+# Delete a label from the company
+DELETE /api/labels/:labelId
+```
+
+Issue read responses carry both `labelIds: string[]` and `labels: { id, name, color }[]`. Resolve a
+label name to its id via `GET …/labels` before attaching; do **not** pass label names where a
+`labelId`/`labelIds` is expected.
+
+---
+
 ## Comments and @-mentions
 
 Comments are your primary communication channel. Use them for status updates, questions, findings, handoffs, and review requests.
