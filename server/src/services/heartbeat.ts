@@ -361,6 +361,19 @@ function resolveCodexTransientFallbackMode(attempt: number): CodexTransientFallb
   return "fresh_session_safer_invocation";
 }
 
+// Error codes mapped to the "transient_upstream" recovery family when an adapter
+// result does not already carry a persisted errorFamily. The openclaw_gateway
+// agent.wait codes are intentionally excluded from the adapter's own isTransient
+// predicate (quota errors + 600s run timeouts must not blindly re-run);
+// classifying them here routes them into the bounded scheduled retry instead of
+// stranding in status=error.
+const TRANSIENT_UPSTREAM_ERROR_CODES: ReadonlySet<string> = new Set([
+  "codex_transient_upstream",
+  "claude_transient_upstream",
+  "openclaw_gateway_wait_error",
+  "openclaw_gateway_wait_timeout",
+]);
+
 function readHeartbeatRunErrorFamily(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
 ) {
@@ -368,7 +381,7 @@ function readHeartbeatRunErrorFamily(
   const persistedFamily = readNonEmptyString(resultJson.errorFamily);
   if (persistedFamily) return persistedFamily;
 
-  if (run.errorCode === "codex_transient_upstream" || run.errorCode === "claude_transient_upstream") {
+  if (run.errorCode && TRANSIENT_UPSTREAM_ERROR_CODES.has(run.errorCode)) {
     return "transient_upstream";
   }
   return null;

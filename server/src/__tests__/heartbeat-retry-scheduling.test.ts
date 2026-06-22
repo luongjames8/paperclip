@@ -72,11 +72,17 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     retryNotBefore?: string | null;
     scheduledRetryAttempt?: number;
     resultJson?: Record<string, unknown> | null;
-    adapterType?: "codex_local" | "claude_local";
+    adapterType?: "codex_local" | "claude_local" | "openclaw_gateway";
     agentName?: string;
   }) {
     const adapterType = input.adapterType ?? "codex_local";
-    const agentName = input.agentName ?? (adapterType === "claude_local" ? "ClaudeCoder" : "CodexCoder");
+    const agentName =
+      input.agentName ??
+      (adapterType === "claude_local"
+        ? "ClaudeCoder"
+        : adapterType === "openclaw_gateway"
+          ? "GatewayAgent"
+          : "CodexCoder");
     await db.insert(companies).values({
       id: input.companyId,
       name: "Paperclip",
@@ -1405,6 +1411,46 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       retryNotBefore.toISOString(),
     );
   });
+
+  it.each(["openclaw_gateway_wait_error", "openclaw_gateway_wait_timeout"] as const)(
+    "classifies openclaw_gateway %s as transient and schedules a bounded retry",
+    async (errorCode) => {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const runId = randomUUID();
+      const now = new Date(2026, 5, 22, 10, 0, 0);
+
+      // No errorFamily seeded: classification must come from errorCode alone.
+      // The adapter isTransient predicate deliberately routes agent.wait errors
+      // to terminal; the heartbeat classifier is the layer that re-routes them
+      // into the bounded transient retry.
+      await seedRetryFixture({
+        runId,
+        companyId,
+        agentId,
+        now,
+        errorCode,
+        adapterType: "openclaw_gateway",
+      });
+
+      const scheduled = await heartbeat.scheduleBoundedRetry(runId, {
+        now,
+        random: () => 0.5,
+      });
+
+      expect(scheduled.outcome).toBe("scheduled");
+      if (scheduled.outcome !== "scheduled") return;
+
+      const retryRun = await db
+        .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, scheduled.run.id))
+        .then((rows) => rows[0] ?? null);
+      expect((retryRun?.contextSnapshot as Record<string, unknown> | null)?.errorFamily).toBe(
+        "transient_upstream",
+      );
+    },
+  );
 
   it("schedules bounded retries for claude_transient_upstream and honors its retry-not-before hint", async () => {
     const companyId = randomUUID();
