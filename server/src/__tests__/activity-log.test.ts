@@ -50,13 +50,17 @@ describe("logActivity — activity.logged catch-all emit", () => {
     const emitMock = vi.fn().mockResolvedValue({ errors: [] });
     setPluginEventBus({ emit: emitMock } as unknown as PluginEventBus);
 
-    await logActivity(makeDb(), makeInput("issue.comment_added"));
+    // Use an action with no typed plugin-event mapping so only the catch-all
+    // fires. (issue.comment_added — the previous example — became a typed event
+    // in upstream v2026.618.0 via ACTIVITY_ACTION_TO_PLUGIN_EVENT, which would
+    // emit twice; issue.status_changed remains unmapped.)
+    await logActivity(makeDb(), makeInput("issue.status_changed"));
 
     expect(emitMock).toHaveBeenCalledTimes(1);
     expect(emitMock).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "activity.logged",
-        payload: expect.objectContaining({ action: "issue.comment_added" }),
+        payload: expect.objectContaining({ action: "issue.status_changed" }),
       }),
     );
   });
