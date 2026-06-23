@@ -25,6 +25,10 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 // (Discord rejects duplicate gateway connections for the same token). The
 // token-keyed map is the dedup layer; the companyId map is the lookup layer.
 let clientByCompanyId: Map<string, Client> = new Map();
+// Number of companies in the active config — compared against clientByCompanyId.size
+// in onHealth so a per-company bot that failed to connect (and was skipped by the
+// fault-isolation path) surfaces as "degraded" instead of being hidden.
+let configuredCompanyCount = 0;
 let savedCtx: PluginContext | null = null;
 let eventUnsubscribers: Array<() => void> = [];
 const coalescer = new CoalesceBuffer(2000);
@@ -140,6 +144,7 @@ const plugin = definePlugin({
     // connect failures are isolated and skipped inside buildClientMaps).
     const { clientByToken, byCompanyId, tokenByCompanyId } = await buildClientMaps(ctx, config);
     clientByCompanyId = byCompanyId;
+    configuredCompanyCount = config.companies.length;
     ctx.logger.info("discord-fleet: Discord gateway(s) connected", {
       uniqueClients: clientByToken.size,
       companiesConnected: byCompanyId.size,
@@ -272,8 +277,26 @@ const plugin = definePlugin({
       return;
     }
 
-    const { clientByToken, byCompanyId } = await buildClientMaps(savedCtx, cfg);
+    const { clientByToken, byCompanyId, tokenByCompanyId } = await buildClientMaps(savedCtx, cfg);
     clientByCompanyId = byCompanyId;
+    configuredCompanyCount = cfg.companies.length;
+
+    // Re-register slash commands for each connected company. This MUST mirror
+    // setup() — config-reload (operator adds a company or a per-company bot) is
+    // the feature's primary activation path, and a new bot has a different appId
+    // whose guild slash commands were never registered. Without this, /status is
+    // missing in the new guild until a full plugin restart.
+    for (const company of cfg.companies) {
+      const client = byCompanyId.get(company.companyId);
+      if (!client) continue;
+      const appId = client.user?.id;
+      const token = tokenByCompanyId.get(company.companyId);
+      if (appId && token) {
+        await registerSlashCommands(token, appId, company.guildId).catch((err) => {
+          savedCtx?.logger.warn("discord-fleet: slash command registration failed", { guildId: company.guildId, err: String(err) });
+        });
+      }
+    }
 
     // Re-register interaction handlers on the new clients.
     for (const client of clientByToken.values()) {
@@ -303,13 +326,16 @@ const plugin = definePlugin({
   },
 
   async onHealth() {
-    const connectedCount = new Set(clientByCompanyId.values()).size;
-    const ok = connectedCount > 0;
+    const companiesConnected = clientByCompanyId.size;
+    const uniqueClients = new Set(clientByCompanyId.values()).size;
+    // ok only when EVERY configured company connected; a skipped per-company bot
+    // (fault-isolated in buildClientMaps) drops the count below configured → degraded.
+    const ok = configuredCompanyCount > 0 && companiesConnected >= configuredCompanyCount;
     return {
       status: ok ? "ok" : "degraded",
       message: ok
-        ? `Discord gateway(s) connected (${connectedCount} unique client(s))`
-        : "No Discord clients connected",
+        ? `Discord connected: ${companiesConnected}/${configuredCompanyCount} companies (${uniqueClients} unique client(s))`
+        : `Discord degraded: ${companiesConnected}/${configuredCompanyCount} companies connected`,
     };
   },
 });
