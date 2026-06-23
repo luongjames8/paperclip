@@ -1,11 +1,16 @@
-import type { ButtonInteraction } from "discord.js";
+import type { ButtonInteraction, ModalSubmitInteraction } from "discord.js";
+import { ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { CompanyConfig, DiscordFleetConfig, UserMapping } from "../config/schema.js";
 import { PaperclipClient } from "../api/paperclip.js";
-import { APPROVAL_BUTTON_PREFIX } from "../render/embeds.js";
+import {
+  APPROVAL_BUTTON_PREFIX,
+  APPROVAL_REVISION_MODAL_PREFIX,
+  APPROVAL_REVISION_NOTE_FIELD,
+} from "../render/embeds.js";
 import { PENDING_APPROVALS_KEY } from "./approval-created.js";
 
-export type ApprovalAction = "approve" | "reject";
+export type ApprovalAction = "approve" | "reject" | "revision";
 
 export function parseApprovalCustomId(customId: string): { action: ApprovalAction; approvalId: string } | null {
   if (customId.startsWith(APPROVAL_BUTTON_PREFIX.approve)) {
@@ -13,6 +18,9 @@ export function parseApprovalCustomId(customId: string): { action: ApprovalActio
   }
   if (customId.startsWith(APPROVAL_BUTTON_PREFIX.reject)) {
     return { action: "reject", approvalId: customId.slice(APPROVAL_BUTTON_PREFIX.reject.length) };
+  }
+  if (customId.startsWith(APPROVAL_BUTTON_PREFIX.revision)) {
+    return { action: "revision", approvalId: customId.slice(APPROVAL_BUTTON_PREFIX.revision.length) };
   }
   return null;
 }
@@ -41,6 +49,28 @@ export async function handleApprovalButton(
         "You're not authorized to act on this approval. Ask an operator to add your Discord user ID to the company's userMappings.",
       ephemeral: true,
     });
+    return;
+  }
+
+  // "Request changes" opens a modal to collect the operator's revision note.
+  // showModal MUST be the first response to the interaction, so this branch runs
+  // BEFORE deferUpdate (which would consume the interaction token). The modal
+  // submit is handled by handleApprovalRevisionModal.
+  if (parsed.action === "revision") {
+    const modal = new ModalBuilder()
+      .setCustomId(`${APPROVAL_REVISION_MODAL_PREFIX}${parsed.approvalId}`)
+      .setTitle("Request changes")
+      .addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
+          new TextInputBuilder()
+            .setCustomId(APPROVAL_REVISION_NOTE_FIELD)
+            .setLabel("What needs to change?")
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setMaxLength(1500),
+        ),
+      );
+    await interaction.showModal(modal);
     return;
   }
 
@@ -165,5 +195,61 @@ async function renderResolved(interaction: ButtonInteraction, action: ApprovalAc
       },
     ],
     components: [],
+  });
+}
+
+// Handles the "Request changes" modal submit: POSTs request-revision with the
+// operator's note as decisionNote. The server then wakes the card creator
+// (approval_revision_requested) to revise + resubmit the SAME card — no new card.
+export async function handleApprovalRevisionModal(
+  ctx: PluginContext,
+  interaction: ModalSubmitInteraction,
+  config: DiscordFleetConfig,
+): Promise<void> {
+  if (!interaction.customId.startsWith(APPROVAL_REVISION_MODAL_PREFIX)) return;
+  const approvalId = interaction.customId.slice(APPROVAL_REVISION_MODAL_PREFIX.length);
+
+  const company = resolveCompany(config, interaction.guildId);
+  if (!company) {
+    await interaction.reply({ content: "No company configured for this guild.", ephemeral: true });
+    return;
+  }
+
+  // Re-check authorization on submit — the modal is a fresh interaction.
+  const mapping = resolveUserMapping(company, interaction.user.id);
+  if (!mapping) {
+    await interaction.reply({
+      content:
+        "You're not authorized to act on this approval. Ask an operator to add your Discord user ID to the company's userMappings.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const note = interaction.fields.getTextInputValue(APPROVAL_REVISION_NOTE_FIELD).trim();
+
+  await interaction.deferReply({ ephemeral: true });
+  try {
+    const apiKey = await ctx.secrets.resolve(
+      mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef,
+    );
+    const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
+    await paperclip.requestRevisionApproval(approvalId, note);
+  } catch (err) {
+    ctx.logger.warn("approval-revision-modal: paperclip API call failed", {
+      approvalId,
+      err: String(err),
+    });
+    await interaction.editReply({
+      content: `Failed to request changes: ${String(err).slice(0, 200)}`,
+    });
+    return;
+  }
+
+  await removeFromPending(ctx, company.companyId, approvalId);
+
+  await interaction.editReply({
+    content:
+      "✏️ Requested changes — the card creator has been woken with your note to revise and resubmit the **same** card.",
   });
 }

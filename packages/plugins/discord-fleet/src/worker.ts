@@ -7,7 +7,7 @@ import { registerSlashCommands, setupInteractionHandler } from "./discord/slash.
 import { handleIssueCreated } from "./handlers/issue-created.js";
 import { handleIssueUpdated } from "./handlers/issue-updated.js";
 import { handleApprovalCreated } from "./handlers/approval-created.js";
-import { handleApprovalButton } from "./handlers/approval-button.js";
+import { handleApprovalButton, handleApprovalRevisionModal } from "./handlers/approval-button.js";
 import { runDigest } from "./jobs/digest.js";
 import { runStuckDetector } from "./jobs/stuck-detector.js";
 import { runRoutineHealth } from "./jobs/routine-health.js";
@@ -270,6 +270,9 @@ const plugin = definePlugin({
         },
         async (interaction) => {
           await handleApprovalButton(ctx, interaction, clientConfig);
+        },
+        async (interaction) => {
+          await handleApprovalRevisionModal(ctx, interaction, clientConfig);
         },
       );
     }
