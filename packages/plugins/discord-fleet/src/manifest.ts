@@ -112,6 +112,11 @@ const manifest: PaperclipPluginManifestV1 = {
             },
             stuckIssueThresholdHours: { type: "number", default: 6, minimum: 1 },
             costEventThresholdCents: { type: "number" },
+            botTokenSecretRef: {
+              type: "string",
+              title: "Discord Bot Token Secret Ref (per-company)",
+              description: "Optional. Secret ref for THIS company's own Discord bot. When set, this company uses its own bot instead of the root botTokenSecretRef (companies sharing a token share one connection). Leave empty to use the root bot.",
+            },
             paperclipApiKeySecretRef: { type: "string", title: "Paperclip API Key Secret Ref" },
             paperclipApiUrl: { type: "string", title: "Paperclip API Base URL", default: "http://localhost:3000" },
             approvalFallbackChannelId: {
