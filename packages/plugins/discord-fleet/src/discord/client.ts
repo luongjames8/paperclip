@@ -14,6 +14,9 @@ export async function connectDiscordClient(client: Client, token: string): Promi
   });
 }
 
-export function destroyDiscordClient(client: Client): void {
-  client.destroy();
+// Returns the destroy promise so callers can AWAIT the gateway session closing
+// before opening a new connection for the same token (Discord rejects a second
+// IDENTIFY while the prior session is still closing).
+export async function destroyDiscordClient(client: Client): Promise<void> {
+  await client.destroy();
 }
