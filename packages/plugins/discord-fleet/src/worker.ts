@@ -277,37 +277,53 @@ const plugin = definePlugin({
     eventUnsubscribers = bindEventHandlers(ctx, config);
 
     // Register job handlers. Jobs read module-level currentConfig + currentPaperclipFactory
-    // (Finding 1) so a config reload via onConfigChanged updates what the jobs see without
-    // needing to re-register them (re-registering would double-register the jobs).
+    // + clientByCompanyId (Finding 1) so a config reload via onConfigChanged updates what
+    // the jobs see without re-registering them. Each run SNAPSHOTS those three globals into
+    // locals at the start (codex): otherwise a reload mid-run would mix the old company list
+    // with a new client map/factory — skipping companies, posting via the wrong client, or
+    // throwing "unknown company" for one removed by the reload. onConfigChanged replaces the
+    // global references (it doesn't mutate the old maps), so a snapshot stays self-consistent
+    // for the whole run.
     ctx.jobs.register(JOB_KEYS.digest, async () => {
-      if (!currentConfig || !currentPaperclipFactory) return;
-      for (const company of currentConfig.companies) {
-        const client = getClientForCompany(company.companyId);
+      const cfg = currentConfig;
+      const factory = currentPaperclipFactory;
+      if (!cfg || !factory) return;
+      const clients = clientByCompanyId;
+      for (const company of cfg.companies) {
+        const client = clients.get(company.companyId);
         if (!client) continue;
-        const paperclip = await currentPaperclipFactory(company.companyId);
+        const paperclip = await factory(company.companyId);
         await runDigest(ctx, company.companyId, client, company, paperclip);
       }
     });
 
     ctx.jobs.register(JOB_KEYS.stuckDetector, async () => {
-      if (!currentConfig || !currentPaperclipFactory) return;
-      // runStuckDetector loops companies internally; pass the map accessor as the
-      // client resolver so each company uses its own (or shared) client.
-      await runStuckDetector(ctx, getClientForCompany, currentConfig, async (id) => currentPaperclipFactory!(id));
+      const cfg = currentConfig;
+      const factory = currentPaperclipFactory;
+      if (!cfg || !factory) return;
+      const clients = clientByCompanyId;
+      // runStuckDetector loops companies internally; pass a snapshot-bound resolver.
+      await runStuckDetector(ctx, (id) => clients.get(id) ?? null, cfg, async (id) => factory(id));
     });
 
     ctx.jobs.register(JOB_KEYS.routineHealth, async () => {
-      if (!currentConfig || !currentPaperclipFactory) return;
-      await runRoutineHealth(ctx, getClientForCompany, currentConfig, async (id) => currentPaperclipFactory!(id));
+      const cfg = currentConfig;
+      const factory = currentPaperclipFactory;
+      if (!cfg || !factory) return;
+      const clients = clientByCompanyId;
+      await runRoutineHealth(ctx, (id) => clients.get(id) ?? null, cfg, async (id) => factory(id));
     });
 
     ctx.jobs.register(JOB_KEYS.approvalsReminder, async () => {
-      if (!currentConfig || !currentPaperclipFactory) return;
-      for (const company of currentConfig.companies) {
-        const client = getClientForCompany(company.companyId);
+      const cfg = currentConfig;
+      const factory = currentPaperclipFactory;
+      if (!cfg || !factory) return;
+      const clients = clientByCompanyId;
+      for (const company of cfg.companies) {
+        const client = clients.get(company.companyId);
         if (!client) continue;
-        const paperclip = await currentPaperclipFactory(company.companyId);
-        await runApprovalsReminder(ctx, company.companyId, client, company, currentConfig, paperclip);
+        const paperclip = await factory(company.companyId);
+        await runApprovalsReminder(ctx, company.companyId, client, company, cfg, paperclip);
       }
     });
 
