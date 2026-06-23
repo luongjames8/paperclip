@@ -49,7 +49,7 @@ describe("stuck-detector threshold guard", () => {
     const config = makeConfig(0);
     const factory = vi.fn().mockResolvedValue({} as PaperclipClient);
 
-    await runStuckDetector(harness.ctx, makeMockClient(), config, factory);
+    await runStuckDetector(harness.ctx, () => makeMockClient(), config, factory);
 
     expect(postEmbedToChannel).not.toHaveBeenCalled();
     // Factory should not be called — we bail before hitting the API
