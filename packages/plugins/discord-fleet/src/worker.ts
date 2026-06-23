@@ -161,6 +161,23 @@ async function buildClientMaps(
         newByToken.set(token, client);
       }
 
+      // Verify the bot is actually a member of this company's guild. A valid
+      // token whose bot was never invited to company.guildId logs in fine and
+      // would otherwise be counted as connected — but it cannot post to or
+      // receive events from that guild, a SILENT failure (gates never reach
+      // Discord while onHealth reports ok). Skip the company so it surfaces as
+      // degraded (connected < configured) and handlers don't post into a void.
+      // guilds.cache is populated once the client emits 'ready', which
+      // connectDiscordClient awaits before resolving.
+      if (!client.guilds.cache.has(company.guildId)) {
+        ctx.logger.error("discord-fleet: bot is not a member of company guild; skipping company", {
+          companyId: company.companyId,
+          guildId: company.guildId,
+          usesOwnBot: Boolean(company.botTokenSecretRef),
+        });
+        continue;
+      }
+
       byCompanyId.set(company.companyId, client);
     } catch (err) {
       if (pendingClient) {
