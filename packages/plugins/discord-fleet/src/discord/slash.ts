@@ -23,6 +23,12 @@ export function setupInteractionHandler(
   statusHandler: (interaction: ChatInputCommandInteraction, companyId: string) => Promise<void>,
   buttonHandler: (interaction: ButtonInteraction) => Promise<void>,
 ): void {
+  // Idempotent: a client can be REUSED across a config reload (its token was
+  // unchanged), in which case onConfigChanged calls this again on the same
+  // client. Clear any prior interactionCreate listener so handlers don't stack
+  // and fire buttons/commands more than once. Only this module registers
+  // interactionCreate, so removing all listeners for that event is safe.
+  client.removeAllListeners("interactionCreate");
   client.on("interactionCreate", async (interaction) => {
     if (interaction.isButton()) {
       try {
