@@ -167,9 +167,23 @@ async function buildClientMaps(
       // receive events from that guild, a SILENT failure (gates never reach
       // Discord while onHealth reports ok). Skip the company so it surfaces as
       // degraded (connected < configured) and handlers don't post into a void.
-      // guilds.cache is populated once the client emits 'ready', which
-      // connectDiscordClient awaits before resolving.
-      if (!client.guilds.cache.has(company.guildId)) {
+      //
+      // Cache-first, then an AUTHORITATIVE fetch on a miss: guilds.cache can
+      // briefly lag a bot just invited to a newly-configured guild (the
+      // GUILD_CREATE gateway event hasn't arrived yet). Without the fetch, a
+      // reload right after inviting the bot would permanently skip that guild
+      // until the next reload/restart. fetch confirms membership against the
+      // API so we only skip when the bot is genuinely absent.
+      let inGuild = client.guilds.cache.has(company.guildId);
+      if (!inGuild) {
+        try {
+          await client.guilds.fetch(company.guildId);
+          inGuild = true;
+        } catch {
+          inGuild = false;
+        }
+      }
+      if (!inGuild) {
         ctx.logger.error("discord-fleet: bot is not a member of company guild; skipping company", {
           companyId: company.companyId,
           guildId: company.guildId,
