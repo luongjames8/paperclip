@@ -69,6 +69,10 @@ async function buildClientMaps(
   const tokenByCompanyId = new Map<string, string>();
 
   for (const company of cfg.companies) {
+    // Track a client created in THIS iteration so a connect failure can destroy
+    // it (otherwise the half-open client leaks a background reconnect loop, and
+    // accumulates one zombie per failing onConfigChanged cycle).
+    let pendingClient: Client | null = null;
     try {
       const token = company.botTokenSecretRef
         ? await ctx.secrets.resolve(company.botTokenSecretRef)
@@ -77,13 +81,22 @@ async function buildClientMaps(
 
       let client = clientByToken.get(token);
       if (!client) {
-        client = createDiscordClient();
-        await connectDiscordClient(client, token);
+        pendingClient = createDiscordClient();
+        await connectDiscordClient(pendingClient, token);
+        client = pendingClient;
         clientByToken.set(token, client);
+        pendingClient = null; // registered — no longer this loop's to clean up
       }
 
       byCompanyId.set(company.companyId, client);
     } catch (err) {
+      if (pendingClient) {
+        try {
+          await destroyDiscordClient(pendingClient);
+        } catch {
+          /* best-effort cleanup of the failed-connect client */
+        }
+      }
       ctx.logger.error("discord-fleet: failed to connect Discord client for company; skipping", {
         companyId: company.companyId,
         usesOwnBot: Boolean(company.botTokenSecretRef),
@@ -237,11 +250,19 @@ const plugin = definePlugin({
     // and skipped, never thrown) — the rebuild below always completes with the
     // companies that connected, so a single bad per-company token can no longer
     // leave the fleet (incl. hinomaru) with an empty client map.
-    const existingTokens = new Map<Client, true>();
+    // AWAIT each unique client's destroy before rebuilding — a config reload that
+    // keeps a token unchanged (e.g. just adding a company) reconnects that same
+    // token, and Discord rejects a new IDENTIFY while the old session is still
+    // closing. Awaiting the close avoids racing the root client offline.
+    const destroyed = new Set<Client>();
     for (const client of clientByCompanyId.values()) {
-      if (!existingTokens.has(client)) {
-        destroyDiscordClient(client);
-        existingTokens.set(client, true);
+      if (!destroyed.has(client)) {
+        destroyed.add(client);
+        try {
+          await destroyDiscordClient(client);
+        } catch {
+          /* best-effort: proceed with rebuild even if a destroy hiccups */
+        }
       }
     }
     clientByCompanyId = new Map();
