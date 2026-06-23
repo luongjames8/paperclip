@@ -74,6 +74,23 @@ function getClientForCompany(companyId: string): Client | null {
   return clientByCompanyId.get(companyId) ?? null;
 }
 
+// Returns a config view containing ONLY the companies served by `client`.
+// Interaction handlers resolve the company by interaction.guildId; scoping the
+// config to this client's companies means a bot that also happens to be in
+// another company's guild resolves no company there and REJECTS the /status or
+// approval click instead of servicing it with the wrong company's Paperclip
+// credentials (e.g. during a root → per-company-bot transition).
+function scopeConfigToClient(
+  config: DiscordFleetConfig,
+  byCompanyId: Map<string, Client>,
+  client: Client,
+): DiscordFleetConfig {
+  return {
+    ...config,
+    companies: config.companies.filter((c) => byCompanyId.get(c.companyId) === client),
+  };
+}
+
 // Build the client maps from a resolved config, reusing existing live clients
 // for tokens that are unchanged (Finding 2: preserves hinomaru's root client on
 // an unrelated config reload such as adding a per-company bot for a different company).
@@ -236,23 +253,23 @@ const plugin = definePlugin({
       }
     }
 
-    // Set up interaction handlers on EACH unique client so every bot's buttons
-    // and slash commands work. The companyId is resolved from guildId within the
-    // shared config, so one setupInteractionHandler call per client suffices —
-    // each client routes by guildId into the same config.companies array.
+    // Set up interaction handlers on EACH unique client, scoped to ONLY the
+    // companies that client serves (so a bot never services another company's
+    // guild it happens to be in — see scopeConfigToClient).
     for (const client of newByToken.values()) {
+      const clientConfig = scopeConfigToClient(config, byCompanyId, client);
       setupInteractionHandler(
         client,
-        config,
+        clientConfig,
         async (interaction, companyId) => {
-          const companyConfig = config.companies.find((c) => c.companyId === companyId);
+          const companyConfig = clientConfig.companies.find((c) => c.companyId === companyId);
           if (!companyConfig) return;
           const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
           const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
           await handleStatusCommand(interaction, ctx, companyConfig, paperclip);
         },
         async (interaction) => {
-          await handleApprovalButton(ctx, interaction, config);
+          await handleApprovalButton(ctx, interaction, clientConfig);
         },
       );
     }
@@ -360,13 +377,15 @@ const plugin = definePlugin({
       }
     }
 
-    // Re-register interaction handlers on the new clients.
+    // Re-register interaction handlers on the new clients, scoped to ONLY the
+    // companies each client serves (see scopeConfigToClient).
     for (const client of newByToken.values()) {
+      const clientConfig = scopeConfigToClient(cfg, byCompanyId, client);
       setupInteractionHandler(
         client,
-        cfg,
+        clientConfig,
         async (interaction, companyId) => {
-          const companyConfig = cfg.companies.find((c) => c.companyId === companyId);
+          const companyConfig = clientConfig.companies.find((c) => c.companyId === companyId);
           if (!companyConfig || !savedCtx) return;
           const apiKey = await savedCtx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
           const paperclip = new PaperclipClient(savedCtx, companyConfig.paperclipApiUrl, apiKey);
@@ -374,7 +393,7 @@ const plugin = definePlugin({
         },
         async (interaction) => {
           if (!savedCtx) return;
-          await handleApprovalButton(savedCtx, interaction, cfg);
+          await handleApprovalButton(savedCtx, interaction, clientConfig);
         },
       );
     }
