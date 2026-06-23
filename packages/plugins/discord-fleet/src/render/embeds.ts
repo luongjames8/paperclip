@@ -6,7 +6,13 @@ import { truncate } from "./plain.js";
 export const APPROVAL_BUTTON_PREFIX = {
   approve: "approval-approve:",
   reject: "approval-reject:",
+  revision: "approval-revision:",
 } as const;
+
+// Modal shown when the operator clicks "Request changes" — customId carries the
+// approval id; the modal collects the revision note (-> decisionNote).
+export const APPROVAL_REVISION_MODAL_PREFIX = "approval-revision-modal:";
+export const APPROVAL_REVISION_NOTE_FIELD = "revisionNote";
 
 export function buildApprovalActionRow(opts: {
   approvalId: string;
@@ -24,6 +30,12 @@ export function buildApprovalActionRow(opts: {
     label: "❌ Reject",
     custom_id: `${APPROVAL_BUTTON_PREFIX.reject}${opts.approvalId}`,
   };
+  const revision: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Primary,
+    label: "✏️ Request changes",
+    custom_id: `${APPROVAL_BUTTON_PREFIX.revision}${opts.approvalId}`,
+  };
   const view: APIButtonComponent = {
     type: ComponentType.Button,
     style: ButtonStyle.Link,
@@ -32,7 +44,7 @@ export function buildApprovalActionRow(opts: {
   };
   return {
     type: ComponentType.ActionRow,
-    components: [approve, reject, view],
+    components: [approve, reject, revision, view],
   };
 }
 

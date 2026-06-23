@@ -120,7 +120,15 @@ export class PaperclipClient {
     await this.resolveApproval(approvalId, "reject", decisionNote);
   }
 
-  private async resolveApproval(approvalId: string, action: "approve" | "reject", decisionNote?: string): Promise<void> {
+  async requestRevisionApproval(approvalId: string, decisionNote?: string): Promise<void> {
+    await this.resolveApproval(approvalId, "request-revision", decisionNote);
+  }
+
+  private async resolveApproval(
+    approvalId: string,
+    action: "approve" | "reject" | "request-revision",
+    decisionNote?: string,
+  ): Promise<void> {
     const url = `${this.baseUrl}/api/approvals/${approvalId}/${action}`;
     const body = decisionNote ? JSON.stringify({ decisionNote }) : "{}";
     const res = await this.ctx.http.fetch(url, {
