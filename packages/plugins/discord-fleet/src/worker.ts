@@ -209,8 +209,28 @@ async function buildClientMaps(
     }
   }
 
-  // Tokens that were live before but are no longer needed by any company in the
-  // new config must be destroyed. Tokens still in newByToken are reused — skip them.
+  // Drop any client that ended up serving NO company — its bot is in none of
+  // its configured guilds (a misconfig: valid token, never invited). Otherwise
+  // it would hold an idle gateway session and receive an empty interaction
+  // handler. A NEWLY-connected such client is destroyed here; a REUSED one is
+  // left in existingByToken so the tokensToDestroy pass below catches it (the
+  // caller destroys it after the module-state swap) — avoids double-destroy.
+  const servingClients = new Set(byCompanyId.values());
+  for (const [token, client] of [...newByToken]) {
+    if (servingClients.has(client)) continue;
+    newByToken.delete(token);
+    if (existingByToken.get(token) !== client) {
+      try {
+        await destroyDiscordClient(client);
+      } catch {
+        /* best-effort cleanup of an unused newly-connected client */
+      }
+    }
+  }
+
+  // Tokens that were live before but are no longer used by any company in the
+  // new config (removed, or dropped above as serving no company) must be
+  // destroyed. Tokens still in newByToken are reused — skip them.
   const tokensToDestroy = new Map<string, Client>();
   for (const [token, client] of existingByToken) {
     if (!newByToken.has(token)) {
