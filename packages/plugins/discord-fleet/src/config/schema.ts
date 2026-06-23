@@ -28,6 +28,12 @@ export interface CompanyConfig {
   costEventThresholdCents?: number;
   paperclipApiKeySecretRef: string;
   paperclipApiUrl: string;
+  // Optional per-company Discord bot token. When set, this company uses its own
+  // Discord bot instead of the root botTokenSecretRef. Multiple companies that
+  // resolve to the same token share one Client (Discord rejects duplicate gateway
+  // connections for the same token). When absent, falls back to the root token
+  // for full backward compatibility.
+  botTokenSecretRef?: string;
   // Destination for approvals that don't match any approvalsChannelsByType
   // regex AND aren't co-locatable in an existing work-thread. Distinct from
   // channels.orphan (which is the issue-routing fallback). When absent, the
