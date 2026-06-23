@@ -3,7 +3,7 @@ import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 
 vi.mock("../src/discord/client.js", () => ({
-  createDiscordClient: vi.fn(() => ({ user: null, on: vi.fn(), once: vi.fn(), destroy: vi.fn() })),
+  createDiscordClient: vi.fn(() => ({ user: null, on: vi.fn(), once: vi.fn(), destroy: vi.fn(), guilds: { cache: { has: () => true }, fetch: async () => ({}) } })),
   connectDiscordClient: vi.fn().mockResolvedValue(undefined),
   destroyDiscordClient: vi.fn(),
 }));

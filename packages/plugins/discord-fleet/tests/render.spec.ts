@@ -73,8 +73,8 @@ describe("buildApprovalActionRow", () => {
     issueUrl: "https://paperclip.example.com/issues/appr-test-123",
   });
 
-  it("returns exactly 3 components", () => {
-    expect(ROW.components).toHaveLength(3);
+  it("returns exactly 4 components", () => {
+    expect(ROW.components).toHaveLength(4);
   });
 
   it("first component is ✅ Approve button with style=Success", () => {
@@ -91,8 +91,15 @@ describe("buildApprovalActionRow", () => {
     expect(btn.label).toBe("❌ Reject");
   });
 
-  it("third component is View button with style=Link and url set", () => {
+  it("third component is ✏️ Request changes button with style=Primary", () => {
     const btn = ROW.components[2] as any;
+    expect(btn.type).toBe(ComponentType.Button);
+    expect(btn.style).toBe(ButtonStyle.Primary);
+    expect(btn.label).toBe("✏️ Request changes");
+  });
+
+  it("fourth component is View button with style=Link and url set", () => {
+    const btn = ROW.components[3] as any;
     expect(btn.type).toBe(ComponentType.Button);
     expect(btn.style).toBe(ButtonStyle.Link);
     expect(btn.label).toBe("View");
@@ -109,8 +116,13 @@ describe("buildApprovalActionRow", () => {
     expect(btn.custom_id).toBe(`${APPROVAL_BUTTON_PREFIX.reject}appr-test-123`);
   });
 
-  it("Link button has no custom_id (Discord Link buttons must not have custom_id)", () => {
+  it("Request changes custom_id uses APPROVAL_BUTTON_PREFIX.revision + approvalId", () => {
     const btn = ROW.components[2] as any;
+    expect(btn.custom_id).toBe(`${APPROVAL_BUTTON_PREFIX.revision}appr-test-123`);
+  });
+
+  it("Link button has no custom_id (Discord Link buttons must not have custom_id)", () => {
+    const btn = ROW.components[3] as any;
     expect(btn.custom_id).toBeUndefined();
   });
 });

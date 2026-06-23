@@ -161,6 +161,37 @@ async function buildClientMaps(
         newByToken.set(token, client);
       }
 
+      // Verify the bot is actually a member of this company's guild. A valid
+      // token whose bot was never invited to company.guildId logs in fine and
+      // would otherwise be counted as connected — but it cannot post to or
+      // receive events from that guild, a SILENT failure (gates never reach
+      // Discord while onHealth reports ok). Skip the company so it surfaces as
+      // degraded (connected < configured) and handlers don't post into a void.
+      //
+      // Cache-first, then an AUTHORITATIVE fetch on a miss: guilds.cache can
+      // briefly lag a bot just invited to a newly-configured guild (the
+      // GUILD_CREATE gateway event hasn't arrived yet). Without the fetch, a
+      // reload right after inviting the bot would permanently skip that guild
+      // until the next reload/restart. fetch confirms membership against the
+      // API so we only skip when the bot is genuinely absent.
+      let inGuild = client.guilds.cache.has(company.guildId);
+      if (!inGuild) {
+        try {
+          await client.guilds.fetch(company.guildId);
+          inGuild = true;
+        } catch {
+          inGuild = false;
+        }
+      }
+      if (!inGuild) {
+        ctx.logger.error("discord-fleet: bot is not a member of company guild; skipping company", {
+          companyId: company.companyId,
+          guildId: company.guildId,
+          usesOwnBot: Boolean(company.botTokenSecretRef),
+        });
+        continue;
+      }
+
       byCompanyId.set(company.companyId, client);
     } catch (err) {
       if (pendingClient) {
@@ -178,8 +209,28 @@ async function buildClientMaps(
     }
   }
 
-  // Tokens that were live before but are no longer needed by any company in the
-  // new config must be destroyed. Tokens still in newByToken are reused — skip them.
+  // Drop any client that ended up serving NO company — its bot is in none of
+  // its configured guilds (a misconfig: valid token, never invited). Otherwise
+  // it would hold an idle gateway session and receive an empty interaction
+  // handler. A NEWLY-connected such client is destroyed here; a REUSED one is
+  // left in existingByToken so the tokensToDestroy pass below catches it (the
+  // caller destroys it after the module-state swap) — avoids double-destroy.
+  const servingClients = new Set(byCompanyId.values());
+  for (const [token, client] of [...newByToken]) {
+    if (servingClients.has(client)) continue;
+    newByToken.delete(token);
+    if (existingByToken.get(token) !== client) {
+      try {
+        await destroyDiscordClient(client);
+      } catch {
+        /* best-effort cleanup of an unused newly-connected client */
+      }
+    }
+  }
+
+  // Tokens that were live before but are no longer used by any company in the
+  // new config (removed, or dropped above as serving no company) must be
+  // destroyed. Tokens still in newByToken are reused — skip them.
   const tokensToDestroy = new Map<string, Client>();
   for (const [token, client] of existingByToken) {
     if (!newByToken.has(token)) {

@@ -23,6 +23,7 @@ vi.mock("../src/discord/client.js", () => ({
     once: vi.fn(),
     destroy: vi.fn(),
     login: vi.fn(),
+    guilds: { cache: { has: () => true }, fetch: async () => ({}) },
   })),
   connectDiscordClient: vi.fn().mockResolvedValue(undefined),
   destroyDiscordClient: vi.fn(),
