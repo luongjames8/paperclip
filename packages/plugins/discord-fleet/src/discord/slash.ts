@@ -1,5 +1,5 @@
 import { REST, Routes, SlashCommandBuilder } from "discord.js";
-import type { ButtonInteraction, ChatInputCommandInteraction, Client } from "discord.js";
+import type { ButtonInteraction, ChatInputCommandInteraction, Client, ModalSubmitInteraction } from "discord.js";
 import type { DiscordFleetConfig } from "../config/schema.js";
 
 const STATUS_COMMAND = new SlashCommandBuilder()
@@ -22,6 +22,7 @@ export function setupInteractionHandler(
   config: DiscordFleetConfig,
   statusHandler: (interaction: ChatInputCommandInteraction, companyId: string) => Promise<void>,
   buttonHandler: (interaction: ButtonInteraction) => Promise<void>,
+  modalHandler: (interaction: ModalSubmitInteraction) => Promise<void>,
 ): void {
   // Idempotent: a client can be REUSED across a config reload (its token was
   // unchanged), in which case onConfigChanged calls this again on the same
@@ -38,6 +39,15 @@ export function setupInteractionHandler(
         // becomes an unhandledRejection on the async event listener and
         // crashes the plugin worker. Log + swallow.
         console.error("discord-fleet: button handler threw, swallowed to keep worker alive", err);
+      }
+      return;
+    }
+
+    if (interaction.isModalSubmit()) {
+      try {
+        await modalHandler(interaction);
+      } catch (err) {
+        console.error("discord-fleet: modal handler threw, swallowed to keep worker alive", err);
       }
       return;
     }
