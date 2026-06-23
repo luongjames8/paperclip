@@ -42,42 +42,57 @@ function getClientForCompany(companyId: string): Client | null {
   return clientByCompanyId.get(companyId) ?? null;
 }
 
-// Build the two maps from a resolved config.
+// Build the client maps from a resolved config.
 // Returns:
-//   clientByToken  — deduplicated; one connected Client per unique resolved token
-//   byCompanyId    — lookup map; each companyId → its Client
+//   clientByToken    — deduplicated; one connected Client per unique resolved token
+//   byCompanyId      — lookup map; each successfully-connected companyId → its Client
+//   tokenByCompanyId — the resolved token per company (reused for slash registration
+//                      so it can't diverge from what was used to connect)
+//
+// FAULT ISOLATION (critical): each company's secret-resolve + connect is wrapped
+// so one misconfigured company (e.g. a new per-company bot with a bad/not-in-guild
+// token) is logged and SKIPPED — it does NOT throw out of this function. Without
+// this, a single bad per-company token would abort setup/onConfigChanged and take
+// down the SHARED root client (hinomaru and every other root-token company) with
+// it. A skipped company simply has no entry in byCompanyId; downstream handlers
+// null-guard on getClientForCompany and quietly skip it.
 async function buildClientMaps(
   ctx: PluginContext,
   cfg: DiscordFleetConfig,
-): Promise<{ clientByToken: Map<string, Client>; byCompanyId: Map<string, Client> }> {
-  const rootToken = await ctx.secrets.resolve(cfg.botTokenSecretRef);
-
+): Promise<{
+  clientByToken: Map<string, Client>;
+  byCompanyId: Map<string, Client>;
+  tokenByCompanyId: Map<string, string>;
+}> {
   const clientByToken = new Map<string, Client>();
   const byCompanyId = new Map<string, Client>();
+  const tokenByCompanyId = new Map<string, string>();
 
   for (const company of cfg.companies) {
-    const token = company.botTokenSecretRef
-      ? await ctx.secrets.resolve(company.botTokenSecretRef)
-      : rootToken;
+    try {
+      const token = company.botTokenSecretRef
+        ? await ctx.secrets.resolve(company.botTokenSecretRef)
+        : await ctx.secrets.resolve(cfg.botTokenSecretRef);
+      tokenByCompanyId.set(company.companyId, token);
 
-    let client = clientByToken.get(token);
-    if (!client) {
-      client = createDiscordClient();
-      await connectDiscordClient(client, token);
-      clientByToken.set(token, client);
+      let client = clientByToken.get(token);
+      if (!client) {
+        client = createDiscordClient();
+        await connectDiscordClient(client, token);
+        clientByToken.set(token, client);
+      }
+
+      byCompanyId.set(company.companyId, client);
+    } catch (err) {
+      ctx.logger.error("discord-fleet: failed to connect Discord client for company; skipping", {
+        companyId: company.companyId,
+        usesOwnBot: Boolean(company.botTokenSecretRef),
+        err: String(err),
+      });
     }
-
-    byCompanyId.set(company.companyId, client);
   }
 
-  return { clientByToken, byCompanyId };
-}
-
-// Destroy all unique clients in the token map (avoids double-destroy for shared clients).
-function destroyAllClients(clientByToken: Map<string, Client>): void {
-  for (const client of clientByToken.values()) {
-    destroyDiscordClient(client);
-  }
+  return { clientByToken, byCompanyId, tokenByCompanyId };
 }
 
 function bindEventHandlers(
@@ -108,22 +123,24 @@ const plugin = definePlugin({
     const config = await getConfig(ctx);
     savedCtx = ctx;
 
-    // Build per-company client maps (deduped by resolved token).
-    const { clientByToken, byCompanyId } = await buildClientMaps(ctx, config);
+    // Build per-company client maps (deduped by resolved token; per-company
+    // connect failures are isolated and skipped inside buildClientMaps).
+    const { clientByToken, byCompanyId, tokenByCompanyId } = await buildClientMaps(ctx, config);
     clientByCompanyId = byCompanyId;
     ctx.logger.info("discord-fleet: Discord gateway(s) connected", {
       uniqueClients: clientByToken.size,
-      companies: config.companies.length,
+      companiesConnected: byCompanyId.size,
+      companiesConfigured: config.companies.length,
     });
 
-    // Register slash commands and interaction handler for each unique client+guild.
+    // Register slash commands for each company that actually connected, reusing
+    // the token buildClientMaps already resolved (single source of truth).
     for (const company of config.companies) {
-      const client = byCompanyId.get(company.companyId)!;
+      const client = byCompanyId.get(company.companyId);
+      if (!client) continue; // company was skipped (connect failed) — nothing to register
       const appId = client.user?.id;
-      if (appId) {
-        const token = company.botTokenSecretRef
-          ? await ctx.secrets.resolve(company.botTokenSecretRef)
-          : await ctx.secrets.resolve(config.botTokenSecretRef);
+      const token = tokenByCompanyId.get(company.companyId);
+      if (appId && token) {
         await registerSlashCommands(token, appId, company.guildId).catch((err) => {
           ctx.logger.warn("discord-fleet: slash command registration failed", { guildId: company.guildId, err: String(err) });
         });
@@ -213,6 +230,13 @@ const plugin = definePlugin({
     eventUnsubscribers = [];
 
     // Tear down all existing clients (unique set — no double-destroy risk).
+    // Destroy-BEFORE-rebuild is intentional: Discord rejects a second gateway
+    // connection for a token already connected, so we cannot build new clients
+    // for the same tokens while the old ones are live. This is safe because
+    // buildClientMaps is fault-isolated (per-company connect failures are caught
+    // and skipped, never thrown) — the rebuild below always completes with the
+    // companies that connected, so a single bad per-company token can no longer
+    // leave the fleet (incl. hinomaru) with an empty client map.
     const existingTokens = new Map<Client, true>();
     for (const client of clientByCompanyId.values()) {
       if (!existingTokens.has(client)) {
