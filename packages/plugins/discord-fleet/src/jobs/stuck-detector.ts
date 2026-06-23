@@ -9,7 +9,7 @@ import { buildStuckIssueEmbed } from "../render/embeds.js";
 
 export async function runStuckDetector(
   ctx: PluginContext,
-  client: Client,
+  getClient: (companyId: string) => Client | null,
   config: DiscordFleetConfig,
   paperclipFactory: (companyId: string) => Promise<PaperclipClient>,
 ): Promise<void> {
@@ -22,6 +22,8 @@ export async function runStuckDetector(
       ctx.logger.warn("discord-fleet: stuckIssueThresholdHours < 1 is invalid; skipping company", { companyId: company.companyId });
       continue;
     }
+    const client = getClient(company.companyId);
+    if (!client) continue;
     const paperclip = await paperclipFactory(company.companyId);
     const issues = await paperclip.getInProgressIssues(company.companyId);
     const now = Date.now();

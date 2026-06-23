@@ -311,7 +311,7 @@ describe("issue URL — board canonical route contract", () => {
     } as unknown as PaperclipClient;
     const factory = vi.fn().mockResolvedValue(mockPaperclip);
 
-    await runStuckDetector(harness.ctx, {} as Client, makeConfig("c-hin", "HIN"), factory);
+    await runStuckDetector(harness.ctx, () => ({} as Client), makeConfig("c-hin", "HIN"), factory);
 
     const calls = (buildStuckIssueEmbed as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls).toHaveLength(1);
@@ -367,7 +367,7 @@ describe("issue URL — board canonical route contract", () => {
 
     // Guard must skip company without throwing
     await expect(
-      runStuckDetector(harness.ctx, {} as Client, legacyConfig, factory),
+      runStuckDetector(harness.ctx, () => ({} as Client), legacyConfig, factory),
     ).resolves.toBeUndefined();
 
     // EXPLICIT: guard fired — embed must NOT be built

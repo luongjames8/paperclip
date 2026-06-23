@@ -56,13 +56,15 @@ function expectedLastFire(cronExpr: string, tz: string, now: Date): Date | null 
 
 export async function runRoutineHealth(
   ctx: PluginContext,
-  client: Client,
+  getClient: (companyId: string) => Client | null,
   config: DiscordFleetConfig,
   paperclipFactory: (companyId: string) => Promise<PaperclipClient>,
 ): Promise<void> {
   const now = new Date();
 
   for (const company of config.companies) {
+    const client = getClient(company.companyId);
+    if (!client) continue;
     const paperclip = await paperclipFactory(company.companyId);
     const routines = await paperclip.getRoutines(company.companyId);
 
