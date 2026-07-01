@@ -271,6 +271,122 @@ describe("approval routes idempotent retries", () => {
     expect(mockApprovalService.reject).toHaveBeenCalledWith("approval-5", "user-1", "not now");
   });
 
+  it("wakes the requesting agent with approval_rejected reason when reject is applied", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-7",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.reject.mockResolvedValue({
+      approval: {
+        id: "approval-7",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: true,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-7/reject")
+      .send({ decisionNote: "not aligned with strategy" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "agent-42",
+      expect.objectContaining({
+        reason: "approval_rejected",
+        payload: expect.objectContaining({
+          approvalId: "approval-7",
+          approvalStatus: "rejected",
+          decisionNote: "not aligned with strategy",
+          issueId: "issue-1",
+          issueIds: ["issue-1"],
+        }),
+        contextSnapshot: expect.objectContaining({
+          wakeReason: "approval_rejected",
+          approvalId: "approval-7",
+          approvalStatus: "rejected",
+          decisionNote: "not aligned with strategy",
+        }),
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "approval.requester_wakeup_queued",
+        details: expect.objectContaining({
+          wakeReason: "approval_rejected",
+          requesterAgentId: "agent-42",
+        }),
+      }),
+    );
+  });
+
+  it("does not wake when reject is already applied (applied=false)", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-8",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "rejected",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.reject.mockResolvedValue({
+      approval: {
+        id: "approval-8",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: false,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-8/reject")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("does not wake on reject when requestedByAgentId is null", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-9",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: null,
+    });
+    mockApprovalService.reject.mockResolvedValue({
+      approval: {
+        id: "approval-9",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: null,
+      },
+      applied: true,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-9/reject")
+      .send({ decisionNote: "no agent, no wake" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
   it("derives approval attribution from the authenticated actor on request revision", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-6",
