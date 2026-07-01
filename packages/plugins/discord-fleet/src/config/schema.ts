@@ -44,6 +44,22 @@ export interface CompanyConfig {
 
 export type ChannelTypeRoute = [regex: string, channelId: string];
 
+// One auto-expiry rule for a pending approval.
+export interface ApprovalExpiryRule {
+  // Regex matched against the approval's payload.title.
+  titleRegex: string;
+  // Age in hours at which the approval is auto-rejected if still pending.
+  maxAgeHours: number;
+}
+
+// One rule for the confirmation-sweep job.
+export interface ConfirmationSweepRule {
+  // Regex matched against the issue title.
+  titleRegex: string;
+  // Discord channel ID to post the confirmation card into.
+  channelId: string;
+}
+
 export interface DiscordFleetConfig {
   botTokenSecretRef: string;
   companies: CompanyConfig[];
@@ -59,6 +75,18 @@ export interface DiscordFleetConfig {
   // (or channels.orphan if absent — see backward-compat note on
   // CompanyConfig.approvalFallbackChannelId).
   approvalsChannelsByType?: Record<string, ChannelTypeRoute[]>;
+  // Config-driven auto-expiry for time-sensitive approvals, keyed by companyId.
+  // In the approvals-reminder sweep: if a pending approval's title matches a
+  // rule's titleRegex AND its age exceeds maxAgeHours, it is auto-rejected
+  // with a standard decisionNote. The approval is NOT re-posted as a reminder
+  // in the same sweep. Requires the per-company paperclipApiKeySecretRef to be
+  // a board key (403 otherwise — logged clearly).
+  approvalExpiry?: Record<string, ApprovalExpiryRule[]>;
+  // Sweep backlog/todo issues for pending request_confirmation interactions and
+  // post them to Discord so publish gates are visible without opening Paperclip.
+  // Keyed by companyId; each rule matches issue titles by regex and posts to a
+  // fixed channelId. Re-posts at most every 24h per interaction.
+  confirmationSweep?: Record<string, ConfirmationSweepRule[]>;
 }
 
 export const DEFAULT_DIGEST: DigestConfig = {

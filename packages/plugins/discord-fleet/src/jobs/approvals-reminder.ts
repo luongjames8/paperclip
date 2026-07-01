@@ -2,10 +2,13 @@ import type { Client } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { CompanyConfig, DiscordFleetConfig } from "../config/schema.js";
 import type { PaperclipClient } from "../api/paperclip.js";
-import { postEmbedToChannel } from "../discord/rest.js";
+import { postEmbedToChannel, postToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
+import { truncate } from "../render/plain.js";
+import { stripSecrets } from "../render/secrets.js";
 import { matchChannelByType } from "../routing/route.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
+import { resolveApprovalContent } from "../handlers/approval-created.js";
 
 export const APPROVAL_REMINDERS_KEY = "approval-reminders";
 
@@ -14,6 +17,28 @@ export const APPROVAL_REMINDERS_KEY = "approval-reminders";
 const REMIND_AFTER_MS = 60 * 60 * 1000;
 // Re-post at most this often per approval so the channel isn't spammed.
 const REMIND_EVERY_MS = 6 * 60 * 60 * 1000;
+
+const CONTENT_CHUNK_MAX = 1900;
+
+function chunkBySection(text: string): string[] {
+  const raw = text.split(/(?=^## )/m).filter((s) => s.trim());
+  const chunks: string[] = [];
+  for (const section of raw) {
+    if (section.length <= CONTENT_CHUNK_MAX) {
+      chunks.push(section);
+    } else {
+      let remaining = section;
+      while (remaining.length > CONTENT_CHUNK_MAX) {
+        const cut = remaining.lastIndexOf("\n\n", CONTENT_CHUNK_MAX);
+        const end = cut > 0 ? cut : CONTENT_CHUNK_MAX;
+        chunks.push(remaining.slice(0, end));
+        remaining = remaining.slice(end).trimStart();
+      }
+      if (remaining) chunks.push(remaining);
+    }
+  }
+  return chunks;
+}
 
 /**
  * Re-surface pending approvals until they are decided.
@@ -24,6 +49,11 @@ const REMIND_EVERY_MS = 6 * 60 * 60 * 1000;
  * pending, and keeps re-posting actionable cards (with working buttons) on an
  * interval until the operator decides. Decided approvals are pruned from the
  * reminder state automatically.
+ *
+ * CHANGE 2: If `fleetConfig.approvalExpiry` has rules for this company, any
+ * pending approval whose title matches a rule's `titleRegex` and whose age
+ * exceeds `maxAgeHours` is auto-rejected before the reminder is posted. Expired
+ * approvals are NOT re-posted as reminders in the same sweep.
  */
 export async function runApprovalsReminder(
   ctx: PluginContext,
@@ -55,18 +85,51 @@ export async function runApprovalsReminder(
     if (!pendingIds.has(id)) delete reminders[id];
   }
 
+  // Auto-expiry rules for this company (CHANGE 2).
+  const expiryRules = fleetConfig.approvalExpiry?.[companyId] ?? [];
+
   for (const approval of pending) {
     const createdMs = Date.parse(approval.createdAt);
     if (!Number.isFinite(createdMs)) continue;
     const ageMs = nowMs - createdMs;
+    const ageHours = Math.floor(ageMs / 3_600_000);
+    const title = approval.payload?.title ?? "";
+
+    // CHANGE 2: check auto-expiry rules before posting a reminder.
+    const matchedExpiry = expiryRules.find((rule) => {
+      try {
+        return new RegExp(rule.titleRegex).test(title);
+      } catch {
+        return false;
+      }
+    });
+    if (matchedExpiry && ageHours >= matchedExpiry.maxAgeHours) {
+      const decisionNote = `expired — time-sensitive card aged out (auto-expiry after ${matchedExpiry.maxAgeHours}h)`;
+      try {
+        await paperclip.rejectApproval(approval.id, decisionNote);
+        ctx.logger.info("approvals-reminder: auto-expired approval", {
+          approvalId: approval.id,
+          ageHours,
+          maxAgeHours: matchedExpiry.maxAgeHours,
+          titleRegex: matchedExpiry.titleRegex,
+        });
+      } catch (err) {
+        // 403 = not a board key; log clearly as instructed.
+        ctx.logger.warn("approvals-reminder: auto-expiry reject failed (403 = not a board key?)", {
+          approvalId: approval.id,
+          error: String(err),
+        });
+      }
+      // Do NOT post a reminder for an expired approval in this sweep.
+      continue;
+    }
+
     if (ageMs < REMIND_AFTER_MS) continue;
 
     const lastReminded = reminders[approval.id] ? Date.parse(reminders[approval.id]) : null;
     if (lastReminded !== null && nowMs - lastReminded < REMIND_EVERY_MS) continue;
 
-    const title = approval.payload?.title ?? undefined;
     const url = `${config.paperclipApiUrl}/${config.companyPrefix}/approvals/${approval.id}`;
-    const ageHours = Math.floor(ageMs / 3_600_000);
     // Mirror handleApprovalCreated's routing tiers: explicit type route, then
     // the linked issue's work thread (so reminders land where the original
     // card did), then the per-company fallback/orphan channel.
@@ -93,7 +156,7 @@ export async function runApprovalsReminder(
     const embed = buildApprovalReminderEmbed({
       approvalId: approval.id,
       approvalType: approval.type,
-      title,
+      title: title || undefined,
       issueUrl: url,
       ageHours,
       now,
@@ -116,6 +179,29 @@ export async function runApprovalsReminder(
         destinationChannelId,
         error: String(err),
       });
+      continue;
+    }
+
+    // CHANGE 1 (reminder path): also post the reviewable content so old blank
+    // cards become readable on the next reminder cycle.
+    const reviewableContent = resolveApprovalContent({
+      proposedComment: (approval.payload as any)?.proposedComment,
+      details: (approval.payload as any)?.details,
+      description: (approval.payload as any)?.description,
+    });
+    if (reviewableContent) {
+      const chunks = chunkBySection(stripSecrets(reviewableContent));
+      for (const chunk of chunks) {
+        try {
+          await postToChannel(client, destinationChannelId, truncate(chunk, CONTENT_CHUNK_MAX));
+        } catch (err) {
+          ctx.logger.warn("approvals-reminder: content chunk post failed", {
+            approvalId: approval.id,
+            destinationChannelId,
+            error: String(err),
+          });
+        }
+      }
     }
   }
 
