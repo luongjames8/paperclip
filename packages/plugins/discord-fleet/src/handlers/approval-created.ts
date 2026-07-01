@@ -33,6 +33,8 @@ interface ApprovalCreatedPayload {
   title?: string;
   summary?: string;
   proposedComment?: string;
+  details?: string;
+  description?: string;
 }
 
 // Two state keys store the same approvalId list but have different lifetimes —
@@ -42,19 +44,30 @@ interface ApprovalCreatedPayload {
 // handler invocation.
 export const PENDING_APPROVALS_KEY = "pending-approvals";
 export const SEEN_APPROVALS_KEY = "seen-approvals";
-const THREAD_CHUNK_MAX = 1990;
+const CONTENT_CHUNK_MAX = 1900;
+
+// Resolve the reviewable content string from an approval payload.
+// Returns the first non-empty string of: proposedComment, details, description.
+// Returns empty string when none are present.
+export function resolveApprovalContent(payload: {
+  proposedComment?: string;
+  details?: string;
+  description?: string;
+}): string {
+  return payload.proposedComment?.trim() || payload.details?.trim() || payload.description?.trim() || "";
+}
 
 function chunkBySection(text: string): string[] {
   const raw = text.split(/(?=^## )/m).filter((s) => s.trim());
   const chunks: string[] = [];
   for (const section of raw) {
-    if (section.length <= THREAD_CHUNK_MAX) {
+    if (section.length <= CONTENT_CHUNK_MAX) {
       chunks.push(section);
     } else {
       let remaining = section;
-      while (remaining.length > THREAD_CHUNK_MAX) {
-        const cut = remaining.lastIndexOf("\n\n", THREAD_CHUNK_MAX);
-        const end = cut > 0 ? cut : THREAD_CHUNK_MAX;
+      while (remaining.length > CONTENT_CHUNK_MAX) {
+        const cut = remaining.lastIndexOf("\n\n", CONTENT_CHUNK_MAX);
+        const end = cut > 0 ? cut : CONTENT_CHUNK_MAX;
         chunks.push(remaining.slice(0, end));
         remaining = remaining.slice(end).trimStart();
       }
@@ -82,7 +95,7 @@ export async function handleApprovalCreated(
   const identifier = payload.identifier ?? (primaryIssueId || approvalId).slice(0, 8);
   const approvalType = payload.type ?? payload.approvalType ?? "unknown";
   const approvalTitle = payload.title ?? `Approval ${approvalId.slice(0, 8)}`;
-  const proposedComment = payload.proposedComment ?? "";
+  const reviewableContent = resolveApprovalContent(payload);
 
   const companyConfig = config.companies.find((c) => c.companyId === companyId);
   if (!companyConfig) return;
@@ -131,6 +144,27 @@ export async function handleApprovalCreated(
   // distinguished from a posted-then-buried card during incident triage.
   ctx.logger.info("approval-created: card posted", { approvalId, destinationChannelId, headerMessageId });
 
+  // ALWAYS post reviewable content immediately after the header so the operator
+  // sees what they're being asked to approve without having to open Paperclip.
+  // Use the first non-empty string of: proposedComment, details, description.
+  if (reviewableContent) {
+    const chunks = chunkBySection(stripSecrets(reviewableContent));
+    for (const chunk of chunks) {
+      try {
+        await postToChannel(client, destinationChannelId, truncate(chunk, CONTENT_CHUNK_MAX));
+      } catch (err) {
+        ctx.logger.warn("approval-created: content chunk post failed", {
+          approvalId,
+          destinationChannelId,
+          error: String(err),
+        });
+      }
+    }
+  }
+
+  // Linked-issue docs (rich embeds from posts/slides documents) are posted as
+  // ADDITIONAL context after the reviewable content. They are independent — a
+  // failure here does not affect the content already posted above.
   let bundle: IssueDocsBundle = { issues: [] };
   try {
     const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
@@ -154,42 +188,21 @@ export async function handleApprovalCreated(
     });
     bundle = { issues: withDocs };
   } catch (err) {
-    ctx.logger.warn("approval-created: failed to fetch issue docs, falling back to proposedComment", {
+    ctx.logger.warn("approval-created: failed to fetch issue docs", {
       approvalId,
       error: String(err),
     });
   }
 
   const groups = renderIssueDocs(bundle, approvalId.slice(0, 8));
-  let anyBodyPosted = false;
-  if (groups.length > 0) {
-    for (const group of groups) {
-      try {
-        await postEmbedsToChannel(client, destinationChannelId, group);
-        anyBodyPosted = true;
-      } catch (err) {
-        ctx.logger.warn("approval-created: rich-group post failed", {
-          destinationChannelId,
-          error: String(err),
-        });
-      }
-    }
-  }
-  // Fall back to proposedComment if the rich path produced no successful body posts.
-  // Covers both "no groups at all" (non-content approvals) and "every group failed"
-  // (Discord 400/5xx, invalid image URL, etc.) so operator still gets something
-  // beyond the header card before the approval gets marked SEEN.
-  if (!anyBodyPosted && proposedComment) {
-    const chunks = chunkBySection(stripSecrets(proposedComment));
-    for (const chunk of chunks) {
-      try {
-        await postToChannel(client, destinationChannelId, truncate(chunk, THREAD_CHUNK_MAX));
-      } catch (err) {
-        ctx.logger.warn("approval-created: chunk post failed", {
-          destinationChannelId,
-          error: String(err),
-        });
-      }
+  for (const group of groups) {
+    try {
+      await postEmbedsToChannel(client, destinationChannelId, group);
+    } catch (err) {
+      ctx.logger.warn("approval-created: rich-group post failed", {
+        destinationChannelId,
+        error: String(err),
+      });
     }
   }
 

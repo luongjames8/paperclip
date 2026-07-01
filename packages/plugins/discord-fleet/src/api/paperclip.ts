@@ -11,11 +11,24 @@ export interface PaperclipIssue {
   title: string;
   status: string;
   assigneeId?: string;
+  assigneeAgentId?: string;
+  assigneeUserId?: string;
   projectId?: string;
   parentId?: string;
   originKind?: string;
   updatedAt: string;
   createdAt: string;
+  // Present on blocked issues; empty/absent means no declared blockers (black-hole case).
+  blockedByIssueIds?: string[];
+}
+
+export interface PaperclipInteraction {
+  id: string;
+  kind: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  payload?: Record<string, unknown>;
 }
 
 export interface PaperclipApproval {
@@ -110,6 +123,29 @@ export class PaperclipClient {
 
   async getPendingApprovals(companyId: string): Promise<PaperclipApproval[]> {
     return this.request<PaperclipApproval[]>(`${this.baseUrl}/api/companies/${companyId}/approvals?status=pending`);
+  }
+
+  async getBlockedIssues(companyId: string): Promise<PaperclipIssue[]> {
+    const url = `${this.baseUrl}/api/companies/${companyId}/issues?status=blocked&limit=200`;
+    return this.request<PaperclipIssue[]>(url);
+  }
+
+  async getAssignedTodoIssues(companyId: string): Promise<PaperclipIssue[]> {
+    const url = `${this.baseUrl}/api/companies/${companyId}/issues?status=todo&limit=200`;
+    return this.request<PaperclipIssue[]>(url);
+  }
+
+  async getBacklogAndTodoIssues(companyId: string): Promise<PaperclipIssue[]> {
+    // Two separate requests; combine client-side since query doesn't support multi-value status.
+    const [backlog, todo] = await Promise.all([
+      this.request<PaperclipIssue[]>(`${this.baseUrl}/api/companies/${companyId}/issues?status=backlog&limit=100`),
+      this.request<PaperclipIssue[]>(`${this.baseUrl}/api/companies/${companyId}/issues?status=todo&limit=100`),
+    ]);
+    return [...backlog, ...todo];
+  }
+
+  async listIssueInteractions(issueId: string): Promise<PaperclipInteraction[]> {
+    return this.request<PaperclipInteraction[]>(`${this.baseUrl}/api/issues/${issueId}/interactions`);
   }
 
   async approveApproval(approvalId: string, decisionNote?: string): Promise<void> {

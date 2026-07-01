@@ -491,10 +491,10 @@ describe("handleApprovalCreated — rich renderer integration", () => {
 
     expect(postEmbedToChannel).toHaveBeenCalledTimes(1);      // header
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);     // two body groups
-    expect(postToChannel).not.toHaveBeenCalled();             // no proposedComment fallback
+    expect(postToChannel).not.toHaveBeenCalled();             // no content (proposedComment absent in this event)
   });
 
-  it("fallback path: when renderer returns [], chunk-posts proposedComment as today", async () => {
+  it("CHANGE 1: when renderer returns [], chunk-posts proposedComment (always-post path)", async () => {
     const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel, postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
     const { renderIssueDocs } = await import("../src/render/issue-docs.js");
@@ -554,7 +554,7 @@ describe("handleApprovalCreated — rich renderer integration", () => {
     expect(postToChannel).toHaveBeenCalled();                     // proposedComment fallback fired
   });
 
-  it("partial rich-post success: at least one group posted, NO proposedComment fallback", async () => {
+  it("CHANGE 1: proposedComment is posted BEFORE rich groups, regardless of rich-group success/failure", async () => {
     const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel, postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
     const { renderIssueDocs } = await import("../src/render/issue-docs.js");
@@ -563,17 +563,17 @@ describe("handleApprovalCreated — rich renderer integration", () => {
       [{ title: "a" }],
       [{ title: "b" }],
     ]);
-    // First call succeeds, second fails.
+    // First rich group succeeds, second fails — content must still be posted regardless.
     (postEmbedsToChannel as any)
       .mockResolvedValueOnce("msg-1")
       .mockRejectedValueOnce(new Error("discord 5xx transient"));
 
     const harness = createTestHarness({ manifest });
-    const event = makeApprovalCreatedEvent({ proposedComment: "would-be fallback" });
+    const event = makeApprovalCreatedEvent({ proposedComment: "reviewable content" });
     await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
 
-    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
-    expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);
-    expect(postToChannel).not.toHaveBeenCalled();                 // partial success → no fallback
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);       // header
+    expect(postToChannel).toHaveBeenCalled();                   // CHANGE 1: content always posted
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);      // both rich groups attempted
   });
 });
