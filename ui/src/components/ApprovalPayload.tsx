@@ -1,5 +1,6 @@
 import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck } from "lucide-react";
 import { formatCents } from "../lib/utils";
+import { MarkdownBody } from "./MarkdownBody";
 
 export const typeLabel: Record<string, string> = {
   hire_agent: "Hire Agent",
@@ -173,6 +174,23 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
   const recommendedAction = firstNonEmptyString(payload.recommendedAction);
   const nextActionOnApproval = firstNonEmptyString(payload.nextActionOnApproval);
   const proposedComment = firstNonEmptyString(payload.proposedComment);
+  const details =
+    typeof payload.details === "string" && payload.details.trim().length > 0
+      ? payload.details.trim()
+      : null;
+  const description =
+    typeof payload.description === "string" && payload.description.trim().length > 0
+      ? payload.description.trim()
+      : null;
+  // Suppress description if it duplicates details, proposedComment, or summary.
+  const showDescription =
+    description !== null &&
+    description !== details &&
+    description !== proposedComment &&
+    description !== summary;
+  // Suppress details if it duplicates proposedComment or summary.
+  const showDetails =
+    details !== null && details !== proposedComment && details !== summary;
 
   return (
     <div className="mt-4 space-y-3.5 text-sm">
@@ -223,6 +241,18 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
           <pre className="max-h-48 overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-muted-foreground whitespace-pre-wrap">
             {proposedComment}
           </pre>
+        </div>
+      )}
+      {showDetails && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Details</p>
+          <MarkdownBody className="text-sm">{details}</MarkdownBody>
+        </div>
+      )}
+      {showDescription && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Description</p>
+          <MarkdownBody className="text-sm">{description}</MarkdownBody>
         </div>
       )}
     </div>
