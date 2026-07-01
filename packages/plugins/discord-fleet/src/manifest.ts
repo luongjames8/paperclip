@@ -6,6 +6,7 @@ const JOB_KEYS = {
   stuckDetector: "discord-fleet.stuck-detector",
   routineHealth: "discord-fleet.routine-health",
   approvalsReminder: "discord-fleet.approvals-reminder",
+  confirmationSweep: "discord-fleet.confirmation-sweep",
 } as const;
 
 export { JOB_KEYS };
@@ -62,6 +63,38 @@ const manifest: PaperclipPluginManifestV1 = {
             minItems: 2,
             maxItems: 2,
             items: { type: "string" },
+          },
+        },
+      },
+      approvalExpiry: {
+        type: "object",
+        title: "Approval Expiry Rules",
+        description: "Per-companyId list of auto-expiry rules. In the approvals-reminder sweep, pending approvals whose title matches a rule's titleRegex and whose age exceeds maxAgeHours are auto-rejected. Requires paperclipApiKeySecretRef to be a board key (403 otherwise — logged).",
+        additionalProperties: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["titleRegex", "maxAgeHours"],
+            properties: {
+              titleRegex: { type: "string", title: "Title Regex", description: "Regex matched against the approval's title." },
+              maxAgeHours: { type: "number", title: "Max Age Hours", description: "Age in hours after which the approval is auto-rejected." },
+            },
+          },
+        },
+      },
+      confirmationSweep: {
+        type: "object",
+        title: "Confirmation Sweep",
+        description: "Per-companyId list of rules. Sweeps backlog/todo issues for pending request_confirmation interactions and posts them to Discord. Re-posts at most every 24h per interaction.",
+        additionalProperties: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["titleRegex", "channelId"],
+            properties: {
+              titleRegex: { type: "string", title: "Title Regex", description: "Regex matched against the issue title." },
+              channelId: { type: "string", title: "Channel ID", description: "Discord channel ID to post the confirmation card into." },
+            },
           },
         },
       },
@@ -153,6 +186,12 @@ const manifest: PaperclipPluginManifestV1 = {
       jobKey: JOB_KEYS.approvalsReminder,
       displayName: "Pending Approvals Reminder",
       description: "Re-posts actionable cards for pending approvals (from the Paperclip API) until they are decided.",
+      schedule: "*/30 * * * *",
+    },
+    {
+      jobKey: JOB_KEYS.confirmationSweep,
+      displayName: "Confirmation Sweep",
+      description: "Sweeps backlog/todo issues for pending request_confirmation interactions and posts them to Discord for visibility. Re-posts at most every 24h per interaction.",
       schedule: "*/30 * * * *",
     },
   ],

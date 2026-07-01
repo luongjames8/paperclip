@@ -12,6 +12,7 @@ import { runDigest } from "./jobs/digest.js";
 import { runStuckDetector } from "./jobs/stuck-detector.js";
 import { runRoutineHealth } from "./jobs/routine-health.js";
 import { runApprovalsReminder } from "./jobs/approvals-reminder.js";
+import { runConfirmationSweep } from "./jobs/confirmation-sweep.js";
 import { handleStatusCommand } from "./slash/status.js";
 import { PaperclipClient } from "./api/paperclip.js";
 import { CoalesceBuffer } from "./util/coalesce.js";
@@ -328,6 +329,14 @@ const plugin = definePlugin({
         const paperclip = await factory(company.companyId);
         await runApprovalsReminder(ctx, company.companyId, client, company, cfg, paperclip);
       }
+    });
+
+    ctx.jobs.register(JOB_KEYS.confirmationSweep, async () => {
+      const cfg = currentConfig;
+      const factory = currentPaperclipFactory;
+      if (!cfg || !factory) return;
+      const clients = clientByCompanyId;
+      await runConfirmationSweep(ctx, (id) => clients.get(id) ?? null, cfg, async (id) => factory(id));
     });
 
     ctx.logger.info("discord-fleet: setup complete", { companies: config.companies.length });
