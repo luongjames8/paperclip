@@ -148,7 +148,7 @@ describe("approval routes idempotent retries", () => {
     // Default: agent belongs to the same company as the approval.
     mockAgentService.getById.mockResolvedValue({ id: "agent-42", companyId: "company-1" });
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
-    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1", status: "backlog" }]);
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1", status: "backlog", assigneeAgentId: "agent-42" }]);
     mockLogActivity.mockResolvedValue(undefined);
   });
 
@@ -498,7 +498,7 @@ describe("approval routes idempotent retries", () => {
     // Editor issue is done; parent issue (backlog) should be the anchor.
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
       { id: "editor-done", status: "done" },
-      { id: "parent-backlog", status: "backlog" },
+      { id: "parent-backlog", status: "backlog", assigneeAgentId: "agent-42" },
     ]);
 
     const res = await request(await createApp())
@@ -517,6 +517,47 @@ describe("approval routes idempotent retries", () => {
           issueId: "parent-backlog",
           taskId: "parent-backlog",
         }),
+      }),
+    );
+  });
+
+  it("does not anchor to a non-terminal issue owned by a DIFFERENT agent (would be cancelled as stale)", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-21",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.approve.mockResolvedValue({
+      approval: {
+        id: "approval-21",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: true,
+    });
+    // Requester's own issue is done; the only live issue belongs to another
+    // agent — anchoring there would get the queued run cancelled as stale
+    // (assigneeAgentId !== run.agentId). Expect an agent-level wake instead.
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
+      { id: "editor-done", status: "done", assigneeAgentId: "agent-42" },
+      { id: "poster-backlog", status: "backlog", assigneeAgentId: "agent-publisher" },
+    ]);
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-21/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "agent-42",
+      expect.objectContaining({
+        payload: expect.objectContaining({ issueId: null }),
       }),
     );
   });
