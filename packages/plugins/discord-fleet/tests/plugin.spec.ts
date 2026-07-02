@@ -69,11 +69,11 @@ describe("plugin worker", () => {
     // digest resolves immediately — the Feb-29 cron never lands within the
     // 15-min fire window during a normal test run, so the timezone guard
     // skips it before reaching any API calls.
-    // stuck-detector and routine-health throw because the mocked PaperclipClient
-    // methods reject immediately (avoids real HTTP calls to localhost:3000).
+    // stuck-detector and routine-health both resolve even when API calls fail:
+    // they catch per-company errors internally (no propagation) so one company's
+    // API failure doesn't abort the entire sweep.
     await expect(harness.runJob("discord-fleet.digest")).resolves.toBeUndefined();
-    // stuck-detector catches all per-category API failures internally (no propagation).
     await expect(harness.runJob("discord-fleet.stuck-detector")).resolves.toBeUndefined();
-    await expect(harness.runJob("discord-fleet.routine-health")).rejects.toThrow();
+    await expect(harness.runJob("discord-fleet.routine-health")).resolves.toBeUndefined();
   });
 });
