@@ -166,6 +166,122 @@ describe("heartbeat comment wake batching", () => {
     runningProcesses.clear();
   });
 
+  it.each([
+    { wakeReason: "approval_rejected", approvalStatus: "rejected" },
+    { wakeReason: "approval_revision_requested", approvalStatus: "revision_requested" },
+  ])(
+    "defers $wakeReason wakes for a running issue so the assignee resumes after the run (codex P1)",
+    async ({ wakeReason, approvalStatus }) => {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const issueId = randomUUID();
+      const runId = randomUUID();
+      const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+      const heartbeat = heartbeatService(db);
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix,
+        requireBoardApprovalForNewAgents: false,
+      });
+
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "CEO",
+        role: "ceo",
+        status: "running",
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "running",
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          wakeReason: "issue_assigned",
+        },
+      });
+      runningProcesses.set(runId, {
+        child: {} as never,
+        graceSec: 0,
+        processGroupId: null,
+      });
+
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: "Approval decision wake",
+        status: "blocked",
+        priority: "medium",
+        assigneeAgentId: agentId,
+        executionRunId: runId,
+        executionAgentNameKey: "ceo",
+        executionLockedAt: new Date(),
+        issueNumber: 2,
+        identifier: `${issuePrefix}-2`,
+      });
+
+      const followupRun = await heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: wakeReason,
+        payload: {
+          issueId,
+          approvalId: "approval-2",
+          approvalStatus,
+        },
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          approvalId: "approval-2",
+          approvalStatus,
+          wakeReason,
+        },
+        requestedByActorType: "user",
+        requestedByActorId: "local-board",
+      });
+
+      expect(followupRun).toBeNull();
+
+      const deferred = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.agentId, agentId),
+            eq(agentWakeupRequests.status, "deferred_issue_execution"),
+          ),
+        )
+        .then((rows) => rows[0] ?? null);
+
+      expect(deferred).not.toBeNull();
+      expect(deferred?.reason).toBe("issue_execution_deferred");
+      expect(deferred?.payload).toMatchObject({
+        issueId,
+        approvalId: "approval-2",
+        approvalStatus,
+      });
+      expect((deferred?.payload as Record<string, unknown>)._paperclipWakeContext).toMatchObject({
+        issueId,
+        taskId: issueId,
+        approvalId: "approval-2",
+        approvalStatus,
+        wakeReason,
+      });
+    },
+  );
+
   it("defers approval-approved wakes for a running issue so the assignee resumes after the run", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
