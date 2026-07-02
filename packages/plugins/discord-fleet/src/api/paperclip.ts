@@ -57,6 +57,11 @@ export interface PaperclipRoutineTrigger {
   lastFiredAt?: string | Date | null;
 }
 
+export interface PaperclipAgent {
+  id: string;
+  status?: string | null;
+}
+
 export interface PaperclipRoutineRun {
   id: string;
   status: string;
@@ -171,6 +176,11 @@ export class PaperclipClient {
       this.ctx.logger.warn("discord-fleet: getRoutines returned >=100 rows — verify the endpoint is not truncating", { companyId });
     }
     return rows;
+  }
+
+  async getAgents(companyId: string): Promise<PaperclipAgent[]> {
+    const url = `${this.baseUrl}/api/companies/${companyId}/agents`;
+    return this.requestArray<PaperclipAgent>(url);
   }
 
   async getIssueById(companyId: string, issueId: string): Promise<PaperclipIssue | null> {

@@ -112,9 +112,13 @@ function makeMockClient(): Client {
   return {} as Client;
 }
 
-function makeMockPaperclip(routines: PaperclipRoutine[]): PaperclipClient {
+function makeMockPaperclip(
+  routines: PaperclipRoutine[],
+  agents: Array<{ id: string; status?: string | null }> | Error = [{ id: "agent-1", status: "idle" }],
+): PaperclipClient {
   return {
     getRoutines: vi.fn().mockResolvedValue(routines),
+    getAgents: agents instanceof Error ? vi.fn().mockRejectedValue(agents) : vi.fn().mockResolvedValue(agents),
   } as unknown as PaperclipClient;
 }
 
@@ -336,6 +340,58 @@ describe("runRoutineHealth — invisible-miss detection (no assignee, failed run
     await runRoutineHealth(harness.ctx, () => makeMockClient(), config, factory);
 
     expect(postEmbedToChannel).not.toHaveBeenCalled();
+  });
+
+  it("alerts as misconfigured when the assignee is terminated (dispatch throws pre-run)", async () => {
+    const { runRoutineHealth } = await import("../src/jobs/routine-health.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const routine = makeRoutine(); // healthy nextRunAt; the assignee state is the only problem
+    const factory = vi.fn().mockResolvedValue(makeMockPaperclip([routine], [{ id: "agent-1", status: "terminated" }]));
+
+    await runRoutineHealth(harness.ctx, () => makeMockClient(), config, factory);
+
+    expect(postEmbedToChannel).toHaveBeenCalledOnce();
+    const embed = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(embed.color).toBe(0xff0000);
+    expect(embed.description).toContain("not assignable");
+  });
+
+  it("alerts as misconfigured when the assignee is missing from the roster", async () => {
+    const { runRoutineHealth } = await import("../src/jobs/routine-health.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const routine = makeRoutine();
+    const factory = vi.fn().mockResolvedValue(makeMockPaperclip([routine], [{ id: "someone-else", status: "idle" }]));
+
+    await runRoutineHealth(harness.ctx, () => makeMockClient(), config, factory);
+
+    expect(postEmbedToChannel).toHaveBeenCalledOnce();
+    const embed = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(embed.description).toContain("not in the company roster");
+  });
+
+  it("skips assignee-state checks (no false alert) when the roster fetch fails, but still checks nextRunAt", async () => {
+    const { runRoutineHealth } = await import("../src/jobs/routine-health.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const routine = makeRoutine({
+      triggers: [makeTrigger({ nextRunAt: new Date(Date.now() - 3 * 3600_000).toISOString() })], // past grace
+    });
+    const factory = vi.fn().mockResolvedValue(makeMockPaperclip([routine], new Error("roster 500")));
+
+    await runRoutineHealth(harness.ctx, () => makeMockClient(), config, factory);
+
+    // Exactly ONE alert — the missed fire. No bad-assignee alert from the failed roster.
+    expect(postEmbedToChannel).toHaveBeenCalledOnce();
+    const embed = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(embed.color).toBe(0xffa500);
   });
 
   it("alerts when the most recent run failed, once per run id across sweeps", async () => {
