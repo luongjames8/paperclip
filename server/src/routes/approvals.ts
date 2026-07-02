@@ -69,6 +69,21 @@ export function approvalRoutes(
     return agent;
   }
 
+  /**
+   * Picks the wake anchor issue: the first linked issue whose status is NOT
+   * terminal (done/cancelled). A terminal anchor causes the queued run to be
+   * cancelled immediately with error_code=issue_terminal_status before the
+   * agent ever sees it. If all linked issues are terminal we return null so
+   * the wake is agent-level (no issue anchor) and always survives the gate.
+   */
+  function pickNonTerminalAnchorIssueId(
+    linkedIssues: Array<{ id: string; status: string }>,
+  ): string | null {
+    const TERMINAL = new Set(["done", "cancelled"]);
+    const live = linkedIssues.find((i) => !TERMINAL.has(i.status));
+    return live?.id ?? null;
+  }
+
   async function assertApprovalAccessAllowed(req: Request, res: any, companyId: string) {
     const decision = await access.decide({
       actor: req.actor,
@@ -197,7 +212,7 @@ export function approvalRoutes(
     if (applied) {
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
-      const primaryIssueId = linkedIssueIds[0] ?? null;
+      const primaryIssueId = pickNonTerminalAnchorIssueId(linkedIssues);
 
       await logActivity(db, {
         companyId: approval.companyId,
@@ -299,7 +314,7 @@ export function approvalRoutes(
     if (applied) {
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
-      const primaryIssueId = linkedIssueIds[0] ?? null;
+      const primaryIssueId = pickNonTerminalAnchorIssueId(linkedIssues);
 
       await logActivity(db, {
         companyId: approval.companyId,
@@ -406,7 +421,7 @@ export function approvalRoutes(
 
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
-      const primaryIssueId = linkedIssueIds[0] ?? null;
+      const primaryIssueId = pickNonTerminalAnchorIssueId(linkedIssues);
 
       await logActivity(db, {
         companyId: approval.companyId,
