@@ -127,7 +127,7 @@ describe("approval routes idempotent retries", () => {
     // Default: agent belongs to the same company as the approval.
     mockAgentService.getById.mockResolvedValue({ id: "agent-42", companyId: "company-1" });
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
-    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1", status: "backlog", assigneeAgentId: "agent-42" }]);
     mockLogActivity.mockResolvedValue(undefined);
   });
 
@@ -454,6 +454,139 @@ describe("approval routes idempotent retries", () => {
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
+  it("uses the first non-terminal linked issue as the wake anchor (done first, backlog second)", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-20",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.approve.mockResolvedValue({
+      approval: {
+        id: "approval-20",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: true,
+    });
+    // Editor issue is done; parent issue (backlog) should be the anchor.
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
+      { id: "editor-done", status: "done" },
+      { id: "parent-backlog", status: "backlog", assigneeAgentId: "agent-42" },
+    ]);
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-20/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "agent-42",
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          issueId: "parent-backlog",
+          issueIds: ["editor-done", "parent-backlog"],
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: "parent-backlog",
+          taskId: "parent-backlog",
+        }),
+      }),
+    );
+  });
+
+  it("does not anchor to a non-terminal issue owned by a DIFFERENT agent (would be cancelled as stale)", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-21",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.approve.mockResolvedValue({
+      approval: {
+        id: "approval-21",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: true,
+    });
+    // Requester's own issue is done; the only live issue belongs to another
+    // agent — anchoring there would get the queued run cancelled as stale
+    // (assigneeAgentId !== run.agentId). Expect an agent-level wake instead.
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
+      { id: "editor-done", status: "done", assigneeAgentId: "agent-42" },
+      { id: "poster-backlog", status: "backlog", assigneeAgentId: "agent-publisher" },
+    ]);
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-21/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "agent-42",
+      expect.objectContaining({
+        payload: expect.objectContaining({ issueId: null }),
+      }),
+    );
+  });
+
+  it("uses null anchor (agent-level wake) when all linked issues are terminal", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-21",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.approve.mockResolvedValue({
+      approval: {
+        id: "approval-21",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: true,
+    });
+    // All linked issues terminal — anchor must be null so the run is not cancelled.
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
+      { id: "issue-done", status: "done" },
+      { id: "issue-cancelled", status: "cancelled" },
+    ]);
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-21/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "agent-42",
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          issueId: null,
+          issueIds: ["issue-done", "issue-cancelled"],
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: null,
+          taskId: null,
+        }),
+      }),
+    );
+  });
+
   it("lets agents create generic issue-linked board approval requests", async () => {
     mockApprovalService.create.mockResolvedValue({
       id: "approval-1",
@@ -512,5 +645,6 @@ describe("approval routes idempotent retries", () => {
         }),
       }),
     );
-  });
+  
+});
 });
