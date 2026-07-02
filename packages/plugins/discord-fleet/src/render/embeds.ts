@@ -180,12 +180,14 @@ export function buildRoutineHealthEmbed(opts: {
   /** The scheduler's own nextRunAt that was missed; null when misconfigured. */
   missedAt: Date | null;
   misconfigured: boolean;
+  /** Optional replacement description for the misconfigured variant. */
+  detail?: string;
 }): APIEmbed {
   if (opts.misconfigured) {
     return enforceEmbedLimits({
       color: 0xff0000,
       title: safe(`⚠️ Routine misconfigured: ${opts.routineName}`, 256),
-      description: safe("Enabled schedule trigger has no valid nextRunAt — scheduler cannot plan the next run."),
+      description: safe(opts.detail ?? "Enabled schedule trigger has no valid nextRunAt — scheduler cannot plan the next run."),
       timestamp: new Date().toISOString(),
     });
   }
@@ -194,9 +196,26 @@ export function buildRoutineHealthEmbed(opts: {
     color: 0xffa500,
     title: safe(`⚠️ Routine missed: ${opts.routineName}`, 256),
     description: safe([
-      `Planned fire: ${opts.missedAt!.toISOString()}`,
+      `Planned fire: ${opts.missedAt ? opts.missedAt.toISOString() : "unknown"}`,
       `Overdue by: ~${overdue}h`,
     ].join("\n")),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function buildRoutineRunFailedEmbed(opts: {
+  routineName: string;
+  runId: string;
+  failureReason?: string | null;
+}): APIEmbed {
+  return enforceEmbedLimits({
+    color: 0xff0000,
+    title: safe(`⚠️ Routine run failed: ${opts.routineName}`, 256),
+    description: safe(
+      [`Run \`${opts.runId}\` ended \`failed\`.`, opts.failureReason ? `Reason: ${opts.failureReason}` : null]
+        .filter(Boolean)
+        .join("\n"),
+    ),
     timestamp: new Date().toISOString(),
   });
 }

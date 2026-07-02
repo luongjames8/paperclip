@@ -57,12 +57,20 @@ export interface PaperclipRoutineTrigger {
   lastFiredAt?: string | Date | null;
 }
 
+export interface PaperclipRoutineRun {
+  id: string;
+  status: string;
+  failureReason?: string | null;
+}
+
 export interface PaperclipRoutine {
   id: string;
   title: string;
   status: string;
+  assigneeAgentId?: string | null;
   lastTriggeredAt?: string | Date | null;
   triggers?: PaperclipRoutineTrigger[];
+  lastRun?: PaperclipRoutineRun | null;
 }
 
 // Typed API error: callers can branch on `status` (e.g. 409 = already decided)
