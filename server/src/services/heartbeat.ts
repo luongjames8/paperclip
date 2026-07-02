@@ -440,6 +440,8 @@ function mergeAdapterRecoveryMetadata(input: {
 }
 const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   "approval_approved",
+  "approval_rejected",
+  "approval_revision_requested",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
 ]);
 const ISSUE_RESPONSIBLE_USER_WAKE_REASONS = new Set([
