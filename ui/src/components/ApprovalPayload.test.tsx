@@ -2,8 +2,14 @@
 
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApprovalPayloadRenderer, approvalLabel } from "./ApprovalPayload";
+
+vi.mock("./MarkdownBody", () => ({
+  MarkdownBody: ({ children, className }: { children: string; className?: string }) => (
+    <div className={className}>{children}</div>
+  ),
+}));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -80,6 +86,128 @@ describe("ApprovalPayloadRenderer", () => {
 
     expect(container.textContent).toContain("Board asked for approval before posting the frog.");
     expect(container.textContent).not.toContain("TitleReply with an ASCII frog");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("renders details and description fields via MarkdownBody", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            title: "A proposal",
+            summary: "Short summary.",
+            proposedComment: "## Comment\nThe comment body.",
+            details: "## Full details\nAll the context the board needs.",
+            description: "A separate description paragraph.",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Details");
+    expect(container.textContent).toContain("## Full details\nAll the context the board needs.");
+    expect(container.textContent).toContain("Description");
+    expect(container.textContent).toContain("A separate description paragraph.");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("suppresses details if identical to proposedComment", () => {
+    const root = createRoot(container);
+    const sharedText = "Shared content.";
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            proposedComment: sharedText,
+            details: sharedText,
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).not.toContain("Details");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("suppresses description if identical to details", () => {
+    const root = createRoot(container);
+    const sharedText = "Same content for both.";
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            details: sharedText,
+            description: sharedText,
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Details");
+    expect(container.textContent).toContain(sharedText);
+    expect(container.textContent).not.toContain("Description");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("suppresses description if identical to summary", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            summary: "The summary text.",
+            description: "The summary text.",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).not.toContain("Description");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("skips details and description when absent or empty", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            title: "Minimal payload",
+            details: "",
+            description: 42,
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).not.toContain("Details");
+    expect(container.textContent).not.toContain("Description");
 
     act(() => {
       root.unmount();
