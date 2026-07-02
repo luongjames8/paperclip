@@ -158,7 +158,21 @@ export async function handleApprovalCreated(
       companyConfig.channels.orphan;
   }
 
-  const headerMessageId = await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
+  let headerMessageId: string;
+  try {
+    headerMessageId = await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
+  } catch (err) {
+    // Roll the SEEN marker back so a retried/duplicate delivery can post the
+    // card — otherwise a failed header send stays suppressed by the
+    // idempotency guard until a reminder cycle happens to re-post it.
+    seen.delete(approvalId);
+    try {
+      await ctx.state.set(seenKey, [...seen]);
+    } catch {
+      // best-effort rollback; the reminder sweep remains the backstop
+    }
+    throw err;
+  }
   // Success is logged explicitly so an absent card in Discord can always be
   // distinguished from a posted-then-buried card during incident triage.
   ctx.logger.info("approval-created: card posted", { approvalId, destinationChannelId, headerMessageId });
