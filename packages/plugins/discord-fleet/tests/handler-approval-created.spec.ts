@@ -506,6 +506,33 @@ describe("handleApprovalCreated — SEEN_APPROVALS_KEY dedup guard", () => {
     const seen = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
     expect(seen).toEqual(["appr-001"]);
   });
+
+  it("failed header send rolls back SEEN so a retried delivery can post (codex P2)", async () => {
+    // SEEN-before-send closes the dup-post race, but a Discord failure after the
+    // marker is written must not permanently suppress the card: roll the marker
+    // back on send failure so a retried/duplicate delivery posts it.
+    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+    const event = makeApprovalCreatedEvent();
+
+    // First delivery: header send fails (bad channel / permissions / transient).
+    (postEmbedToChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("send failed"));
+    await expect(handleApprovalCreated(harness.ctx, event, client, config)).rejects.toThrow("send failed");
+
+    // SEEN was rolled back — the approval is retryable.
+    const seenAfterFailure = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
+    expect(seenAfterFailure ?? []).not.toContain("appr-001");
+
+    // Retried delivery posts the card.
+    await handleApprovalCreated(harness.ctx, event, client, config);
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(2);
+    const seen = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
+    expect(seen).toEqual(["appr-001"]);
+  });
 });
 
 // ─── Rich renderer integration ───────────────────────────────────────────────
