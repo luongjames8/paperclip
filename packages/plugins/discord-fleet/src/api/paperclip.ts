@@ -46,15 +46,37 @@ export interface PaperclipApproval {
   } | null;
 }
 
+export interface PaperclipRoutineTrigger {
+  id: string;
+  kind: string;
+  label?: string | null;
+  enabled?: boolean;
+  cronExpression?: string | null;
+  timezone?: string | null;
+  nextRunAt?: string | null;
+  lastFiredAt?: string | Date | null;
+}
+
+export interface PaperclipAgent {
+  id: string;
+  status?: string | null;
+  reportsTo?: string | null;
+}
+
+export interface PaperclipRoutineRun {
+  id: string;
+  status: string;
+  failureReason?: string | null;
+}
+
 export interface PaperclipRoutine {
   id: string;
-  name: string;
-  enabled: boolean;
-  lastTriggeredAt?: string;
-  schedule?: {
-    type: "cron";
-    expression: string;
-  };
+  title: string;
+  status: string;
+  assigneeAgentId?: string | null;
+  lastTriggeredAt?: string | Date | null;
+  triggers?: PaperclipRoutineTrigger[];
+  lastRun?: PaperclipRoutineRun | null;
 }
 
 // Typed API error: callers can branch on `status` (e.g. 409 = already decided)
@@ -155,6 +177,11 @@ export class PaperclipClient {
       this.ctx.logger.warn("discord-fleet: getRoutines returned >=100 rows — verify the endpoint is not truncating", { companyId });
     }
     return rows;
+  }
+
+  async getAgents(companyId: string): Promise<PaperclipAgent[]> {
+    const url = `${this.baseUrl}/api/companies/${companyId}/agents`;
+    return this.requestArray<PaperclipAgent>(url);
   }
 
   async getIssueById(companyId: string, issueId: string): Promise<PaperclipIssue | null> {
