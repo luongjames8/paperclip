@@ -105,6 +105,7 @@ export async function runApprovalsReminder(
     });
     if (matchedExpiry && ageHours >= matchedExpiry.maxAgeHours) {
       const decisionNote = `expired — time-sensitive card aged out (auto-expiry after ${matchedExpiry.maxAgeHours}h)`;
+      let rejectSucceeded = true;
       try {
         await paperclip.rejectApproval(approval.id, decisionNote);
         ctx.logger.info("approvals-reminder: auto-expired approval", {
@@ -119,9 +120,14 @@ export async function runApprovalsReminder(
           approvalId: approval.id,
           error: String(err),
         });
+        // Reject failed — fall through so the normal reminder is still posted
+        // and the card does not go permanently silent (codex P2).
+        rejectSucceeded = false;
       }
-      // Do NOT post a reminder for an expired approval in this sweep.
-      continue;
+      if (rejectSucceeded) {
+        // Expiry reject succeeded; do NOT post a reminder in this sweep.
+        continue;
+      }
     }
 
     if (ageMs < REMIND_AFTER_MS) continue;
