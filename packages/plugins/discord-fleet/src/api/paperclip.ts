@@ -46,15 +46,22 @@ export interface PaperclipApproval {
   } | null;
 }
 
+export interface PaperclipRoutineTrigger {
+  id: string;
+  kind: string;
+  label?: string | null;
+  enabled?: boolean;
+  cronExpression?: string | null;
+  timezone?: string | null;
+  lastFiredAt?: string | Date | null;
+}
+
 export interface PaperclipRoutine {
   id: string;
-  name: string;
-  enabled: boolean;
-  lastTriggeredAt?: string;
-  schedule?: {
-    type: "cron";
-    expression: string;
-  };
+  title: string;
+  status: string;
+  lastTriggeredAt?: string | Date | null;
+  triggers?: PaperclipRoutineTrigger[];
 }
 
 // Typed API error: callers can branch on `status` (e.g. 409 = already decided)
