@@ -55,6 +55,20 @@ export interface PaperclipRoutine {
   };
 }
 
+// Typed API error: callers can branch on `status` (e.g. 409 = already decided)
+// and always get the URL + a body snippet for triage instead of a bare
+// SyntaxError or context-less message.
+export class PaperclipApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly url: string,
+  ) {
+    super(message);
+    this.name = "PaperclipApiError";
+  }
+}
+
 export class PaperclipClient {
   constructor(
     private readonly ctx: PluginContext,
@@ -68,9 +82,17 @@ export class PaperclipClient {
       headers: { Authorization: `Bearer ${this.apiKey}` },
     });
     if (res.status >= 400) {
-      throw new Error(`paperclip API error: ${res.status} ${url}`);
+      throw new PaperclipApiError(`paperclip API error: ${res.status} ${url}`, res.status, url);
     }
-    const body = (await res.json()) as unknown;
+    // A proxy/nginx error page can return 200 with an HTML body; JSON.parse
+    // would throw a context-less SyntaxError that crashes a whole sweep. Rethrow
+    // as a typed error with status/url so per-item catches can log and continue.
+    let body: unknown;
+    try {
+      body = (await res.json()) as unknown;
+    } catch {
+      throw new PaperclipApiError(`paperclip API non-JSON response: ${res.status} ${url}`, res.status, url);
+    }
     // Current list routes (issues, routines) return bare JSON arrays; older
     // routes wrapped responses in { data: T }. Accept both so a server-side
     // envelope change cannot silently break every consumer again
@@ -79,6 +101,17 @@ export class PaperclipClient {
       return (body as { data: T }).data;
     }
     return body as T;
+  }
+
+  // List endpoints MUST return arrays. A rate-limit object, null, or any other
+  // shape would make `[...page]` spreads throw deep inside a sweep loop —
+  // assert here once so every list consumer gets a typed, catchable error.
+  private async requestArray<T>(url: string): Promise<T[]> {
+    const body = await this.request<unknown>(url);
+    if (!Array.isArray(body)) {
+      throw new PaperclipApiError(`paperclip API expected array response: ${url}`, 200, url);
+    }
+    return body as T[];
   }
 
   // Page through an issues list endpoint using offset pagination.
@@ -92,7 +125,7 @@ export class PaperclipClient {
     let offset = 0;
     while (true) {
       const url = `${baseUrl}${separator}limit=${PAGE_SIZE}&offset=${offset}`;
-      const page = await this.request<PaperclipIssue[]>(url);
+      const page = await this.requestArray<PaperclipIssue>(url);
       all.push(...page);
       if (page.length < PAGE_SIZE) break;
       offset += PAGE_SIZE;
@@ -115,7 +148,11 @@ export class PaperclipClient {
 
   async getRoutines(companyId: string): Promise<PaperclipRoutine[]> {
     const url = `${this.baseUrl}/api/companies/${companyId}/routines`;
-    return this.request<PaperclipRoutine[]>(url);
+    const rows = await this.requestArray<PaperclipRoutine>(url);
+    if (rows.length >= 100) {
+      this.ctx.logger.warn("discord-fleet: getRoutines returned >=100 rows — verify the endpoint is not truncating", { companyId });
+    }
+    return rows;
   }
 
   async getIssueById(companyId: string, issueId: string): Promise<PaperclipIssue | null> {
@@ -128,9 +165,14 @@ export class PaperclipClient {
       return null;
     }
     if (res.status >= 400) {
-      throw new Error(`paperclip API error: ${res.status} ${url}`);
+      throw new PaperclipApiError(`paperclip API error: ${res.status} ${url}`, res.status, url);
     }
-    const body = (await res.json()) as unknown;
+    let body: unknown;
+    try {
+      body = (await res.json()) as unknown;
+    } catch {
+      throw new PaperclipApiError(`paperclip API non-JSON response: ${res.status} ${url}`, res.status, url);
+    }
     if (body && typeof body === "object" && "data" in body) {
       return (body as { data: PaperclipIssue }).data;
     }
@@ -138,15 +180,31 @@ export class PaperclipClient {
   }
 
   async listIssueDocuments(issueId: string): Promise<PaperclipDocument[]> {
-    return this.request<PaperclipDocument[]>(`${this.baseUrl}/api/issues/${issueId}/documents`);
+    const rows = await this.requestArray<PaperclipDocument>(`${this.baseUrl}/api/issues/${issueId}/documents`);
+    if (rows.length >= 100) {
+      this.ctx.logger.warn("discord-fleet: listIssueDocuments returned >=100 rows — verify the endpoint is not truncating", { issueId });
+    }
+    return rows;
   }
 
   async getApprovalIssues(approvalId: string): Promise<PaperclipIssue[]> {
-    return this.request<PaperclipIssue[]>(`${this.baseUrl}/api/approvals/${approvalId}/issues`);
+    const rows = await this.requestArray<PaperclipIssue>(`${this.baseUrl}/api/approvals/${approvalId}/issues`);
+    if (rows.length >= 100) {
+      this.ctx.logger.warn("discord-fleet: getApprovalIssues returned >=100 rows — verify the endpoint is not truncating", { approvalId });
+    }
+    return rows;
   }
 
   async getPendingApprovals(companyId: string): Promise<PaperclipApproval[]> {
-    return this.request<PaperclipApproval[]>(`${this.baseUrl}/api/companies/${companyId}/approvals?status=pending`);
+    // Single fetch: the approvals route returns the full set in one response
+    // (observed live 2026-07-02: 175 rows in one call — no low default page cap).
+    // Warn if a response ever looks truncated so a future server-side cap is
+    // visible instead of silently hiding pending cards from the reminder sweep.
+    const rows = await this.requestArray<PaperclipApproval>(`${this.baseUrl}/api/companies/${companyId}/approvals?status=pending`);
+    if (rows.length >= 1000) {
+      this.ctx.logger.warn("discord-fleet: getPendingApprovals returned >=1000 rows — verify the endpoint is not paginating/truncating", { companyId });
+    }
+    return rows;
   }
 
   async getApprovalById(approvalId: string): Promise<PaperclipApproval | null> {
@@ -159,9 +217,14 @@ export class PaperclipClient {
       return null;
     }
     if (res.status >= 400) {
-      throw new Error(`paperclip API error: ${res.status} ${url}`);
+      throw new PaperclipApiError(`paperclip API error: ${res.status} ${url}`, res.status, url);
     }
-    const body = (await res.json()) as unknown;
+    let body: unknown;
+    try {
+      body = (await res.json()) as unknown;
+    } catch {
+      throw new PaperclipApiError(`paperclip API non-JSON response: ${res.status} ${url}`, res.status, url);
+    }
     if (body && typeof body === "object" && "data" in body) {
       return (body as { data: PaperclipApproval }).data;
     }
@@ -203,7 +266,12 @@ export class PaperclipClient {
   }
 
   async listIssueInteractions(issueId: string): Promise<PaperclipInteraction[]> {
-    return this.request<PaperclipInteraction[]>(`${this.baseUrl}/api/issues/${issueId}/interactions`);
+    // Issue-scoped and small in practice; requestArray guards the shape.
+    const rows = await this.requestArray<PaperclipInteraction>(`${this.baseUrl}/api/issues/${issueId}/interactions`);
+    if (rows.length >= 100) {
+      this.ctx.logger.warn("discord-fleet: listIssueInteractions returned >=100 rows — verify the endpoint is not truncating", { issueId });
+    }
+    return rows;
   }
 
   async approveApproval(approvalId: string, decisionNote?: string): Promise<void> {
@@ -235,7 +303,7 @@ export class PaperclipClient {
     });
     if (res.status >= 400) {
       const text = await res.text().catch(() => "");
-      throw new Error(`paperclip API ${action} error: ${res.status} ${url} ${text}`);
+      throw new PaperclipApiError(`paperclip API ${action} error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
     }
   }
 }

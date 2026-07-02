@@ -6,6 +6,7 @@ import { postEmbedToChannel, postToChannel } from "../discord/rest.js";
 import { enforceEmbedLimits } from "../render/embeds.js";
 import { stripSecrets } from "../render/secrets.js";
 import { truncate } from "../render/plain.js";
+import { safeParseMs, safeStr } from "../util/safe.js";
 
 // Re-post at most this often per interaction.
 const RETHRESHOLD_MS = 24 * 60 * 60 * 1000;
@@ -99,7 +100,7 @@ export async function runConfirmationSweep(
         continue;
       }
 
-      const matchedIssues = issues.filter((i) => regex.test(i.title));
+      const matchedIssues = issues.filter((i) => regex.test(safeStr(i.title, 512)));
 
       for (const issue of matchedIssues) {
         let interactions: PaperclipInteraction[] = [];
@@ -116,7 +117,9 @@ export async function runConfirmationSweep(
 
         for (const interaction of pendingConfirmations) {
           try {
-          const lastPosted = posted[interaction.id] ? Date.parse(posted[interaction.id]) : null;
+          // safeParseMs: a corrupted stored timestamp becomes null ("never
+          // posted") instead of NaN silently bypassing the 24h throttle.
+          const lastPosted = safeParseMs(posted[interaction.id]);
           if (lastPosted !== null && now - lastPosted < RETHRESHOLD_MS) continue;
 
           const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
@@ -158,18 +161,28 @@ export async function runConfirmationSweep(
           }
 
           // Post the markdown body (minus image lines) chunked after the embed.
+          // The throttle marker is written ONLY when every chunk succeeded — a
+          // partial card (embed without its body) stays eligible for a full
+          // re-post on the next sweep instead of sitting unreadable for 24h.
+          let allChunksSent = true;
           if (bodyText) {
             const chunks = chunkBySection(stripSecrets(bodyText));
             for (const chunk of chunks) {
               try {
                 await postToChannel(client, rule.channelId, truncate(chunk, CONTENT_CHUNK_MAX));
               } catch (err) {
-                ctx.logger.warn("confirmation-sweep: body chunk post failed", { companyId: company.companyId, interactionId: interaction.id, error: String(err) });
+                allChunksSent = false;
+                ctx.logger.warn("confirmation-sweep: body chunk post failed — card stays eligible for re-post next sweep", { companyId: company.companyId, interactionId: interaction.id, error: String(err) });
               }
             }
           }
 
-          posted[interaction.id] = new Date(now).toISOString();
+          if (allChunksSent) {
+            posted[interaction.id] = new Date(now).toISOString();
+          }
+          // Deliberate tradeoff: while chunks persistently fail (usually a
+          // channel-wide Discord fault), the embed re-posts each sweep — a
+          // visible symptom is preferred over a silently unreadable card.
           } catch (err) {
             ctx.logger.warn("confirmation-sweep: unexpected error processing interaction; skipping", {
               companyId: company.companyId,

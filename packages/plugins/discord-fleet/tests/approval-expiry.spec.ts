@@ -6,6 +6,7 @@ import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 import type { CompanyConfig, DiscordFleetConfig } from "../src/config/schema.js";
 import type { PaperclipApproval, PaperclipClient } from "../src/api/paperclip.js";
+import { PaperclipApiError } from "../src/api/paperclip.js";
 import type { Client } from "discord.js";
 
 vi.mock("../src/discord/rest.js", () => ({
@@ -51,11 +52,16 @@ function makePendingApproval(overrides: Partial<PaperclipApproval> = {}): Paperc
   };
 }
 
-function makePaperclip(pending: PaperclipApproval[], rejectFn = vi.fn().mockResolvedValue(undefined)): PaperclipClient {
+function makePaperclip(
+  pending: PaperclipApproval[],
+  rejectFn = vi.fn().mockResolvedValue(undefined),
+  getApprovalByIdFn = vi.fn().mockResolvedValue({ id: "appr-1", status: "pending", createdAt: new Date(NOW.getTime() - 80 * 3_600_000).toISOString(), payload: { title: "Carousel week 27" } }),
+): PaperclipClient {
   return {
     getPendingApprovals: vi.fn().mockResolvedValue(pending),
     getApprovalIssues: vi.fn().mockResolvedValue([]),
     rejectApproval: rejectFn,
+    getApprovalById: getApprovalByIdFn,
   } as unknown as PaperclipClient;
 }
 
@@ -180,5 +186,133 @@ describe("runApprovalsReminder — CHANGE 2: auto-expiry", () => {
     await runApprovalsReminder(harness.ctx, "c1", {} as Client, company, fleet, paperclip, NOW);
 
     expect(rejectFn).not.toHaveBeenCalled();
+  });
+
+  it("getApprovalById returns status:'approved' → rejectApproval NOT called AND no reminder posted", async () => {
+    // TOCTOU guard: if the approval was decided between the pending-list fetch and
+    // the re-check, we must NOT reject (human decision stands) and also must not
+    // post a stale reminder card for an already-decided approval.
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const rejectFn = vi.fn().mockResolvedValue(undefined);
+    // getApprovalById returns approved — human decided while we were sweeping
+    const approvalByIdFn = vi.fn().mockResolvedValue({
+      id: "appr-1",
+      status: "approved",
+      createdAt: new Date(NOW.getTime() - 80 * 3_600_000).toISOString(),
+      payload: { title: "Carousel week 27" },
+    });
+    const paperclip = makePaperclip(
+      [makePendingApproval({ createdAt: new Date(NOW.getTime() - 80 * 3_600_000).toISOString() })],
+      rejectFn,
+      approvalByIdFn,
+    );
+    const fleet = makeFleetConfig(company, {
+      approvalExpiry: { c1: [{ titleRegex: "Carousel", maxAgeHours: 72 }] },
+    });
+
+    await runApprovalsReminder(harness.ctx, "c1", {} as Client, company, fleet, paperclip, NOW);
+
+    expect(rejectFn).not.toHaveBeenCalled();
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+  });
+
+  it("getApprovalById rejects (fetch error) → rejectApproval NOT called (fail closed) but reminder IS posted", async () => {
+    // Fail-closed: if the re-check itself fails we cannot know the current state,
+    // so we skip the auto-reject. However, the normal reminder path still runs so
+    // the card does not go permanently silent.
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const rejectFn = vi.fn().mockResolvedValue(undefined);
+    // getApprovalById throws — network error during re-fetch
+    const approvalByIdFn = vi.fn().mockRejectedValue(new Error("network error"));
+    // Approval is 80h old (exceeds 72h) AND older than REMIND_AFTER_MS (1h)
+    const paperclip = makePaperclip(
+      [makePendingApproval({ createdAt: new Date(NOW.getTime() - 80 * 3_600_000).toISOString() })],
+      rejectFn,
+      approvalByIdFn,
+    );
+    const fleet = makeFleetConfig(company, {
+      approvalExpiry: { c1: [{ titleRegex: "Carousel", maxAgeHours: 72 }] },
+    });
+
+    await expect(
+      runApprovalsReminder(harness.ctx, "c1", {} as Client, company, fleet, paperclip, NOW),
+    ).resolves.toBeUndefined();
+
+    expect(rejectFn).not.toHaveBeenCalled();
+    // Normal reminder is still posted (card must not go silent)
+    expect(postEmbedToChannel).toHaveBeenCalled();
+  });
+
+  it("rejectApproval throws PaperclipApiError with status 409 → no reminder posted, no throw", async () => {
+    // 409 = approval already decided (race lost to a human) — human decision stands.
+    // The job must continue without posting a stale reminder card.
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const rejectFn = vi.fn().mockRejectedValue(
+      new PaperclipApiError("paperclip API reject error: 409", 409, "http://localhost:3000/api/approvals/appr-1/reject"),
+    );
+    const paperclip = makePaperclip(
+      [makePendingApproval({ createdAt: new Date(NOW.getTime() - 80 * 3_600_000).toISOString() })],
+      rejectFn,
+    );
+    const fleet = makeFleetConfig(company, {
+      approvalExpiry: { c1: [{ titleRegex: "Carousel", maxAgeHours: 72 }] },
+    });
+
+    await expect(
+      runApprovalsReminder(harness.ctx, "c1", {} as Client, company, fleet, paperclip, NOW),
+    ).resolves.toBeUndefined();
+
+    expect(rejectFn).toHaveBeenCalledWith("appr-1", expect.stringContaining("auto-expiry after 72h"));
+    // 409 branch: continue → no reminder posted
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+  });
+
+  it("successful expiry prunes approval id from PENDING_APPROVALS_KEY state", async () => {
+    // After a successful auto-reject, the expired id must be removed from the
+    // shared pending list (same as the button handler does on decide) so the
+    // daily digest does not re-surface it.
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { PENDING_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+
+    // Pre-seed the pending list to simulate a previously-posted card
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: PENDING_APPROVALS_KEY },
+      ["appr-1", "appr-2"],
+    );
+
+    const rejectFn = vi.fn().mockResolvedValue(undefined);
+    const paperclip = makePaperclip(
+      [makePendingApproval({ createdAt: new Date(NOW.getTime() - 80 * 3_600_000).toISOString() })],
+      rejectFn,
+    );
+    const fleet = makeFleetConfig(company, {
+      approvalExpiry: { c1: [{ titleRegex: "Carousel", maxAgeHours: 72 }] },
+    });
+
+    await runApprovalsReminder(harness.ctx, "c1", {} as Client, company, fleet, paperclip, NOW);
+
+    expect(rejectFn).toHaveBeenCalled();
+
+    const remaining = await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: PENDING_APPROVALS_KEY,
+    }) as string[] | null;
+    // appr-1 must be pruned; appr-2 must remain
+    expect(remaining).not.toContain("appr-1");
+    expect(remaining).toContain("appr-2");
   });
 });
