@@ -113,6 +113,20 @@ export async function handleApprovalCreated(
     return;
   }
 
+  // Write the "posted" marker BEFORE the Discord send so a second concurrent
+  // invocation (duplicate event delivery — observed live 2026-07-02, two events
+  // 500 ms apart, same approvalId, different headerMessageIds) loses the
+  // read-check-write race and exits at the guard above rather than double-posting.
+  //
+  // Residual: the state API has no atomic compare-and-swap primitive, so two
+  // invocations that both pass the `seen.has()` check before EITHER write
+  // (sub-millisecond race on a very cold state store) could still both post.
+  // That window is orders of magnitude smaller than the 500 ms observed in the
+  // live incident (cold-start vs. steady-state scheduling jitter) and is
+  // acceptable without a distributed lock.
+  seen.add(approvalId);
+  await ctx.state.set(seenKey, [...seen]);
+
   const url = `${companyConfig.paperclipApiUrl}/${companyConfig.companyPrefix}/approvals/${approvalId}`;
   const embed = buildApprovalEmbed({ identifier, approvalId, approvalType, title: approvalTitle, issueUrl: url });
   const actionRow = buildApprovalActionRow({ approvalId, issueUrl: url });
@@ -244,9 +258,6 @@ export async function handleApprovalCreated(
       });
     }
   }
-
-  seen.add(approvalId);
-  await ctx.state.set(seenKey, [...seen]);
 
   const pending = ((await ctx.state.get({
     scopeKind: "company",

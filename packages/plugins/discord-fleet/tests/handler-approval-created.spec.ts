@@ -468,6 +468,44 @@ describe("handleApprovalCreated — SEEN_APPROVALS_KEY dedup guard", () => {
     const pending = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: PENDING_APPROVALS_KEY });
     expect(pending).toEqual(["appr-001"]);
   });
+
+  it("duplicate delivery with inter-event gap: second invocation after guard is written posts nothing (live 2026-07-02 bug)", async () => {
+    // The live incident: two approval.created events for the same approvalId
+    // 500 ms apart (02:50:43.595 + 02:50:44.105), two different headerMessageIds.
+    //
+    // Root cause: the old code wrote SEEN only AFTER posting. The first invocation
+    // had not yet written the guard by the time the second invocation's handler
+    // started (500 ms later, during the first's API fetches). Both passed
+    // `seen.has(approvalId)` and both posted.
+    //
+    // Fix: SEEN is written BEFORE the Discord send. When the second invocation
+    // reads state (which the first already updated), it finds the approvalId
+    // present and exits at the guard with no post.
+    //
+    // This test serialises the two invocations the way the event queue delivers
+    // them (second starts only after the first has had a chance to write state).
+    // The sub-millisecond simultaneous-start race is residual and noted in the
+    // handler comment — the state API has no CAS primitive.
+    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+    const event = makeApprovalCreatedEvent();
+
+    // First delivery: processes and writes SEEN before returning.
+    await handleApprovalCreated(harness.ctx, event, client, config);
+    // Second delivery (500 ms later in production): SEEN already written → no-op.
+    await handleApprovalCreated(harness.ctx, event, client, config);
+
+    // Only ONE card posted; second invocation hit the guard.
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+
+    // SEEN must contain exactly one entry.
+    const seen = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
+    expect(seen).toEqual(["appr-001"]);
+  });
 });
 
 // ─── Rich renderer integration ───────────────────────────────────────────────
