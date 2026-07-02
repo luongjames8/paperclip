@@ -2,7 +2,7 @@ import type { Client } from "discord.js";
 import type { APIEmbed } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { DiscordFleetConfig } from "../config/schema.js";
-import type { PaperclipClient, PaperclipRoutine, PaperclipRoutineTrigger } from "../api/paperclip.js";
+import type { PaperclipAgent, PaperclipClient, PaperclipRoutine, PaperclipRoutineTrigger } from "../api/paperclip.js";
 import { postEmbedToChannel } from "../discord/rest.js";
 import { buildRoutineHealthEmbed, buildRoutineRunFailedEmbed } from "../render/embeds.js";
 import { safeParseMs } from "../util/safe.js";
@@ -17,17 +17,38 @@ const GRACE_MS = 3_600_000;
 // State key for de-duplication — re-alert at most every 24h per alert key
 // (same pattern as stuck-detector). Keys: missed:<triggerId>,
 // misconfig:<triggerId>, no-assignee:<routineId>, bad-assignee:<routineId>,
-// failed-run:<runId>.
+// org-chain:<routineId>, failed-run:<runId>.
 export const ROUTINE_HEALTH_STATE_KEY = "routine-health-alerted";
 const RETHRESHOLD_MS = 24 * 60 * 60 * 1000;
 
 // Mirrors packages/shared/src/agent-eligibility.ts (ASSIGNABLE minus
 // NON_ASSIGNABLE): dispatch throws pre-run for assignees outside this set.
 // Mirrored, not imported — the plugin bundle does not depend on the shared
-// workspace package. Org-chain health (terminated ancestor / cycle) is the
-// one assertAssignableAgent case NOT covered here: it needs the full roster
-// graph and stays a documented server-log-only residual.
+// workspace package. The ONE remaining invisible-miss residual after the
+// static checks below is a server process dying between the tick's
+// nextRunAt claim and run creation: cron-free client code cannot tell that
+// apart from a healthy just-created trigger (nextRunAt future, lastFiredAt
+// null in both) — that window is a server-side atomicity gap, not a
+// monitoring gap.
 const ASSIGNABLE_AGENT_STATUSES = new Set(["active", "paused", "idle", "running", "error"]);
+
+// Mirrors getAgentOrgChainHealth's core (packages/shared/src/agent-eligibility.ts):
+// assertAssignableAgent also throws pre-run when the assignee's reporting chain
+// has a terminated ancestor, a manager missing from the roster, or a cycle.
+// Returns a human-readable problem or null when the chain is healthy.
+function orgChainProblem(agentId: string, agentById: Map<string, PaperclipAgent>): string | null {
+  const seen = new Set<string>([agentId]);
+  let current = agentById.get(agentId);
+  while (current?.reportsTo) {
+    if (seen.has(current.reportsTo)) return "reporting chain has a cycle";
+    const parent = agentById.get(current.reportsTo);
+    if (!parent) return `manager ${current.reportsTo} is missing from the roster`;
+    if (parent.status === "terminated") return `ancestor ${parent.id} is terminated`;
+    seen.add(parent.id);
+    current = parent;
+  }
+  return null;
+}
 
 type AlertedState = Record<string, string>; // alert key → ISO timestamp of last alert
 
@@ -46,14 +67,12 @@ export async function runRoutineHealth(
     if (!client) continue;
 
     let routines: PaperclipRoutine[];
-    let agentStatusById: Map<string, string> | null = null;
+    let agentById: Map<string, PaperclipAgent> | null = null;
     try {
       const paperclip = await paperclipFactory(company.companyId);
       routines = await paperclip.getRoutines(company.companyId);
       try {
-        agentStatusById = new Map(
-          (await paperclip.getAgents(company.companyId)).map((a) => [a.id, a.status ?? ""]),
-        );
+        agentById = new Map((await paperclip.getAgents(company.companyId)).map((a) => [a.id, a]));
       } catch (err) {
         // Roster unavailable → skip ONLY the assignee-state checks this sweep
         // (a flaky fetch must not spam misconfigured alerts); log so a dead
@@ -146,11 +165,13 @@ export async function runRoutineHealth(
       }
 
       // An assignee that exists but is not assignable (terminated /
-      // pending_approval / not in the roster) throws in assertAssignableAgent
-      // pre-run — the same invisible-miss class as no-assignee.
-      if (hasEnabledTrigger && routine.assigneeAgentId && agentStatusById) {
-        const status = agentStatusById.get(routine.assigneeAgentId);
-        if (status === undefined || !ASSIGNABLE_AGENT_STATUSES.has(status)) {
+      // pending_approval / not in the roster / broken reporting chain) throws
+      // in assertAssignableAgent pre-run — the same invisible-miss class as
+      // no-assignee.
+      if (hasEnabledTrigger && routine.assigneeAgentId && agentById) {
+        const assignee = agentById.get(routine.assigneeAgentId);
+        const status = assignee?.status ?? undefined;
+        if (assignee === undefined || status === undefined || !ASSIGNABLE_AGENT_STATUSES.has(status)) {
           await alert(
             `bad-assignee:${routine.id}`,
             buildRoutineHealthEmbed({
@@ -158,11 +179,25 @@ export async function runRoutineHealth(
               missedAt: null,
               misconfigured: true,
               detail: `Routine assignee ${routine.assigneeAgentId} is ${
-                status === undefined ? "not in the company roster" : `status=${status} (not assignable)`
+                assignee === undefined ? "not in the company roster" : `status=${status} (not assignable)`
               } — every triggered dispatch fails before a run is created. Reassign the routine.`,
             }),
             { routineId: routine.id, assigneeAgentId: routine.assigneeAgentId },
           );
+        } else {
+          const chainProblem = orgChainProblem(routine.assigneeAgentId, agentById);
+          if (chainProblem !== null) {
+            await alert(
+              `org-chain:${routine.id}`,
+              buildRoutineHealthEmbed({
+                routineName: routine.title,
+                missedAt: null,
+                misconfigured: true,
+                detail: `Routine assignee ${routine.assigneeAgentId}'s ${chainProblem} — dispatch fails before a run is created (assertAssignableAgent org-chain check). Repair the reporting chain.`,
+              }),
+              { routineId: routine.id, assigneeAgentId: routine.assigneeAgentId },
+            );
+          }
         }
       }
 

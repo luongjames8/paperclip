@@ -114,7 +114,9 @@ function makeMockClient(): Client {
 
 function makeMockPaperclip(
   routines: PaperclipRoutine[],
-  agents: Array<{ id: string; status?: string | null }> | Error = [{ id: "agent-1", status: "idle" }],
+  agents: Array<{ id: string; status?: string | null; reportsTo?: string | null }> | Error = [
+    { id: "agent-1", status: "idle", reportsTo: null },
+  ],
 ): PaperclipClient {
   return {
     getRoutines: vi.fn().mockResolvedValue(routines),
@@ -373,6 +375,67 @@ describe("runRoutineHealth — invisible-miss detection (no assignee, failed run
     expect(postEmbedToChannel).toHaveBeenCalledOnce();
     const embed = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0][2];
     expect(embed.description).toContain("not in the company roster");
+  });
+
+  it("alerts as misconfigured when the assignee's reporting chain has a terminated ancestor", async () => {
+    const { runRoutineHealth } = await import("../src/jobs/routine-health.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const routine = makeRoutine();
+    const factory = vi.fn().mockResolvedValue(
+      makeMockPaperclip(
+        [routine],
+        [
+          { id: "agent-1", status: "idle", reportsTo: "boss" },
+          { id: "boss", status: "terminated", reportsTo: null },
+        ],
+      ),
+    );
+
+    await runRoutineHealth(harness.ctx, () => makeMockClient(), config, factory);
+
+    expect(postEmbedToChannel).toHaveBeenCalledOnce();
+    const embed = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(embed.description).toContain("terminated");
+  });
+
+  it("alerts as misconfigured on a reporting-chain cycle or missing manager; healthy chains stay silent", async () => {
+    const { runRoutineHealth } = await import("../src/jobs/routine-health.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const routine = makeRoutine();
+    // cycle: agent-1 -> boss -> agent-1
+    const factory = vi.fn().mockResolvedValue(
+      makeMockPaperclip(
+        [routine],
+        [
+          { id: "agent-1", status: "idle", reportsTo: "boss" },
+          { id: "boss", status: "active", reportsTo: "agent-1" },
+        ],
+      ),
+    );
+    await runRoutineHealth(harness.ctx, () => makeMockClient(), config, factory);
+    expect(postEmbedToChannel).toHaveBeenCalledOnce();
+    expect((postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0][2].description).toContain("cycle");
+
+    vi.clearAllMocks();
+    // healthy chain: agent-1 -> boss(active, top)
+    const harness2 = createTestHarness({ manifest });
+    const factory2 = vi.fn().mockResolvedValue(
+      makeMockPaperclip(
+        [makeRoutine()],
+        [
+          { id: "agent-1", status: "idle", reportsTo: "boss" },
+          { id: "boss", status: "active", reportsTo: null },
+        ],
+      ),
+    );
+    await runRoutineHealth(harness2.ctx, () => makeMockClient(), config, factory2);
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
   });
 
   it("skips assignee-state checks (no false alert) when the roster fetch fails, but still checks nextRunAt", async () => {

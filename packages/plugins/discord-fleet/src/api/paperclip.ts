@@ -60,6 +60,7 @@ export interface PaperclipRoutineTrigger {
 export interface PaperclipAgent {
   id: string;
   status?: string | null;
+  reportsTo?: string | null;
 }
 
 export interface PaperclipRoutineRun {
