@@ -61,7 +61,7 @@ function makeInteraction(overrides: Partial<PaperclipInteraction> = {}): Papercl
 
 function makePaperclip(issues: PaperclipIssue[], interactions: PaperclipInteraction[]): PaperclipClient {
   return {
-    getBacklogAndTodoIssues: vi.fn().mockResolvedValue(issues),
+    getOpenIssues: vi.fn().mockResolvedValue(issues),
     listIssueInteractions: vi.fn().mockResolvedValue(interactions),
   } as unknown as PaperclipClient;
 }
@@ -264,8 +264,8 @@ describe("runConfirmationSweep — CHANGE 4", () => {
     expect(new Date(state["int-1"]).getTime()).toBeGreaterThan(Date.now() - 5000);
   });
 
-  // CLASS 2 — issue-list fetch must paginate
-  it("uses getBacklogAndTodoIssues (paginated helper) to fetch issues", async () => {
+  // CLASS 2 — issue-list fetch must paginate (including in_review)
+  it("uses getOpenIssues (paginated helper) to fetch issues including in_review", async () => {
     const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
 
     const harness = createTestHarness({ manifest });
@@ -276,9 +276,9 @@ describe("runConfirmationSweep — CHANGE 4", () => {
 
     await runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip);
 
-    // getBacklogAndTodoIssues is the paginated entry point — must be called exactly once
-    expect((paperclip.getBacklogAndTodoIssues as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
-    expect((paperclip.getBacklogAndTodoIssues as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith("c1");
+    // getOpenIssues is the paginated entry point — must be called exactly once
+    expect((paperclip.getOpenIssues as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+    expect((paperclip.getOpenIssues as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith("c1");
   });
 
   // CLASS 1 — non-string detailsMarkdown must not throw
@@ -321,5 +321,50 @@ describe("runConfirmationSweep — CHANGE 4", () => {
       runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip),
     ).resolves.not.toThrow();
     expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+  });
+
+  // CLASS 3 — prompt fallback when detailsMarkdown is absent/empty
+  it("falls back to payload.prompt when detailsMarkdown is absent", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig({
+      c1: [{ titleRegex: "Carousel", channelId: "ch-carousel" }],
+    });
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ payload: { prompt: "Please confirm you want to publish this carousel." } })],
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip);
+
+    const calls = (postToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some(([, , msg]) => (msg as string).includes("Please confirm you want to publish this carousel."))).toBe(true);
+  });
+
+  it("prefers detailsMarkdown over prompt when both are present", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig({
+      c1: [{ titleRegex: "Carousel", channelId: "ch-carousel" }],
+    });
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({
+        payload: {
+          detailsMarkdown: "Details from detailsMarkdown field.",
+          prompt: "Details from prompt field — should NOT appear.",
+        },
+      })],
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip);
+
+    const calls = (postToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some(([, , msg]) => (msg as string).includes("Details from detailsMarkdown field."))).toBe(true);
+    expect(calls.some(([, , msg]) => (msg as string).includes("Details from prompt field"))).toBe(false);
   });
 });
