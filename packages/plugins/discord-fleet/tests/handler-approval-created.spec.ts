@@ -415,15 +415,26 @@ describe("handleApprovalCreated — approvalType field-read", () => {
   });
 });
 
-// ─── SEEN_APPROVALS_KEY dedup guard ──────────────────────────────────────────
+// ─── Two-phase marker dedup guard ────────────────────────────────────────────
+//
+// SEEN_APPROVALS_KEY is gone. The new mechanism uses per-approval state keys:
+//   POSTING_MARKER_PREFIX + approvalId  → number (timestamp ms) written BEFORE send
+//   POSTED_MARKER_PREFIX  + approvalId  → ISO string written AFTER Discord confirms
+//
+// Semantics:
+//   (a) posted marker present → skip entirely
+//   (b) posting marker holds a fresh timestamp (< POSTING_STALE_MS) → skip (concurrent in-flight)
+//   (c) posting marker absent or stale → proceed; set posting marker then send
+//   On header-send failure: set posting marker to 0 (not delete); rethrow.
+//   On header-send success: set posted marker to ISO string.
 
-describe("handleApprovalCreated — SEEN_APPROVALS_KEY dedup guard", () => {
+describe("handleApprovalCreated — two-phase marker dedup guard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it("dedup: second call with same approvalId is a no-op (no posts)", async () => {
-    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    const { handleApprovalCreated, POSTED_MARKER_PREFIX } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel } = await import("../src/discord/rest.js");
 
     const harness = createTestHarness({ manifest });
@@ -436,12 +447,14 @@ describe("handleApprovalCreated — SEEN_APPROVALS_KEY dedup guard", () => {
 
     expect(postEmbedToChannel).toHaveBeenCalledTimes(1);  // first call posted; second was no-op
 
-    const seen = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
-    expect(seen).toEqual(["appr-001"]);
+    // posted marker must be an ISO string
+    const posted = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTED_MARKER_PREFIX}appr-001` });
+    expect(typeof posted).toBe("string");
+    expect(new Date(posted as string).getFullYear()).toBeGreaterThanOrEqual(2026);
   });
 
   it("dedup survives PENDING_APPROVALS_KEY wipe (digest semantics)", async () => {
-    const { handleApprovalCreated, SEEN_APPROVALS_KEY, PENDING_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    const { handleApprovalCreated, POSTED_MARKER_PREFIX, PENDING_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel } = await import("../src/discord/rest.js");
 
     const harness = createTestHarness({ manifest });
@@ -456,7 +469,10 @@ describe("handleApprovalCreated — SEEN_APPROVALS_KEY dedup guard", () => {
 
     await handleApprovalCreated(harness.ctx, event, client, config);
 
-    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);  // still deduped via SEEN
+    // posted marker is still set → dedup works even after pending wipe
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+    const posted = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTED_MARKER_PREFIX}appr-001` });
+    expect(posted).toBeTruthy();
   });
 
   it("PENDING_APPROVALS_KEY is also populated (digest job still sees the approval)", async () => {
@@ -471,22 +487,11 @@ describe("handleApprovalCreated — SEEN_APPROVALS_KEY dedup guard", () => {
 
   it("duplicate delivery with inter-event gap: second invocation after guard is written posts nothing (live 2026-07-02 bug)", async () => {
     // The live incident: two approval.created events for the same approvalId
-    // 500 ms apart (02:50:43.595 + 02:50:44.105), two different headerMessageIds.
-    //
-    // Root cause: the old code wrote SEEN only AFTER posting. The first invocation
-    // had not yet written the guard by the time the second invocation's handler
-    // started (500 ms later, during the first's API fetches). Both passed
-    // `seen.has(approvalId)` and both posted.
-    //
-    // Fix: SEEN is written BEFORE the Discord send. When the second invocation
-    // reads state (which the first already updated), it finds the approvalId
-    // present and exits at the guard with no post.
-    //
-    // This test serialises the two invocations the way the event queue delivers
-    // them (second starts only after the first has had a chance to write state).
-    // The sub-millisecond simultaneous-start race is residual and noted in the
-    // handler comment — the state API has no CAS primitive.
-    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    // 500 ms apart. Fix: posted marker is written only after Discord confirms the
+    // send, and posting marker is written before the send so a concurrent
+    // duplicate delivery within POSTING_STALE_MS is suppressed.
+    // This test serialises the two invocations (second starts after first completes).
+    const { handleApprovalCreated, POSTED_MARKER_PREFIX } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel } = await import("../src/discord/rest.js");
 
     const harness = createTestHarness({ manifest });
@@ -494,24 +499,24 @@ describe("handleApprovalCreated — SEEN_APPROVALS_KEY dedup guard", () => {
     const client = makeMockClient();
     const event = makeApprovalCreatedEvent();
 
-    // First delivery: processes and writes SEEN before returning.
+    // First delivery: processes and writes posted marker before returning.
     await handleApprovalCreated(harness.ctx, event, client, config);
-    // Second delivery (500 ms later in production): SEEN already written → no-op.
+    // Second delivery (500 ms later in production): posted marker already set → no-op.
     await handleApprovalCreated(harness.ctx, event, client, config);
 
     // Only ONE card posted; second invocation hit the guard.
     expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
 
-    // SEEN must contain exactly one entry.
-    const seen = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
-    expect(seen).toEqual(["appr-001"]);
+    // posted marker is an ISO string (written after confirmed send)
+    const posted = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTED_MARKER_PREFIX}appr-001` });
+    expect(typeof posted).toBe("string");
   });
 
-  it("failed header send rolls back SEEN so a retried delivery can post (codex P2)", async () => {
-    // SEEN-before-send closes the dup-post race, but a Discord failure after the
-    // marker is written must not permanently suppress the card: roll the marker
-    // back on send failure so a retried/duplicate delivery posts it.
-    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+  it("failed header send sets posting marker to 0 so a retried delivery can post (codex P2)", async () => {
+    // On header-send failure the handler sets posting marker to 0 (not deletes it)
+    // so the stale-marker check sees it as stale and retried deliveries proceed.
+    // posted marker must NOT exist after a failure.
+    const { handleApprovalCreated, POSTED_MARKER_PREFIX, POSTING_MARKER_PREFIX } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel } = await import("../src/discord/rest.js");
 
     const harness = createTestHarness({ manifest });
@@ -519,19 +524,25 @@ describe("handleApprovalCreated — SEEN_APPROVALS_KEY dedup guard", () => {
     const client = makeMockClient();
     const event = makeApprovalCreatedEvent();
 
-    // First delivery: header send fails (bad channel / permissions / transient).
+    // First delivery: header send fails.
     (postEmbedToChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("send failed"));
     await expect(handleApprovalCreated(harness.ctx, event, client, config)).rejects.toThrow("send failed");
 
-    // SEEN was rolled back — the approval is retryable.
-    const seenAfterFailure = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
-    expect(seenAfterFailure ?? []).not.toContain("appr-001");
+    // posted marker must NOT exist — card is retryable
+    const postedAfterFailure = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTED_MARKER_PREFIX}appr-001` });
+    expect(postedAfterFailure).toBeNull();
 
-    // Retried delivery posts the card.
+    // posting marker must be 0 (failed-send rollback signal)
+    const postingAfterFailure = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTING_MARKER_PREFIX}appr-001` });
+    expect(postingAfterFailure).toBe(0);
+
+    // Retried delivery: posting marker is 0 (stale → proceed) so the card posts.
     await handleApprovalCreated(harness.ctx, event, client, config);
     expect(postEmbedToChannel).toHaveBeenCalledTimes(2);
-    const seen = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
-    expect(seen).toEqual(["appr-001"]);
+
+    // After successful retry: posted marker is now set as ISO string
+    const postedAfterRetry = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTED_MARKER_PREFIX}appr-001` });
+    expect(typeof postedAfterRetry).toBe("string");
   });
 });
 
@@ -576,8 +587,8 @@ describe("handleApprovalCreated — rich renderer integration", () => {
     expect(postToChannel).toHaveBeenCalled();
   });
 
-  it("fetch failure: still posts header, falls back to proposedComment, marks SEEN", async () => {
-    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+  it("fetch failure: still posts header, falls back to proposedComment, marks posted", async () => {
+    const { handleApprovalCreated, POSTED_MARKER_PREFIX } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
     const { PaperclipClient } = await import("../src/api/paperclip.js");
     const { renderIssueDocs } = await import("../src/render/issue-docs.js");
@@ -596,8 +607,9 @@ describe("handleApprovalCreated — rich renderer integration", () => {
 
     expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
     expect(postToChannel).toHaveBeenCalled();
-    const seen = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: SEEN_APPROVALS_KEY });
-    expect(seen).toEqual(["appr-001"]);
+    // posted marker must be an ISO string (header send succeeded)
+    const posted = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTED_MARKER_PREFIX}appr-001` });
+    expect(typeof posted).toBe("string");
   });
 
   it("rich-post failure: when all rich groups fail, falls back to proposedComment", async () => {
@@ -706,8 +718,8 @@ describe("handleApprovalCreated — full-approval fetch fallback", () => {
     );
   });
 
-  it("fetch failure → header still posts, no content chunks, approval marked SEEN", async () => {
-    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+  it("fetch failure → header still posts, no content chunks, approval marked posted", async () => {
+    const { handleApprovalCreated, POSTED_MARKER_PREFIX } = await import("../src/handlers/approval-created.js");
     const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
     const { PaperclipClient } = await import("../src/api/paperclip.js");
 
@@ -734,12 +746,12 @@ describe("handleApprovalCreated — full-approval fetch fallback", () => {
     expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
     // No content posted — fetch failed, no fallback available.
     expect(postToChannel).not.toHaveBeenCalled();
-    // Approval is still marked SEEN so we don't re-post the header on retry.
-    const seen = await harness.ctx.state.get({
+    // Approval is marked posted (header confirmed) so reminders don't re-post the header.
+    const posted = await harness.ctx.state.get({
       scopeKind: "company",
       scopeId: "c1",
-      stateKey: SEEN_APPROVALS_KEY,
+      stateKey: `${POSTED_MARKER_PREFIX}appr-nofetch`,
     });
-    expect(seen).toEqual(["appr-nofetch"]);
+    expect(typeof posted).toBe("string");
   });
 });

@@ -8,7 +8,9 @@ import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { matchChannelByType } from "../routing/route.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
-import { resolveApprovalContent } from "../handlers/approval-created.js";
+import { resolveApprovalContent, PENDING_APPROVALS_KEY } from "../handlers/approval-created.js";
+import { PaperclipApiError } from "../api/paperclip.js";
+import { safeParseMs } from "../util/safe.js";
 
 export const APPROVAL_REMINDERS_KEY = "approval-reminders";
 
@@ -90,43 +92,88 @@ export async function runApprovalsReminder(
 
   for (const approval of pending) {
     try {
-    const createdMs = Date.parse(approval.createdAt);
-    if (!Number.isFinite(createdMs)) continue;
-    const ageMs = nowMs - createdMs;
+    const createdMs = safeParseMs(approval.createdAt);
+    if (createdMs === null) continue;
+    // Clamp future createdAt (clock skew / bogus server value) to age 0: the
+    // approval is treated as just-created — reminded after the normal window,
+    // never permanently suppressed and never instantly expired.
+    const ageMs = Math.max(0, nowMs - createdMs);
     const ageHours = Math.floor(ageMs / 3_600_000);
     const titleRaw = approval.payload?.title;
     const title = typeof titleRaw === "string" ? titleRaw : "";
 
     // CHANGE 2: check auto-expiry rules before posting a reminder.
+    // Regexes are compiled+screened at config load (validateConfig). Bound the
+    // tested input so even a pathological pattern cannot blow up backtracking
+    // on an adversarially long title.
+    const boundedTitle = title.slice(0, 512);
     const matchedExpiry = expiryRules.find((rule) => {
       try {
-        return new RegExp(rule.titleRegex).test(title);
+        return new RegExp(rule.titleRegex).test(boundedTitle);
       } catch {
         return false;
       }
     });
     if (matchedExpiry && ageHours >= matchedExpiry.maxAgeHours) {
-      const decisionNote = `expired — time-sensitive card aged out (auto-expiry after ${matchedExpiry.maxAgeHours}h)`;
-      let rejectSucceeded = true;
+      // FAIL-CLOSED TOCTOU GUARD: a human may have decided this approval
+      // between the pending-list fetch and now. Re-check immediately before the
+      // irreversible reject; if the re-fetch fails or shows anything but
+      // "pending", DO NOT reject (auto-expiry must never override a human).
+      let stillPending = false;
       try {
-        await paperclip.rejectApproval(approval.id, decisionNote);
-        ctx.logger.info("approvals-reminder: auto-expired approval", {
-          approvalId: approval.id,
-          ageHours,
-          maxAgeHours: matchedExpiry.maxAgeHours,
-          titleRegex: matchedExpiry.titleRegex,
-        });
+        const fresh = await paperclip.getApprovalById(approval.id);
+        stillPending = fresh?.status === "pending";
+        if (fresh && fresh.status !== "pending") {
+          // Decided while we were sweeping — nothing to remind either.
+          continue;
+        }
       } catch (err) {
-        // 403 = not a board key; log clearly as instructed.
-        ctx.logger.warn("approvals-reminder: auto-expiry reject failed (403 = not a board key?)", {
+        ctx.logger.warn("approvals-reminder: pre-expiry re-fetch failed — skipping expiry this sweep (fail closed)", {
           approvalId: approval.id,
           error: String(err),
         });
-        // Reject failed — fall through so the normal reminder is still posted
-        // and the card does not go permanently silent (codex P2).
-        rejectSucceeded = false;
+      }
+      let rejectSucceeded = false;
+      if (stillPending) {
+        const decisionNote = `expired — time-sensitive card aged out (auto-expiry after ${matchedExpiry.maxAgeHours}h)`;
+        try {
+          await paperclip.rejectApproval(approval.id, decisionNote);
+          rejectSucceeded = true;
+          ctx.logger.info("approvals-reminder: auto-expired approval", {
+            approvalId: approval.id,
+            ageHours,
+            maxAgeHours: matchedExpiry.maxAgeHours,
+            titleRegex: matchedExpiry.titleRegex,
+          });
+        } catch (err) {
+          if (err instanceof PaperclipApiError && err.status === 409) {
+            // Already decided (race lost to a human) — human decision stands;
+            // nothing to remind.
+            ctx.logger.info("approvals-reminder: expiry skipped — approval already decided (409)", { approvalId: approval.id });
+            continue;
+          }
+          // 403 = not a board key; log clearly as instructed. Fall through so
+          // the normal reminder is still posted and the card does not go
+          // permanently silent.
+          ctx.logger.warn("approvals-reminder: auto-expiry reject failed (403 = not a board key?)", {
+            approvalId: approval.id,
+            error: String(err),
+          });
+        }
       }
       if (rejectSucceeded) {
+        // Keep the daily digest coherent: drop the expired approval from the
+        // shared PENDING list the same way the button handler does on decide.
+        try {
+          const pendingKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: PENDING_APPROVALS_KEY };
+          const pendingList = ((await ctx.state.get(pendingKey)) as string[] | null) ?? [];
+          await ctx.state.set(pendingKey, pendingList.filter((id) => id !== approval.id));
+        } catch (err) {
+          ctx.logger.warn("approvals-reminder: failed to prune expired approval from pending list", {
+            approvalId: approval.id,
+            error: String(err),
+          });
+        }
         // Expiry reject succeeded; do NOT post a reminder in this sweep.
         continue;
       }
@@ -134,7 +181,9 @@ export async function runApprovalsReminder(
 
     if (ageMs < REMIND_AFTER_MS) continue;
 
-    const lastReminded = reminders[approval.id] ? Date.parse(reminders[approval.id]) : null;
+    // safeParseMs: a corrupted stored timestamp becomes null ("never reminded")
+    // instead of NaN silently bypassing the throttle and spamming every sweep.
+    const lastReminded = safeParseMs(reminders[approval.id]);
     if (lastReminded !== null && nowMs - lastReminded < REMIND_EVERY_MS) continue;
 
     const url = `${config.paperclipApiUrl}/${config.companyPrefix}/approvals/${approval.id}`;
@@ -174,6 +223,10 @@ export async function runApprovalsReminder(
     try {
       const messageId = await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
       reminders[approval.id] = now.toISOString();
+      // Persist per-post (not only at the end of the loop): a crash mid-run
+      // must not forget which approvals were already reminded, or the next run
+      // re-posts every one of them.
+      await ctx.state.set(stateKey, { ...reminders });
       ctx.logger.info("approvals-reminder: re-posted pending approval", {
         approvalId: approval.id,
         destinationChannelId,

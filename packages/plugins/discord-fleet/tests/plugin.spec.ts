@@ -72,7 +72,8 @@ describe("plugin worker", () => {
     // stuck-detector and routine-health throw because the mocked PaperclipClient
     // methods reject immediately (avoids real HTTP calls to localhost:3000).
     await expect(harness.runJob("discord-fleet.digest")).resolves.toBeUndefined();
-    await expect(harness.runJob("discord-fleet.stuck-detector")).rejects.toThrow();
+    // stuck-detector catches all per-category API failures internally (no propagation).
+    await expect(harness.runJob("discord-fleet.stuck-detector")).resolves.toBeUndefined();
     await expect(harness.runJob("discord-fleet.routine-health")).rejects.toThrow();
   });
 });

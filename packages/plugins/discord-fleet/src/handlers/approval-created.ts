@@ -37,13 +37,22 @@ interface ApprovalCreatedPayload {
   description?: unknown;
 }
 
-// Two state keys store the same approvalId list but have different lifetimes —
-// don't collapse them into one. PENDING is wiped daily by jobs/digest.ts when
-// the digest runs; SEEN never clears and is the authoritative dedup record for
-// approval.created handling. Both writes happen at the end of a successful
-// handler invocation.
+// PENDING is a shared list wiped daily by jobs/digest.ts (pre-existing
+// mechanism, kept as-is). Card dedup uses TWO-PHASE PER-APPROVAL MARKERS
+// instead of a shared array:
+//   posting:<id> — in-flight marker written BEFORE the send, with a timestamp.
+//                  A concurrent duplicate delivery sees it fresh and skips; a
+//                  crashed sender leaves it to go stale (POSTING_STALE_MS) so
+//                  the card stays retryable.
+//   posted:<id>  — durable marker written only AFTER Discord confirms the send.
+// Per-approval keys eliminate the shared-array races entirely: no read-modify-
+// write on a common value, no stale-snapshot rollback that could strip other
+// approvals' dedup, no single unbounded array that can outgrow a state-value
+// limit and reset dedup for everything at once.
 export const PENDING_APPROVALS_KEY = "pending-approvals";
-export const SEEN_APPROVALS_KEY = "seen-approvals";
+export const POSTED_MARKER_PREFIX = "approval-posted:";
+export const POSTING_MARKER_PREFIX = "approval-posting:";
+export const POSTING_STALE_MS = 2 * 60 * 1000;
 const CONTENT_CHUNK_MAX = 1900;
 
 // Resolve the reviewable content string from an approval payload.
@@ -105,27 +114,47 @@ export async function handleApprovalCreated(
   const companyConfig = config.companies.find((c) => c.companyId === companyId);
   if (!companyConfig) return;
 
-  const seenKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: SEEN_APPROVALS_KEY };
-  const seenArr = ((await ctx.state.get(seenKey)) as string[] | null) ?? [];
-  const seen = new Set(seenArr);
-  if (seen.has(approvalId)) {
-    ctx.logger.info("approval-created: already posted, skipping", { approvalId });
+  // Fail closed on a missing id: without it the marker keys would collapse to
+  // the bare prefix and every malformed event would dedup against the first.
+  if (!approvalId) {
+    ctx.logger.error("approval-created: missing approvalId — cannot dedup; dropping event", {
+      entityId: event.entityId,
+    });
     return;
   }
 
-  // Write the "posted" marker BEFORE the Discord send so a second concurrent
-  // invocation (duplicate event delivery — observed live 2026-07-02, two events
-  // 500 ms apart, same approvalId, different headerMessageIds) loses the
-  // read-check-write race and exits at the guard above rather than double-posting.
-  //
-  // Residual: the state API has no atomic compare-and-swap primitive, so two
-  // invocations that both pass the `seen.has()` check before EITHER write
-  // (sub-millisecond race on a very cold state store) could still both post.
-  // That window is orders of magnitude smaller than the 500 ms observed in the
-  // live incident (cold-start vs. steady-state scheduling jitter) and is
-  // acceptable without a distributed lock.
-  seen.add(approvalId);
-  await ctx.state.set(seenKey, [...seen]);
+  // Two-phase idempotency guard (duplicate event delivery observed live
+  // 2026-07-02: two approval.created events 500 ms apart → duplicate cards).
+  const postedKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: `${POSTED_MARKER_PREFIX}${approvalId}` };
+  const postingKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: `${POSTING_MARKER_PREFIX}${approvalId}` };
+  if (await ctx.state.get(postedKey)) {
+    ctx.logger.info("approval-created: already posted, skipping", { approvalId });
+    return;
+  }
+  const inFlightRaw = await ctx.state.get(postingKey);
+  const inFlightMs = typeof inFlightRaw === "number" && Number.isFinite(inFlightRaw) ? inFlightRaw : null;
+  const nowMs = Date.now();
+  if (inFlightMs !== null && nowMs - inFlightMs < POSTING_STALE_MS) {
+    // A concurrent duplicate delivery is mid-send. Skip — if IT fails, its
+    // marker goes stale within POSTING_STALE_MS and the reminder sweep (or the
+    // next duplicate delivery) retries. Failed sends are never suppressed
+    // durably, and successful sends are never doubled by the observed race.
+    ctx.logger.info("approval-created: concurrent post in flight, skipping", { approvalId });
+    return;
+  }
+  // Ownership token: the state API has no compare-and-swap, so two deliveries
+  // racing between the get and set could both think they own the send. Write a
+  // unique token, wait a beat, and re-read — if another invocation overwrote it,
+  // IT owns the send and we abort. This closes the read-write race to the width
+  // of a single state write instead of the whole guard-to-send span.
+  const ownershipToken = nowMs + Math.random();
+  await ctx.state.set(postingKey, ownershipToken);
+  await new Promise((r) => setTimeout(r, 150));
+  const confirmed = await ctx.state.get(postingKey);
+  if (confirmed !== ownershipToken) {
+    ctx.logger.info("approval-created: lost posting-ownership race to a concurrent delivery, skipping", { approvalId });
+    return;
+  }
 
   const url = `${companyConfig.paperclipApiUrl}/${companyConfig.companyPrefix}/approvals/${approvalId}`;
   const embed = buildApprovalEmbed({ identifier, approvalId, approvalType, title: approvalTitle, issueUrl: url });
@@ -162,17 +191,23 @@ export async function handleApprovalCreated(
   try {
     headerMessageId = await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
   } catch (err) {
-    // Roll the SEEN marker back so a retried/duplicate delivery can post the
-    // card — otherwise a failed header send stays suppressed by the
-    // idempotency guard until a reminder cycle happens to re-post it.
-    seen.delete(approvalId);
+    // Clear the in-flight marker so a retried/duplicate delivery can post the
+    // card immediately; even if this clear fails, the marker goes stale in
+    // POSTING_STALE_MS. Failed sends are retryable BY CONSTRUCTION — there is
+    // no durable "posted" record until Discord confirms the send below.
     try {
-      await ctx.state.set(seenKey, [...seen]);
+      await ctx.state.set(postingKey, 0);
     } catch {
-      // best-effort rollback; the reminder sweep remains the backstop
+      // stale-marker expiry is the backstop
     }
     throw err;
   }
+  // Durable marker ONLY after Discord confirmed the send (post-then-mark).
+  // Deliberate tradeoff: the marker covers the HEADER card. If content chunks
+  // below fail even after their retry, the card is header-only until the
+  // reminder sweep re-carries the content — at-least-once content delivery,
+  // never a duplicate header card.
+  await ctx.state.set(postedKey, new Date(nowMs).toISOString());
   // Success is logged explicitly so an absent card in Discord can always be
   // distinguished from a posted-then-buried card during incident triage.
   ctx.logger.info("approval-created: card posted", { approvalId, destinationChannelId, headerMessageId });
@@ -221,11 +256,23 @@ export async function handleApprovalCreated(
       try {
         await postToChannel(client, destinationChannelId, truncate(chunk, CONTENT_CHUNK_MAX));
       } catch (err) {
-        ctx.logger.warn("approval-created: content chunk post failed", {
+        // One retry after a short pause — a transient Discord hiccup shouldn't
+        // leave the operator a header-only card until the next reminder cycle.
+        ctx.logger.warn("approval-created: content chunk post failed; retrying once", {
           approvalId,
           destinationChannelId,
           error: String(err),
         });
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          await postToChannel(client, destinationChannelId, truncate(chunk, CONTENT_CHUNK_MAX));
+        } catch (err2) {
+          ctx.logger.error("approval-created: content chunk post failed after retry — card is header-only until a reminder re-post", {
+            approvalId,
+            destinationChannelId,
+            error: String(err2),
+          });
+        }
       }
     }
   }
@@ -273,11 +320,15 @@ export async function handleApprovalCreated(
     }
   }
 
-  const pending = ((await ctx.state.get({
+  const pendingRaw = await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
     stateKey: PENDING_APPROVALS_KEY,
-  })) as string[] | null) ?? [];
+  });
+  // Non-array state (corruption / old-version write) must not throw on push.
+  const pending = Array.isArray(pendingRaw)
+    ? (pendingRaw as unknown[]).filter((x): x is string => typeof x === "string")
+    : [];
   pending.push(approvalId);
   await ctx.state.set({ scopeKind: "company", scopeId: companyId, stateKey: PENDING_APPROVALS_KEY }, pending);
 }
