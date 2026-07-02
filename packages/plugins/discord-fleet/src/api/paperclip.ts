@@ -53,6 +53,7 @@ export interface PaperclipRoutineTrigger {
   enabled?: boolean;
   cronExpression?: string | null;
   timezone?: string | null;
+  nextRunAt?: string | null;
   lastFiredAt?: string | Date | null;
 }
 
