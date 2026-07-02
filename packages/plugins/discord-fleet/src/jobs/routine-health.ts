@@ -1,3 +1,4 @@
+import { parseExpression } from "cron-parser";
 import type { Client } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { DiscordFleetConfig } from "../config/schema.js";
@@ -5,63 +6,15 @@ import type { PaperclipClient, PaperclipRoutine, PaperclipRoutineTrigger } from 
 import { postEmbedToChannel } from "../discord/rest.js";
 import { buildRoutineHealthEmbed } from "../render/embeds.js";
 
-// Parse a cron expression and return the most recent expected fire time before `now`.
-// Supports only the 5-field "minute hour dom month dow" format.
-// Returns null if the schedule cannot be parsed or is not a simple periodic schedule.
+// Return the most recent scheduled occurrence strictly before `now` for the given
+// cron expression in the given IANA timezone.
+// Uses cron-parser (the same library the server's scheduler depends on) so that
+// dow/monthly/step expressions all resolve correctly without hand-rolled math.
+// Returns null if the expression cannot be parsed.
 export function expectedLastFire(cronExpr: string, tz: string, now: Date): Date | null {
   try {
-    const parts = cronExpr.trim().split(/\s+/);
-    if (parts.length !== 5) return null;
-    const [minuteField, hourField] = parts;
-
-    const minute = minuteField === "*" ? 0 : parseInt(minuteField, 10);
-    const hour = hourField === "*" ? null : parseInt(hourField, 10);
-
-    if (isNaN(minute) || (hour !== null && isNaN(hour))) return null;
-
-    // Obtain wall-clock parts in the routine's timezone (they are already in target-TZ time).
-    const formatter = new Intl.DateTimeFormat("en-CA", {
-      timeZone: tz,
-      year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", hour12: false,
-    });
-
-    const todayParts = formatter.formatToParts(now);
-    const get = (type: string) => parseInt(todayParts.find((p) => p.type === type)?.value ?? "0", 10);
-    const year = get("year"); const month = get("month") - 1; const day = get("day");
-    const nowHour = get("hour"); const nowMin = get("minute");
-
-    const fireHour = hour ?? nowHour;
-
-    // Convert the target-TZ wall time (year, month, day, fireHour, minute) to UTC correctly.
-    //
-    // Step 1: naiveUtc — treat the TZ-local wall-clock parts as if they were UTC.
-    const naiveUtc = Date.UTC(year, month, day, fireHour, minute, 0);
-
-    // Step 2: format naiveUtc back in the target TZ to see what the clock reads there.
-    // This reveals the TZ offset at that instant: offsetMs = zonedReading - naiveUtc.
-    const refFormatter = new Intl.DateTimeFormat("en-CA", {
-      timeZone: tz,
-      year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", hour12: false,
-    });
-    const refParts = refFormatter.formatToParts(new Date(naiveUtc));
-    const rget = (type: string) => parseInt(refParts.find((p) => p.type === type)?.value ?? "0", 10);
-    const rYear = rget("year"); const rMonth = rget("month") - 1; const rDay = rget("day");
-    const rHour = rget("hour"); const rMin = rget("minute");
-    // offsetMs = how many ms the TZ is ahead of UTC (positive for UTC+N zones like Tokyo UTC+9)
-    const offsetMs = Date.UTC(rYear, rMonth, rDay, rHour, rMin, 0) - naiveUtc;
-
-    // Step 3: true UTC = naiveUtc (local wall-clock as UTC) minus the TZ offset.
-    // For Tokyo (UTC+9): 07:00 Tokyo - 9h = 22:00 UTC previous day.
-    const todayFireUtc = naiveUtc - offsetMs;
-    const todayFire = new Date(todayFireUtc);
-
-    if (todayFire <= now) {
-      return todayFire;
-    }
-    // Yesterday's fire: subtract 24h
-    return new Date(todayFireUtc - 86_400_000);
+    const interval = parseExpression(cronExpr, { currentDate: now, tz });
+    return interval.prev().toDate();
   } catch {
     return null;
   }

@@ -288,16 +288,10 @@ describe("expectedLastFire — Tokyo TZ on a UTC server", () => {
     expect(result!.getTime()).toBe(Date.UTC(2026, 5, 21, 22, 0, 0));
   });
 
-  it("returns null for an unsupported cron expression (ranges)", () => {
+  it("returns null for an invalid cron expression", () => {
     const now = new Date(Date.UTC(2026, 5, 22, 22, 30, 0));
-    const result = expectedLastFire("*/15 * * * *", "Asia/Tokyo", now);
-    // minute field is not a simple integer — will get NaN → null
-    expect(result).toBeNull();
-  });
-
-  it("returns null for an expression with wrong field count", () => {
-    const now = new Date(Date.UTC(2026, 5, 22, 22, 30, 0));
-    expect(expectedLastFire("0 7 * *", "Asia/Tokyo", now)).toBeNull();
+    // cron-parser throws on out-of-range values — expectedLastFire must catch and return null
+    expect(expectedLastFire("99 99 * * *", "Asia/Tokyo", now)).toBeNull();
   });
 
   it("UTC TZ: daily at 00:00 UTC resolves without offset error", () => {
@@ -306,5 +300,49 @@ describe("expectedLastFire — Tokyo TZ on a UTC server", () => {
     const result = expectedLastFire("0 0 * * *", "UTC", now);
     expect(result).not.toBeNull();
     expect(result!.getTime()).toBe(Date.UTC(2026, 5, 22, 0, 0, 0));
+  });
+});
+
+describe("expectedLastFire — non-daily schedules (P2 regression)", () => {
+  // Monthly cron: "30 6 1 * *" — fires at 06:30 on the 1st of every month.
+  // Mid-month, the previous occurrence is the 1st of the current (or previous) month,
+  // NOT a false-alert "today at 06:30".
+  it("monthly cron mid-month: prev occurrence is the 1st, not today — NO spurious alert", async () => {
+    // now = 2026-06-15 08:00 UTC (mid-June); previous occurrence was 2026-06-01 06:30 UTC
+    const now = new Date(Date.UTC(2026, 5, 15, 8, 0, 0));
+    const result = expectedLastFire("30 6 1 * *", "UTC", now);
+    expect(result).not.toBeNull();
+    // Must be 2026-06-01 06:30 UTC, not 2026-06-15 anything
+    expect(result!.getTime()).toBe(Date.UTC(2026, 5, 1, 6, 30, 0));
+  });
+
+  // Live hinomaru pattern: "0 22 * * 1,4" — Mon+Thu at 22:00.
+  // On an off-day (Wednesday) the prev occurrence is the most recent Mon or Thu.
+  it("dow cron on an off-day (Wednesday): prev occurrence is last matching dow — NO spurious alert", () => {
+    // now = 2026-06-24 10:00 UTC (Wednesday); previous Mon/Thu fire was 2026-06-22 (Mon) 22:00 UTC
+    const now = new Date(Date.UTC(2026, 5, 24, 10, 0, 0));
+    const result = expectedLastFire("0 22 * * 1,4", "UTC", now);
+    expect(result).not.toBeNull();
+    // Monday 2026-06-22 22:00 UTC
+    expect(result!.getTime()).toBe(Date.UTC(2026, 5, 22, 22, 0, 0));
+  });
+
+  // Daily cron genuinely missed: prev occurrence is "today at HH:MM" (before now) or yesterday.
+  it("daily cron at 07:00 UTC — now is 08:00 UTC same day → prev is today 07:00", () => {
+    const now = new Date(Date.UTC(2026, 5, 24, 8, 0, 0));
+    const result = expectedLastFire("0 7 * * *", "UTC", now);
+    expect(result).not.toBeNull();
+    expect(result!.getTime()).toBe(Date.UTC(2026, 5, 24, 7, 0, 0));
+  });
+
+  // Tokyo TZ still resolves dow cron correctly.
+  it("dow cron (Mon+Thu at 22:00) in Asia/Tokyo on an off-day still returns last matching occurrence", () => {
+    // now = 2026-06-24 10:00 UTC = 2026-06-24 19:00 Tokyo (Wednesday).
+    // Previous Mon/Thu (Tokyo time): 2026-06-22 (Mon) 22:00 Tokyo = 2026-06-22 13:00 UTC.
+    const now = new Date(Date.UTC(2026, 5, 24, 10, 0, 0));
+    const result = expectedLastFire("0 22 * * 1,4", "Asia/Tokyo", now);
+    expect(result).not.toBeNull();
+    // Monday 2026-06-22 22:00 Asia/Tokyo = 2026-06-22 13:00 UTC
+    expect(result!.getTime()).toBe(Date.UTC(2026, 5, 22, 13, 0, 0));
   });
 });
