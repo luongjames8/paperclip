@@ -38,6 +38,9 @@ export interface PaperclipApproval {
   createdAt: string;
   payload?: {
     title?: string;
+    proposedComment?: unknown;
+    details?: unknown;
+    description?: unknown;
   } | null;
 }
 
@@ -144,6 +147,25 @@ export class PaperclipClient {
 
   async getPendingApprovals(companyId: string): Promise<PaperclipApproval[]> {
     return this.request<PaperclipApproval[]>(`${this.baseUrl}/api/companies/${companyId}/approvals?status=pending`);
+  }
+
+  async getApprovalById(approvalId: string): Promise<PaperclipApproval | null> {
+    const url = `${this.baseUrl}/api/approvals/${approvalId}`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+    });
+    if (res.status === 404) {
+      return null;
+    }
+    if (res.status >= 400) {
+      throw new Error(`paperclip API error: ${res.status} ${url}`);
+    }
+    const body = (await res.json()) as unknown;
+    if (body && typeof body === "object" && "data" in body) {
+      return (body as { data: PaperclipApproval }).data;
+    }
+    return body as PaperclipApproval;
   }
 
   async getBlockedIssues(companyId: string): Promise<PaperclipIssue[]> {
