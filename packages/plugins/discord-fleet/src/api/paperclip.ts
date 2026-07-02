@@ -163,13 +163,21 @@ export class PaperclipClient {
     return this.paginatedIssues(`${this.baseUrl}/api/companies/${companyId}/issues?status=todo`);
   }
 
-  async getBacklogAndTodoIssues(companyId: string): Promise<PaperclipIssue[]> {
-    // Two separate requests; combine client-side since query doesn't support multi-value status.
-    const [backlog, todo] = await Promise.all([
+  async getOpenIssues(companyId: string): Promise<PaperclipIssue[]> {
+    // Three separate requests; combine client-side since query doesn't support multi-value status.
+    // in_review is included because upstream guidance parks issues awaiting a
+    // request_confirmation response there (server/src/onboarding-assets/ceo/HEARTBEAT.md).
+    const [backlog, todo, inReview] = await Promise.all([
       this.paginatedIssues(`${this.baseUrl}/api/companies/${companyId}/issues?status=backlog`),
       this.paginatedIssues(`${this.baseUrl}/api/companies/${companyId}/issues?status=todo`),
+      this.paginatedIssues(`${this.baseUrl}/api/companies/${companyId}/issues?status=in_review`),
     ]);
-    return [...backlog, ...todo];
+    return [...backlog, ...todo, ...inReview];
+  }
+
+  /** @deprecated Use getOpenIssues — also sweeps in_review. */
+  async getBacklogAndTodoIssues(companyId: string): Promise<PaperclipIssue[]> {
+    return this.getOpenIssues(companyId);
   }
 
   async listIssueInteractions(issueId: string): Promise<PaperclipInteraction[]> {

@@ -80,7 +80,7 @@ export async function runConfirmationSweep(
 
     let issues: PaperclipIssue[] = [];
     try {
-      issues = await paperclip.getBacklogAndTodoIssues(company.companyId);
+      issues = await paperclip.getOpenIssues(company.companyId);
     } catch (err) {
       ctx.logger.warn("confirmation-sweep: failed to fetch issues", { companyId: company.companyId, error: String(err) });
       continue;
@@ -120,9 +120,17 @@ export async function runConfirmationSweep(
           if (lastPosted !== null && now - lastPosted < RETHRESHOLD_MS) continue;
 
           const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
-          // interaction.payload is Record<string,unknown> — guard against non-string detailsMarkdown
+          // interaction.payload is Record<string,unknown> — guard against non-string detailsMarkdown.
+          // Fall back to payload.prompt (string) when detailsMarkdown is absent or empty, as the
+          // interactions schema requires prompt and agents may omit detailsMarkdown.
           const rawDetails = interaction.payload?.detailsMarkdown;
-          const detailsMarkdown = typeof rawDetails === "string" ? rawDetails.trim() : "";
+          const rawPrompt = interaction.payload?.prompt;
+          const detailsMarkdown =
+            typeof rawDetails === "string" && rawDetails.trim()
+              ? rawDetails.trim()
+              : typeof rawPrompt === "string" && rawPrompt.trim()
+                ? rawPrompt.trim()
+                : "";
 
           const imageUrl = detailsMarkdown ? extractFirstImageUrl(detailsMarkdown) : null;
           const bodyText = detailsMarkdown ? stripImageLines(detailsMarkdown) : "";

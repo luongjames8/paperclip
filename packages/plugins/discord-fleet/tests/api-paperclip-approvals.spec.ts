@@ -242,7 +242,7 @@ describe("PaperclipClient.listIssueDocuments", () => {
 });
 
 // CLASS 2 — pagination tests for issue-list endpoints
-describe("PaperclipClient.getBacklogAndTodoIssues — pagination", () => {
+describe("PaperclipClient.getOpenIssues — pagination (backlog + todo + in_review)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -264,15 +264,15 @@ describe("PaperclipClient.getBacklogAndTodoIssues — pagination", () => {
         if (u.includes("offset=0")) return { status: 200, json: async () => page1, text: async () => "" } as any;
         if (u.includes("offset=1000")) return { status: 200, json: async () => page2, text: async () => "" } as any;
       }
-      // todo status — one empty page
-      if (u.includes("status=todo")) {
+      // todo and in_review — one empty page each
+      if (u.includes("status=todo") || u.includes("status=in_review")) {
         return { status: 200, json: async () => [], text: async () => "" } as any;
       }
       return { status: 200, json: async () => [], text: async () => "" } as any;
     });
 
     const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
-    const result = await client.getBacklogAndTodoIssues("c1");
+    const result = await client.getOpenIssues("c1");
 
     // Should have fetched page1 + page2 for backlog = 1003 items
     expect(result.length).toBe(1003);
@@ -294,8 +294,28 @@ describe("PaperclipClient.getBacklogAndTodoIssues — pagination", () => {
     });
 
     const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
-    const result = await client.getBacklogAndTodoIssues("c1");
+    const result = await client.getOpenIssues("c1");
     expect(result.length).toBe(2);
+  });
+
+  it("includes in_review issues alongside backlog and todo", async () => {
+    const harness = createTestHarness({ manifest });
+    const backlogItem = makeIssue("b1");
+    const todoItem = { ...makeIssue("t1"), status: "todo" };
+    const inReviewItem = { ...makeIssue("r1"), status: "in_review" };
+
+    vi.spyOn(harness.ctx.http, "fetch").mockImplementation(async (url) => {
+      const u = String(url);
+      if (u.includes("status=backlog")) return { status: 200, json: async () => [backlogItem], text: async () => "" } as any;
+      if (u.includes("status=todo")) return { status: 200, json: async () => [todoItem], text: async () => "" } as any;
+      if (u.includes("status=in_review")) return { status: 200, json: async () => [inReviewItem], text: async () => "" } as any;
+      return { status: 200, json: async () => [], text: async () => "" } as any;
+    });
+
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    const result = await client.getOpenIssues("c1");
+    expect(result.length).toBe(3);
+    expect(result.map((i) => i.id)).toEqual(expect.arrayContaining(["b1", "t1", "r1"]));
   });
 });
 

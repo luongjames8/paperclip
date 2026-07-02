@@ -21,6 +21,7 @@ vi.mock("../src/api/paperclip.js", () => ({
     getInProgressIssues: vi.fn().mockRejectedValue(new Error("no server in test")),
     getBlockedIssues: vi.fn().mockRejectedValue(new Error("no server in test")),
     getAssignedTodoIssues: vi.fn().mockRejectedValue(new Error("no server in test")),
+    getOpenIssues: vi.fn().mockRejectedValue(new Error("no server in test")),
     getBacklogAndTodoIssues: vi.fn().mockRejectedValue(new Error("no server in test")),
     getApprovalIssues: vi.fn().mockRejectedValue(new Error("no server in test")),
     getPendingApprovals: vi.fn().mockRejectedValue(new Error("no server in test")),
