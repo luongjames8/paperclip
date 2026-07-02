@@ -89,11 +89,13 @@ export async function runApprovalsReminder(
   const expiryRules = fleetConfig.approvalExpiry?.[companyId] ?? [];
 
   for (const approval of pending) {
+    try {
     const createdMs = Date.parse(approval.createdAt);
     if (!Number.isFinite(createdMs)) continue;
     const ageMs = nowMs - createdMs;
     const ageHours = Math.floor(ageMs / 3_600_000);
-    const title = approval.payload?.title ?? "";
+    const titleRaw = approval.payload?.title;
+    const title = typeof titleRaw === "string" ? titleRaw : "";
 
     // CHANGE 2: check auto-expiry rules before posting a reminder.
     const matchedExpiry = expiryRules.find((rule) => {
@@ -190,10 +192,13 @@ export async function runApprovalsReminder(
 
     // CHANGE 1 (reminder path): also post the reviewable content so old blank
     // cards become readable on the next reminder cycle.
+    // approval.payload is typed as { title?: string } | null but runtime shape
+    // is z.record(z.unknown()) — index as unknown to satisfy the string guard.
+    const approvalPayloadUnknown = approval.payload as Record<string, unknown> | null | undefined;
     const reviewableContent = resolveApprovalContent({
-      proposedComment: (approval.payload as any)?.proposedComment,
-      details: (approval.payload as any)?.details,
-      description: (approval.payload as any)?.description,
+      proposedComment: approvalPayloadUnknown?.proposedComment,
+      details: approvalPayloadUnknown?.details,
+      description: approvalPayloadUnknown?.description,
     });
     if (reviewableContent) {
       const chunks = chunkBySection(stripSecrets(reviewableContent));
@@ -208,6 +213,12 @@ export async function runApprovalsReminder(
           });
         }
       }
+    }
+    } catch (err) {
+      ctx.logger.warn("approvals-reminder: unexpected error processing approval; skipping", {
+        approvalId: approval.id,
+        error: String(err),
+      });
     }
   }
 
