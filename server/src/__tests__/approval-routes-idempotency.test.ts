@@ -2,6 +2,10 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const mockAgentService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
   getById: vi.fn(),
@@ -34,6 +38,7 @@ const mockAccessService = vi.hoisted(() => ({
 
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
+    agentService: () => mockAgentService,
     accessService: () => mockAccessService,
     approvalService: () => mockApprovalService,
     heartbeatService: () => mockHeartbeatService,
@@ -127,6 +132,7 @@ describe("approval routes idempotent retries", () => {
     mockApprovalService.resubmit.mockReset();
     mockApprovalService.listComments.mockReset();
     mockApprovalService.addComment.mockReset();
+    mockAgentService.getById.mockReset();
     mockHeartbeatService.wakeup.mockReset();
     mockIssueApprovalService.listIssuesForApproval.mockReset();
     mockIssueApprovalService.linkManyForApproval.mockReset();
@@ -139,6 +145,8 @@ describe("approval routes idempotent retries", () => {
       reason: "allow_test",
       explanation: "Allowed by test mock.",
     });
+    // Default: agent belongs to the same company as the approval.
+    mockAgentService.getById.mockResolvedValue({ id: "agent-42", companyId: "company-1" });
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
     mockLogActivity.mockResolvedValue(undefined);
@@ -434,6 +442,37 @@ describe("approval routes idempotent retries", () => {
       "user-1",
       "Need changes",
     );
+  });
+
+  it("does not wake a cross-company agent on reject", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-10",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-foreign",
+    });
+    mockApprovalService.reject.mockResolvedValue({
+      approval: {
+        id: "approval-10",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: "agent-foreign",
+      },
+      applied: true,
+    });
+    // Agent belongs to a different company — guard must block the wake.
+    mockAgentService.getById.mockResolvedValue({ id: "agent-foreign", companyId: "company-other" });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-10/reject")
+      .send({ decisionNote: "cross-company reject" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it("lets agents create generic issue-linked board approval requests", async () => {
