@@ -135,12 +135,14 @@ describe("runApprovalsReminder — CHANGE 2: auto-expiry", () => {
     expect(rejectFn).not.toHaveBeenCalled();
   });
 
-  it("logs and continues when the reject API call fails (403 / board-key required)", async () => {
+  it("falls through to reminder posting when the reject API call fails (codex P2)", async () => {
     const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
 
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     const rejectFn = vi.fn().mockRejectedValue(new Error("paperclip API reject error: 403"));
+    // Approval is 80h old (exceeds maxAgeHours:72) AND older than REMIND_AFTER_MS (1h)
     const paperclip = makePaperclip(
       [makePendingApproval({ createdAt: new Date(NOW.getTime() - 80 * 3_600_000).toISOString() })],
       rejectFn,
@@ -149,10 +151,16 @@ describe("runApprovalsReminder — CHANGE 2: auto-expiry", () => {
       approvalExpiry: { c1: [{ titleRegex: "Carousel", maxAgeHours: 72 }] },
     });
 
-    // Should not throw — error is caught and logged
+    // Should not throw
     await expect(
       runApprovalsReminder(harness.ctx, "c1", {} as Client, company, fleet, paperclip, NOW),
     ).resolves.toBeUndefined();
+
+    // Reject was attempted
+    expect(rejectFn).toHaveBeenCalledWith("appr-1", expect.stringContaining("auto-expiry after 72h"));
+    // Because reject failed, the reminder card MUST still be posted so the card
+    // does not go permanently silent.
+    expect(postEmbedToChannel).toHaveBeenCalled();
   });
 
   it("does not call reject when no approvalExpiry config is present", async () => {

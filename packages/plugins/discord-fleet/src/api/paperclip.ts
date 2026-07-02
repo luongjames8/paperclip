@@ -78,6 +78,29 @@ export class PaperclipClient {
     return body as T;
   }
 
+  // Page through an issues list endpoint using offset pagination.
+  // The server accepts up to 1000 rows per page (ISSUE_LIST_MAX_LIMIT).
+  // We stop after 2000 total rows and log a warning to avoid runaway fetches.
+  private async paginatedIssues(baseUrl: string): Promise<PaperclipIssue[]> {
+    const PAGE_SIZE = 1000;
+    const MAX_TOTAL = 2000;
+    const separator = baseUrl.includes("?") ? "&" : "?";
+    const all: PaperclipIssue[] = [];
+    let offset = 0;
+    while (true) {
+      const url = `${baseUrl}${separator}limit=${PAGE_SIZE}&offset=${offset}`;
+      const page = await this.request<PaperclipIssue[]>(url);
+      all.push(...page);
+      if (page.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+      if (all.length >= MAX_TOTAL) {
+        this.ctx.logger.warn("discord-fleet: paginatedIssues hit 2000-row cap; some issues may be skipped", { baseUrl });
+        break;
+      }
+    }
+    return all;
+  }
+
   async getInProgressIssues(companyId: string): Promise<PaperclipIssue[]> {
     const url = `${this.baseUrl}/api/companies/${companyId}/issues?status=in_progress`;
     return this.request<PaperclipIssue[]>(url);
@@ -126,13 +149,20 @@ export class PaperclipClient {
   }
 
   async getBlockedIssues(companyId: string): Promise<PaperclipIssue[]> {
-    const url = `${this.baseUrl}/api/companies/${companyId}/issues?status=blocked&limit=200`;
-    return this.request<PaperclipIssue[]>(url);
+    // includeBlockedBy=true causes the server to return a `blockedBy` array on
+    // each issue (objects with at least an `id` field).  We normalise that into
+    // the `blockedByIssueIds` field expected by the stuck-detector so that
+    // issues with real blockers are NOT misclassified as stranded (codex P2).
+    const raw = await this.paginatedIssues(`${this.baseUrl}/api/companies/${companyId}/issues?status=blocked&includeBlockedBy=true`);
+    return raw.map((issue) => {
+      const blockedBy = (issue as unknown as { blockedBy?: Array<{ id: string }> }).blockedBy;
+      if (!Array.isArray(blockedBy)) return issue;
+      return { ...issue, blockedByIssueIds: blockedBy.map((b) => b.id) };
+    });
   }
 
   async getAssignedTodoIssues(companyId: string): Promise<PaperclipIssue[]> {
-    const url = `${this.baseUrl}/api/companies/${companyId}/issues?status=todo&limit=200`;
-    return this.request<PaperclipIssue[]>(url);
+    return this.paginatedIssues(`${this.baseUrl}/api/companies/${companyId}/issues?status=todo`);
   }
 
   async getBacklogAndTodoIssues(companyId: string): Promise<PaperclipIssue[]> {
