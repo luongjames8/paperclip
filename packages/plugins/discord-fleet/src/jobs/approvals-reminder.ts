@@ -92,12 +92,16 @@ export async function runApprovalsReminder(
 
   for (const approval of pending) {
     try {
-    const createdMs = safeParseMs(approval.createdAt);
-    if (createdMs === null) continue;
-    // Clamp future createdAt (clock skew / bogus server value) to age 0: the
-    // approval is treated as just-created — reminded after the normal window,
+    // Age from the LATEST activity, not creation: the request-changes cycle
+    // resubmits the SAME approval row (server refreshes updatedAt, keeps
+    // createdAt) — a card the editor just resubmitted after operator feedback
+    // must not be instantly auto-expired for being "old", nor nagged as stale.
+    const freshMs = safeParseMs(approval.updatedAt) ?? safeParseMs(approval.createdAt);
+    if (freshMs === null) continue;
+    // Clamp future timestamps (clock skew / bogus server value) to age 0: the
+    // approval is treated as just-active — reminded after the normal window,
     // never permanently suppressed and never instantly expired.
-    const ageMs = Math.max(0, nowMs - createdMs);
+    const ageMs = Math.max(0, nowMs - freshMs);
     const ageHours = Math.floor(ageMs / 3_600_000);
     const titleRaw = approval.payload?.title;
     const title = typeof titleRaw === "string" ? titleRaw : "";

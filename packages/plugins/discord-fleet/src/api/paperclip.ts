@@ -36,6 +36,8 @@ export interface PaperclipApproval {
   type: string;
   status: string;
   createdAt: string;
+  // Refreshed by the server on resubmit (request-changes cycle reuses the row).
+  updatedAt?: string;
   payload?: {
     title?: string;
     proposedComment?: unknown;
