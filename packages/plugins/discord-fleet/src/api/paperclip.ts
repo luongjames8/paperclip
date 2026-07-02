@@ -102,14 +102,12 @@ export class PaperclipClient {
   }
 
   async getInProgressIssues(companyId: string): Promise<PaperclipIssue[]> {
-    const url = `${this.baseUrl}/api/companies/${companyId}/issues?status=in_progress`;
-    return this.request<PaperclipIssue[]>(url);
+    return this.paginatedIssues(`${this.baseUrl}/api/companies/${companyId}/issues?status=in_progress`);
   }
 
   async getErrorsLast24h(companyId: string): Promise<PaperclipIssue[]> {
     const since = new Date(Date.now() - 24 * 3600_000).toISOString();
-    const url = `${this.baseUrl}/api/companies/${companyId}/issues?status=blocked&updatedSince=${since}`;
-    return this.request<PaperclipIssue[]>(url);
+    return this.paginatedIssues(`${this.baseUrl}/api/companies/${companyId}/issues?status=blocked&updatedSince=${since}`);
   }
 
   async getRoutines(companyId: string): Promise<PaperclipRoutine[]> {
@@ -168,8 +166,8 @@ export class PaperclipClient {
   async getBacklogAndTodoIssues(companyId: string): Promise<PaperclipIssue[]> {
     // Two separate requests; combine client-side since query doesn't support multi-value status.
     const [backlog, todo] = await Promise.all([
-      this.request<PaperclipIssue[]>(`${this.baseUrl}/api/companies/${companyId}/issues?status=backlog&limit=100`),
-      this.request<PaperclipIssue[]>(`${this.baseUrl}/api/companies/${companyId}/issues?status=todo&limit=100`),
+      this.paginatedIssues(`${this.baseUrl}/api/companies/${companyId}/issues?status=backlog`),
+      this.paginatedIssues(`${this.baseUrl}/api/companies/${companyId}/issues?status=todo`),
     ]);
     return [...backlog, ...todo];
   }

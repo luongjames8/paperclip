@@ -115,11 +115,14 @@ export async function runConfirmationSweep(
         );
 
         for (const interaction of pendingConfirmations) {
+          try {
           const lastPosted = posted[interaction.id] ? Date.parse(posted[interaction.id]) : null;
           if (lastPosted !== null && now - lastPosted < RETHRESHOLD_MS) continue;
 
           const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
-          const detailsMarkdown = (interaction.payload?.detailsMarkdown as string | undefined)?.trim() ?? "";
+          // interaction.payload is Record<string,unknown> — guard against non-string detailsMarkdown
+          const rawDetails = interaction.payload?.detailsMarkdown;
+          const detailsMarkdown = typeof rawDetails === "string" ? rawDetails.trim() : "";
 
           const imageUrl = detailsMarkdown ? extractFirstImageUrl(detailsMarkdown) : null;
           const bodyText = detailsMarkdown ? stripImageLines(detailsMarkdown) : "";
@@ -159,6 +162,14 @@ export async function runConfirmationSweep(
           }
 
           posted[interaction.id] = new Date(now).toISOString();
+          } catch (err) {
+            ctx.logger.warn("confirmation-sweep: unexpected error processing interaction; skipping", {
+              companyId: company.companyId,
+              issueId: issue.id,
+              interactionId: interaction.id,
+              error: String(err),
+            });
+          }
         }
       }
     }

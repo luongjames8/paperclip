@@ -92,6 +92,50 @@ describe("resolveApprovalContent", () => {
     const { resolveApprovalContent } = await import("../src/handlers/approval-created.js");
     expect(resolveApprovalContent({ proposedComment: "  hello  " })).toBe("hello");
   });
+
+  // CLASS 1 — non-string payload fields must never throw
+  it("returns empty string when proposedComment is an object (non-string)", async () => {
+    const { resolveApprovalContent } = await import("../src/handlers/approval-created.js");
+    expect(resolveApprovalContent({ proposedComment: { nested: "value" } as unknown as string })).toBe("");
+  });
+
+  it("returns empty string when proposedComment is a number", async () => {
+    const { resolveApprovalContent } = await import("../src/handlers/approval-created.js");
+    expect(resolveApprovalContent({ proposedComment: 42 as unknown as string })).toBe("");
+  });
+
+  it("returns empty string when proposedComment is null", async () => {
+    const { resolveApprovalContent } = await import("../src/handlers/approval-created.js");
+    expect(resolveApprovalContent({ proposedComment: null as unknown as string })).toBe("");
+  });
+
+  it("falls back to details when proposedComment is non-string, details is a valid string", async () => {
+    const { resolveApprovalContent } = await import("../src/handlers/approval-created.js");
+    expect(resolveApprovalContent({ proposedComment: 42 as unknown as string, details: "details text" })).toBe("details text");
+  });
+
+  it("falls back to description when all prior fields are non-string", async () => {
+    const { resolveApprovalContent } = await import("../src/handlers/approval-created.js");
+    expect(resolveApprovalContent({
+      proposedComment: {} as unknown as string,
+      details: null as unknown as string,
+      description: "desc fallback",
+    })).toBe("desc fallback");
+  });
+
+  it("returns empty string when all fields are non-string (object/null/number)", async () => {
+    const { resolveApprovalContent } = await import("../src/handlers/approval-created.js");
+    expect(resolveApprovalContent({
+      proposedComment: {} as unknown as string,
+      details: 0 as unknown as string,
+      description: null as unknown as string,
+    })).toBe("");
+  });
+
+  it("treats whitespace-only string as empty (falls through to next field)", async () => {
+    const { resolveApprovalContent } = await import("../src/handlers/approval-created.js");
+    expect(resolveApprovalContent({ proposedComment: "   ", details: "actual content" })).toBe("actual content");
+  });
 });
 
 // ── CHANGE 1: content is ALWAYS posted after header ───────────────────────────

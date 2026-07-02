@@ -16,25 +16,25 @@ import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
 import { PaperclipClient } from "../api/paperclip.js";
 
 interface ApprovalCreatedPayload {
-  approvalId?: string;
+  approvalId?: unknown;
   // Canonical type field — set by server/src/routes/approvals.ts:118 as
   // `details: { type: approval.type }`, spread into payload by activity-log.
-  type?: string;
+  type?: unknown;
   // Legacy field name kept as fallback for older emitters / unit tests.
-  approvalType?: string;
+  approvalType?: unknown;
   // Paperclip's `POST /companies/:id/approvals` activity emit carries
   // `issueIds: string[]` (server/src/routes/approvals.ts:118). The singular
   // `issueId` is kept for legacy/test compatibility but should not be the
   // primary lookup key.
-  issueId?: string;
-  issueIds?: string[];
-  identifier?: string;
-  projectId?: string;
-  title?: string;
-  summary?: string;
-  proposedComment?: string;
-  details?: string;
-  description?: string;
+  issueId?: unknown;
+  issueIds?: unknown;
+  identifier?: unknown;
+  projectId?: unknown;
+  title?: unknown;
+  summary?: unknown;
+  proposedComment?: unknown;
+  details?: unknown;
+  description?: unknown;
 }
 
 // Two state keys store the same approvalId list but have different lifetimes —
@@ -47,14 +47,17 @@ export const SEEN_APPROVALS_KEY = "seen-approvals";
 const CONTENT_CHUNK_MAX = 1900;
 
 // Resolve the reviewable content string from an approval payload.
-// Returns the first non-empty string of: proposedComment, details, description.
+// Returns the first non-empty STRING of: proposedComment, details, description.
+// Non-string values (object, number, null) are silently ignored so a malformed
+// card cannot throw during an approvals-reminder sweep.
 // Returns empty string when none are present.
 export function resolveApprovalContent(payload: {
-  proposedComment?: string;
-  details?: string;
-  description?: string;
+  proposedComment?: unknown;
+  details?: unknown;
+  description?: unknown;
 }): string {
-  return payload.proposedComment?.trim() || payload.details?.trim() || payload.description?.trim() || "";
+  const s = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  return s(payload.proposedComment) || s(payload.details) || s(payload.description) || "";
 }
 
 function chunkBySection(text: string): string[] {
@@ -85,16 +88,18 @@ export async function handleApprovalCreated(
 ): Promise<void> {
   const companyId = event.companyId;
   const payload = event.payload as ApprovalCreatedPayload;
-  const candidateIssueIds = payload.issueIds && payload.issueIds.length > 0
-    ? payload.issueIds
-    : payload.issueId
-      ? [payload.issueId]
-      : [];
+  // str(): safely extract a non-empty string from an unknown payload field.
+  const str = (v: unknown): string => (typeof v === "string" && v.trim() ? v.trim() : "");
+  const issueIdsRaw = Array.isArray(payload.issueIds)
+    ? (payload.issueIds as unknown[]).filter((id): id is string => typeof id === "string")
+    : [];
+  const issueIdRaw = str(payload.issueId);
+  const candidateIssueIds = issueIdsRaw.length > 0 ? issueIdsRaw : issueIdRaw ? [issueIdRaw] : [];
   const primaryIssueId = candidateIssueIds[0] ?? "";
-  const approvalId = payload.approvalId ?? event.entityId ?? "";
-  const identifier = payload.identifier ?? (primaryIssueId || approvalId).slice(0, 8);
-  const approvalType = payload.type ?? payload.approvalType ?? "unknown";
-  const approvalTitle = payload.title ?? `Approval ${approvalId.slice(0, 8)}`;
+  const approvalId = str(payload.approvalId) || (event.entityId ?? "");
+  const identifier = str(payload.identifier) || (primaryIssueId || approvalId).slice(0, 8);
+  const approvalType = str(payload.type) || str(payload.approvalType) || "unknown";
+  const approvalTitle = str(payload.title) || `Approval ${approvalId.slice(0, 8)}`;
   const reviewableContent = resolveApprovalContent(payload);
 
   const companyConfig = config.companies.find((c) => c.companyId === companyId);

@@ -263,4 +263,63 @@ describe("runConfirmationSweep — CHANGE 4", () => {
     expect(state["int-1"]).toBeDefined();
     expect(new Date(state["int-1"]).getTime()).toBeGreaterThan(Date.now() - 5000);
   });
+
+  // CLASS 2 — issue-list fetch must paginate
+  it("uses getBacklogAndTodoIssues (paginated helper) to fetch issues", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig({
+      c1: [{ titleRegex: "Carousel", channelId: "ch-carousel" }],
+    });
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction()]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip);
+
+    // getBacklogAndTodoIssues is the paginated entry point — must be called exactly once
+    expect((paperclip.getBacklogAndTodoIssues as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+    expect((paperclip.getBacklogAndTodoIssues as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith("c1");
+  });
+
+  // CLASS 1 — non-string detailsMarkdown must not throw
+  it("handles non-string detailsMarkdown in interaction payload without throwing", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig({
+      c1: [{ titleRegex: "Carousel", channelId: "ch-carousel" }],
+    });
+    // detailsMarkdown is an object, not a string — should not throw
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ payload: { detailsMarkdown: { nested: "object" } } })],
+    );
+
+    await expect(
+      runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip),
+    ).resolves.not.toThrow();
+
+    // embed should still be posted (the body text is just empty)
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles null detailsMarkdown in interaction payload without throwing", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig({
+      c1: [{ titleRegex: "Carousel", channelId: "ch-carousel" }],
+    });
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ payload: { detailsMarkdown: null } })],
+    );
+
+    await expect(
+      runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip),
+    ).resolves.not.toThrow();
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+  });
 });
