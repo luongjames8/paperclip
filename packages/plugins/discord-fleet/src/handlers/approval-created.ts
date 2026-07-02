@@ -16,45 +16,70 @@ import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
 import { PaperclipClient } from "../api/paperclip.js";
 
 interface ApprovalCreatedPayload {
-  approvalId?: string;
+  approvalId?: unknown;
   // Canonical type field — set by server/src/routes/approvals.ts:118 as
   // `details: { type: approval.type }`, spread into payload by activity-log.
-  type?: string;
+  type?: unknown;
   // Legacy field name kept as fallback for older emitters / unit tests.
-  approvalType?: string;
+  approvalType?: unknown;
   // Paperclip's `POST /companies/:id/approvals` activity emit carries
   // `issueIds: string[]` (server/src/routes/approvals.ts:118). The singular
   // `issueId` is kept for legacy/test compatibility but should not be the
   // primary lookup key.
-  issueId?: string;
-  issueIds?: string[];
-  identifier?: string;
-  projectId?: string;
-  title?: string;
-  summary?: string;
-  proposedComment?: string;
+  issueId?: unknown;
+  issueIds?: unknown;
+  identifier?: unknown;
+  projectId?: unknown;
+  title?: unknown;
+  summary?: unknown;
+  proposedComment?: unknown;
+  details?: unknown;
+  description?: unknown;
 }
 
-// Two state keys store the same approvalId list but have different lifetimes —
-// don't collapse them into one. PENDING is wiped daily by jobs/digest.ts when
-// the digest runs; SEEN never clears and is the authoritative dedup record for
-// approval.created handling. Both writes happen at the end of a successful
-// handler invocation.
+// PENDING is a shared list wiped daily by jobs/digest.ts (pre-existing
+// mechanism, kept as-is). Card dedup uses TWO-PHASE PER-APPROVAL MARKERS
+// instead of a shared array:
+//   posting:<id> — in-flight marker written BEFORE the send, with a timestamp.
+//                  A concurrent duplicate delivery sees it fresh and skips; a
+//                  crashed sender leaves it to go stale (POSTING_STALE_MS) so
+//                  the card stays retryable.
+//   posted:<id>  — durable marker written only AFTER Discord confirms the send.
+// Per-approval keys eliminate the shared-array races entirely: no read-modify-
+// write on a common value, no stale-snapshot rollback that could strip other
+// approvals' dedup, no single unbounded array that can outgrow a state-value
+// limit and reset dedup for everything at once.
 export const PENDING_APPROVALS_KEY = "pending-approvals";
-export const SEEN_APPROVALS_KEY = "seen-approvals";
-const THREAD_CHUNK_MAX = 1990;
+export const POSTED_MARKER_PREFIX = "approval-posted:";
+export const POSTING_MARKER_PREFIX = "approval-posting:";
+export const POSTING_STALE_MS = 2 * 60 * 1000;
+const CONTENT_CHUNK_MAX = 1900;
+
+// Resolve the reviewable content string from an approval payload.
+// Returns the first non-empty STRING of: proposedComment, details, description.
+// Non-string values (object, number, null) are silently ignored so a malformed
+// card cannot throw during an approvals-reminder sweep.
+// Returns empty string when none are present.
+export function resolveApprovalContent(payload: {
+  proposedComment?: unknown;
+  details?: unknown;
+  description?: unknown;
+}): string {
+  const s = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  return s(payload.proposedComment) || s(payload.details) || s(payload.description) || "";
+}
 
 function chunkBySection(text: string): string[] {
   const raw = text.split(/(?=^## )/m).filter((s) => s.trim());
   const chunks: string[] = [];
   for (const section of raw) {
-    if (section.length <= THREAD_CHUNK_MAX) {
+    if (section.length <= CONTENT_CHUNK_MAX) {
       chunks.push(section);
     } else {
       let remaining = section;
-      while (remaining.length > THREAD_CHUNK_MAX) {
-        const cut = remaining.lastIndexOf("\n\n", THREAD_CHUNK_MAX);
-        const end = cut > 0 ? cut : THREAD_CHUNK_MAX;
+      while (remaining.length > CONTENT_CHUNK_MAX) {
+        const cut = remaining.lastIndexOf("\n\n", CONTENT_CHUNK_MAX);
+        const end = cut > 0 ? cut : CONTENT_CHUNK_MAX;
         chunks.push(remaining.slice(0, end));
         remaining = remaining.slice(end).trimStart();
       }
@@ -72,26 +97,62 @@ export async function handleApprovalCreated(
 ): Promise<void> {
   const companyId = event.companyId;
   const payload = event.payload as ApprovalCreatedPayload;
-  const candidateIssueIds = payload.issueIds && payload.issueIds.length > 0
-    ? payload.issueIds
-    : payload.issueId
-      ? [payload.issueId]
-      : [];
+  // str(): safely extract a non-empty string from an unknown payload field.
+  const str = (v: unknown): string => (typeof v === "string" && v.trim() ? v.trim() : "");
+  const issueIdsRaw = Array.isArray(payload.issueIds)
+    ? (payload.issueIds as unknown[]).filter((id): id is string => typeof id === "string")
+    : [];
+  const issueIdRaw = str(payload.issueId);
+  const candidateIssueIds = issueIdsRaw.length > 0 ? issueIdsRaw : issueIdRaw ? [issueIdRaw] : [];
   const primaryIssueId = candidateIssueIds[0] ?? "";
-  const approvalId = payload.approvalId ?? event.entityId ?? "";
-  const identifier = payload.identifier ?? (primaryIssueId || approvalId).slice(0, 8);
-  const approvalType = payload.type ?? payload.approvalType ?? "unknown";
-  const approvalTitle = payload.title ?? `Approval ${approvalId.slice(0, 8)}`;
-  const proposedComment = payload.proposedComment ?? "";
+  const approvalId = str(payload.approvalId) || (event.entityId ?? "");
+  const identifier = str(payload.identifier) || (primaryIssueId || approvalId).slice(0, 8);
+  const approvalType = str(payload.type) || str(payload.approvalType) || "unknown";
+  const approvalTitle = str(payload.title) || `Approval ${approvalId.slice(0, 8)}`;
+  const reviewableContent = resolveApprovalContent(payload);
 
   const companyConfig = config.companies.find((c) => c.companyId === companyId);
   if (!companyConfig) return;
 
-  const seenKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: SEEN_APPROVALS_KEY };
-  const seenArr = ((await ctx.state.get(seenKey)) as string[] | null) ?? [];
-  const seen = new Set(seenArr);
-  if (seen.has(approvalId)) {
+  // Fail closed on a missing id: without it the marker keys would collapse to
+  // the bare prefix and every malformed event would dedup against the first.
+  if (!approvalId) {
+    ctx.logger.error("approval-created: missing approvalId — cannot dedup; dropping event", {
+      entityId: event.entityId,
+    });
+    return;
+  }
+
+  // Two-phase idempotency guard (duplicate event delivery observed live
+  // 2026-07-02: two approval.created events 500 ms apart → duplicate cards).
+  const postedKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: `${POSTED_MARKER_PREFIX}${approvalId}` };
+  const postingKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: `${POSTING_MARKER_PREFIX}${approvalId}` };
+  if (await ctx.state.get(postedKey)) {
     ctx.logger.info("approval-created: already posted, skipping", { approvalId });
+    return;
+  }
+  const inFlightRaw = await ctx.state.get(postingKey);
+  const inFlightMs = typeof inFlightRaw === "number" && Number.isFinite(inFlightRaw) ? inFlightRaw : null;
+  const nowMs = Date.now();
+  if (inFlightMs !== null && nowMs - inFlightMs < POSTING_STALE_MS) {
+    // A concurrent duplicate delivery is mid-send. Skip — if IT fails, its
+    // marker goes stale within POSTING_STALE_MS and the reminder sweep (or the
+    // next duplicate delivery) retries. Failed sends are never suppressed
+    // durably, and successful sends are never doubled by the observed race.
+    ctx.logger.info("approval-created: concurrent post in flight, skipping", { approvalId });
+    return;
+  }
+  // Ownership token: the state API has no compare-and-swap, so two deliveries
+  // racing between the get and set could both think they own the send. Write a
+  // unique token, wait a beat, and re-read — if another invocation overwrote it,
+  // IT owns the send and we abort. This closes the read-write race to the width
+  // of a single state write instead of the whole guard-to-send span.
+  const ownershipToken = nowMs + Math.random();
+  await ctx.state.set(postingKey, ownershipToken);
+  await new Promise((r) => setTimeout(r, 150));
+  const confirmed = await ctx.state.get(postingKey);
+  if (confirmed !== ownershipToken) {
+    ctx.logger.info("approval-created: lost posting-ownership race to a concurrent delivery, skipping", { approvalId });
     return;
   }
 
@@ -126,20 +187,107 @@ export async function handleApprovalCreated(
       companyConfig.channels.orphan;
   }
 
-  const headerMessageId = await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
+  let headerMessageId: string;
+  try {
+    headerMessageId = await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
+  } catch (err) {
+    // Clear the in-flight marker so a retried/duplicate delivery can post the
+    // card immediately; even if this clear fails, the marker goes stale in
+    // POSTING_STALE_MS. Failed sends are retryable BY CONSTRUCTION — there is
+    // no durable "posted" record until Discord confirms the send below.
+    try {
+      await ctx.state.set(postingKey, 0);
+    } catch {
+      // stale-marker expiry is the backstop
+    }
+    throw err;
+  }
+  // Durable marker ONLY after Discord confirmed the send (post-then-mark).
+  // Deliberate tradeoff: the marker covers the HEADER card. If content chunks
+  // below fail even after their retry, the card is header-only until the
+  // reminder sweep re-carries the content — at-least-once content delivery,
+  // never a duplicate header card.
+  await ctx.state.set(postedKey, new Date(nowMs).toISOString());
   // Success is logged explicitly so an absent card in Discord can always be
   // distinguished from a posted-then-buried card during incident triage.
   ctx.logger.info("approval-created: card posted", { approvalId, destinationChannelId, headerMessageId });
 
+  // Resolve API key + client once; reused for content fallback fetch and issue docs below.
+  let paperclip: InstanceType<typeof PaperclipClient> | null = null;
+  let apiKey: string | null = null;
+  try {
+    apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
+    paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
+  } catch (err) {
+    ctx.logger.warn("approval-created: failed to resolve API key; content fetch + issue docs unavailable", {
+      approvalId,
+      error: String(err),
+    });
+  }
+
+  // ALWAYS post reviewable content immediately after the header so the operator
+  // sees what they're being asked to approve without having to open Paperclip.
+  // Use the first non-empty string of: proposedComment, details, description.
+  // The approval.created event payload only carries title + proposedComment
+  // (server/src/routes/approvals.ts:134-150). If the approval content lives in
+  // payload.details or payload.description, resolveApprovalContent returns empty
+  // here — fetch the full approval to get the complete payload before posting.
+  let effectiveContent = reviewableContent;
+  if (!effectiveContent && paperclip) {
+    try {
+      const fullApproval = await paperclip.getApprovalById(approvalId);
+      if (fullApproval?.payload) {
+        effectiveContent = resolveApprovalContent(fullApproval.payload);
+        if (effectiveContent) {
+          ctx.logger.info("approval-created: resolved content via full-approval fetch", { approvalId });
+        }
+      }
+    } catch (err) {
+      ctx.logger.warn("approval-created: full-approval fetch failed; posting header-only card", {
+        approvalId,
+        error: String(err),
+      });
+    }
+  }
+
+  if (effectiveContent) {
+    const chunks = chunkBySection(stripSecrets(effectiveContent));
+    for (const chunk of chunks) {
+      try {
+        await postToChannel(client, destinationChannelId, truncate(chunk, CONTENT_CHUNK_MAX));
+      } catch (err) {
+        // One retry after a short pause — a transient Discord hiccup shouldn't
+        // leave the operator a header-only card until the next reminder cycle.
+        ctx.logger.warn("approval-created: content chunk post failed; retrying once", {
+          approvalId,
+          destinationChannelId,
+          error: String(err),
+        });
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          await postToChannel(client, destinationChannelId, truncate(chunk, CONTENT_CHUNK_MAX));
+        } catch (err2) {
+          ctx.logger.error("approval-created: content chunk post failed after retry — card is header-only until a reminder re-post", {
+            approvalId,
+            destinationChannelId,
+            error: String(err2),
+          });
+        }
+      }
+    }
+  }
+
+  // Linked-issue docs (rich embeds from posts/slides documents) are posted as
+  // ADDITIONAL context after the reviewable content. They are independent — a
+  // failure here does not affect the content already posted above.
   let bundle: IssueDocsBundle = { issues: [] };
   try {
-    const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
-    const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
+    if (!paperclip) throw new Error("API client unavailable");
     const issues = await paperclip.getApprovalIssues(approvalId);
     // Promise.allSettled (not Promise.all) — one flaky listIssueDocuments call
     // shouldn't wipe successfully-fetched docs from the other linked issues.
     const settled = await Promise.allSettled(
-      issues.map((i) => paperclip.listIssueDocuments(i.id)),
+      issues.map((i) => paperclip!.listIssueDocuments(i.id)),
     );
     const withDocs = settled.flatMap((res, idx) => {
       if (res.status === "fulfilled") {
@@ -154,53 +302,33 @@ export async function handleApprovalCreated(
     });
     bundle = { issues: withDocs };
   } catch (err) {
-    ctx.logger.warn("approval-created: failed to fetch issue docs, falling back to proposedComment", {
+    ctx.logger.warn("approval-created: failed to fetch issue docs", {
       approvalId,
       error: String(err),
     });
   }
 
   const groups = renderIssueDocs(bundle, approvalId.slice(0, 8));
-  let anyBodyPosted = false;
-  if (groups.length > 0) {
-    for (const group of groups) {
-      try {
-        await postEmbedsToChannel(client, destinationChannelId, group);
-        anyBodyPosted = true;
-      } catch (err) {
-        ctx.logger.warn("approval-created: rich-group post failed", {
-          destinationChannelId,
-          error: String(err),
-        });
-      }
-    }
-  }
-  // Fall back to proposedComment if the rich path produced no successful body posts.
-  // Covers both "no groups at all" (non-content approvals) and "every group failed"
-  // (Discord 400/5xx, invalid image URL, etc.) so operator still gets something
-  // beyond the header card before the approval gets marked SEEN.
-  if (!anyBodyPosted && proposedComment) {
-    const chunks = chunkBySection(stripSecrets(proposedComment));
-    for (const chunk of chunks) {
-      try {
-        await postToChannel(client, destinationChannelId, truncate(chunk, THREAD_CHUNK_MAX));
-      } catch (err) {
-        ctx.logger.warn("approval-created: chunk post failed", {
-          destinationChannelId,
-          error: String(err),
-        });
-      }
+  for (const group of groups) {
+    try {
+      await postEmbedsToChannel(client, destinationChannelId, group);
+    } catch (err) {
+      ctx.logger.warn("approval-created: rich-group post failed", {
+        destinationChannelId,
+        error: String(err),
+      });
     }
   }
 
-  seen.add(approvalId);
-  await ctx.state.set(seenKey, [...seen]);
-
-  const pending = ((await ctx.state.get({
+  const pendingRaw = await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
     stateKey: PENDING_APPROVALS_KEY,
-  })) as string[] | null) ?? [];
+  });
+  // Non-array state (corruption / old-version write) must not throw on push.
+  const pending = Array.isArray(pendingRaw)
+    ? (pendingRaw as unknown[]).filter((x): x is string => typeof x === "string")
+    : [];
   pending.push(approvalId);
   await ctx.state.set({ scopeKind: "company", scopeId: companyId, stateKey: PENDING_APPROVALS_KEY }, pending);
 }
