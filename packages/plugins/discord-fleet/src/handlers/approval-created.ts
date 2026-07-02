@@ -149,11 +149,46 @@ export async function handleApprovalCreated(
   // distinguished from a posted-then-buried card during incident triage.
   ctx.logger.info("approval-created: card posted", { approvalId, destinationChannelId, headerMessageId });
 
+  // Resolve API key + client once; reused for content fallback fetch and issue docs below.
+  let paperclip: InstanceType<typeof PaperclipClient> | null = null;
+  let apiKey: string | null = null;
+  try {
+    apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
+    paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
+  } catch (err) {
+    ctx.logger.warn("approval-created: failed to resolve API key; content fetch + issue docs unavailable", {
+      approvalId,
+      error: String(err),
+    });
+  }
+
   // ALWAYS post reviewable content immediately after the header so the operator
   // sees what they're being asked to approve without having to open Paperclip.
   // Use the first non-empty string of: proposedComment, details, description.
-  if (reviewableContent) {
-    const chunks = chunkBySection(stripSecrets(reviewableContent));
+  // The approval.created event payload only carries title + proposedComment
+  // (server/src/routes/approvals.ts:134-150). If the approval content lives in
+  // payload.details or payload.description, resolveApprovalContent returns empty
+  // here — fetch the full approval to get the complete payload before posting.
+  let effectiveContent = reviewableContent;
+  if (!effectiveContent && paperclip) {
+    try {
+      const fullApproval = await paperclip.getApprovalById(approvalId);
+      if (fullApproval?.payload) {
+        effectiveContent = resolveApprovalContent(fullApproval.payload);
+        if (effectiveContent) {
+          ctx.logger.info("approval-created: resolved content via full-approval fetch", { approvalId });
+        }
+      }
+    } catch (err) {
+      ctx.logger.warn("approval-created: full-approval fetch failed; posting header-only card", {
+        approvalId,
+        error: String(err),
+      });
+    }
+  }
+
+  if (effectiveContent) {
+    const chunks = chunkBySection(stripSecrets(effectiveContent));
     for (const chunk of chunks) {
       try {
         await postToChannel(client, destinationChannelId, truncate(chunk, CONTENT_CHUNK_MAX));
@@ -172,13 +207,12 @@ export async function handleApprovalCreated(
   // failure here does not affect the content already posted above.
   let bundle: IssueDocsBundle = { issues: [] };
   try {
-    const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
-    const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
+    if (!paperclip) throw new Error("API client unavailable");
     const issues = await paperclip.getApprovalIssues(approvalId);
     // Promise.allSettled (not Promise.all) — one flaky listIssueDocuments call
     // shouldn't wipe successfully-fetched docs from the other linked issues.
     const settled = await Promise.allSettled(
-      issues.map((i) => paperclip.listIssueDocuments(i.id)),
+      issues.map((i) => paperclip!.listIssueDocuments(i.id)),
     );
     const withDocs = settled.flatMap((res, idx) => {
       if (res.status === "fulfilled") {

@@ -19,6 +19,7 @@ vi.mock("../src/render/issue-docs.js", () => ({
 
 vi.mock("../src/api/paperclip.js", () => ({
   PaperclipClient: vi.fn().mockImplementation(() => ({
+    getApprovalById: vi.fn().mockResolvedValue(null),
     getApprovalIssues: vi.fn().mockResolvedValue([]),
     listIssueDocuments: vi.fn().mockResolvedValue([]),
   })),
@@ -516,8 +517,9 @@ describe("handleApprovalCreated — rich renderer integration", () => {
     const { PaperclipClient } = await import("../src/api/paperclip.js");
     const { renderIssueDocs } = await import("../src/render/issue-docs.js");
 
-    // Force the client to throw on getApprovalIssues
+    // Force the client to throw on getApprovalIssues (content is in proposedComment so getApprovalById not called)
     (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue(null),
       getApprovalIssues: vi.fn().mockRejectedValue(new Error("boom")),
       listIssueDocuments: vi.fn(),
     }));
@@ -575,5 +577,104 @@ describe("handleApprovalCreated — rich renderer integration", () => {
     expect(postEmbedToChannel).toHaveBeenCalledTimes(1);       // header
     expect(postToChannel).toHaveBeenCalled();                   // CHANGE 1: content always posted
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);      // both rich groups attempted
+  });
+});
+
+// ─── Full-approval fetch fallback (codex P2) ─────────────────────────────────
+//
+// The approval.created activity-log payload only carries title + proposedComment
+// (server/src/routes/approvals.ts:134-150). When approval content is in
+// payload.details or payload.description the initial card is blank.
+// Fix: when resolveApprovalContent over the event payload returns empty, fetch
+// the full approval via GET /api/approvals/:id and retry.
+
+describe("handleApprovalCreated — full-approval fetch fallback", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("event-payload-without-content + fetched-payload-with-details → content chunks posted", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    // Simulate: event carries no content fields (as server emits), but full approval has details.
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        type: "request_board_approval",
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        payload: {
+          title: "Tour content batch week 27",
+          details: "## Section A\nContent from details field.\n\n## Section B\nMore content here.",
+        },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+
+    // Event payload has no proposedComment / details / description (only title + type as server emits).
+    const event = makeApprovalCreatedEvent({
+      approvalId: "appr-001",
+      title: "Tour content batch week 27",
+      type: "request_board_approval",
+      proposedComment: undefined,
+    });
+    await handleApprovalCreated(harness.ctx, event, client, config);
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);   // header posted
+    // Content from fetched details field must be chunked and posted.
+    expect(postToChannel).toHaveBeenCalledWith(
+      client,
+      "o1",
+      expect.stringContaining("Section A"),
+    );
+    expect(postToChannel).toHaveBeenCalledWith(
+      client,
+      "o1",
+      expect.stringContaining("Section B"),
+    );
+  });
+
+  it("fetch failure → header still posts, no content chunks, approval marked SEEN", async () => {
+    const { handleApprovalCreated, SEEN_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    // getApprovalById throws; getApprovalIssues also throws to keep bundle empty.
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockRejectedValue(new Error("network timeout")),
+      getApprovalIssues: vi.fn().mockRejectedValue(new Error("network timeout")),
+      listIssueDocuments: vi.fn(),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+
+    // Event has no content → triggers fallback fetch which then fails.
+    const event = makeApprovalCreatedEvent({
+      approvalId: "appr-nofetch",
+      title: "Approval with fetch error",
+      proposedComment: undefined,
+    });
+    await handleApprovalCreated(harness.ctx, event, client, config);
+
+    // Header must still be posted despite fetch failure.
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+    // No content posted — fetch failed, no fallback available.
+    expect(postToChannel).not.toHaveBeenCalled();
+    // Approval is still marked SEEN so we don't re-post the header on retry.
+    const seen = await harness.ctx.state.get({
+      scopeKind: "company",
+      scopeId: "c1",
+      stateKey: SEEN_APPROVALS_KEY,
+    });
+    expect(seen).toEqual(["appr-nofetch"]);
   });
 });
