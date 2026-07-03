@@ -119,12 +119,26 @@ export async function handleApprovalButton(
     return;
   }
 
-  // Mirror approval-created's append: remove the resolved id from pending
-  // state so /status and the daily digest don't keep showing stale entries
-  // after operators act via the button.
-  await removeFromPending(ctx, company.companyId, parsed.approvalId);
-
+  // FEEDBACK FIRST (live incident 2026-07-03, #409): the card edit is the
+  // operator's ONLY confirmation that the decision landed. It must run before
+  // any bookkeeping — removeFromPending's ctx.state.get throws an
+  // invocation-scope error in the button (gateway-event) context, and running
+  // it first left the card untouched: operators pressed Reject 4x against an
+  // already-rejected approval.
   await renderResolved(interaction, parsed.action);
+
+  // Best-effort bookkeeping: remove the resolved id from pending state so
+  // /status and the daily digest don't keep showing stale entries. A failure
+  // here is self-healing (the reminder sweep rebuilds from getPendingApprovals
+  // next tick) and must NEVER eat the operator's feedback above.
+  try {
+    await removeFromPending(ctx, company.companyId, parsed.approvalId);
+  } catch (err) {
+    ctx.logger.warn("approval-button: pending-state cleanup failed (self-heals on next sweep)", {
+      approvalId: parsed.approvalId,
+      err: String(err),
+    });
+  }
 
   // Reject is terminal in paperclip — no auto-resubmission, no auto-respawn
   // of upstream Creative/Writer issues. Operators have repeatedly assumed
