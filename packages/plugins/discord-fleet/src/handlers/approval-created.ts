@@ -17,6 +17,9 @@ import { PaperclipClient } from "../api/paperclip.js";
 import { postDeliveryFailureFallback } from "./delivery-fallback.js";
 
 interface ApprovalCreatedPayload {
+  // Open-keyed: agents free-type payload field names (live 2026-07-04:
+  // the artifact arrived in payload.note) — the renderer must see them all.
+  [key: string]: unknown;
   approvalId?: unknown;
   // Canonical type field — set by server/src/routes/approvals.ts:118 as
   // `details: { type: approval.type }`, spread into payload by activity-log.
@@ -71,6 +74,7 @@ export function resolveApprovalContent(payload: {
   summary?: unknown;
   recommendedAction?: unknown;
   risks?: unknown;
+  [key: string]: unknown;
 }): string {
   const s = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
   const header: string[] = [];
@@ -79,7 +83,30 @@ export function resolveApprovalContent(payload: {
   const risks = Array.isArray(payload.risks) ? payload.risks.map(s).filter(Boolean) : [];
   if (risks.length) header.push(`**Risks:** ${risks.join("; ")}`);
   const body = s(payload.proposedComment) || s(payload.details) || s(payload.description) || "";
-  return [header.join("\n"), body].filter(Boolean).join("\n\n");
+  // Render-everything backstop (live incident 2026-07-04: an agent shipped the
+  // whole artifact in payload.note — a field NO allowlist reads — and the card
+  // was blank while the content sat in paperclip). Any unknown payload key with
+  // string/string[] content is appended, so an agent's field-name choice can
+  // never blank the card again.
+  // Two exclusion classes: content fields already rendered above, and event/
+  // infrastructure fields (routing + identity — never card content).
+  const KNOWN = new Set([
+    "proposedComment", "details", "description", "summary", "recommendedAction",
+    "risks", "title", "approvalId", "version", "nextActionOnApproval",
+    "type", "approvalType", "issueIds", "issueId", "requestedByAgentId",
+    "status", "companyId", "entityId", "kind", "id", "createdAt", "updatedAt",
+    "identifier", "projectId",
+  ]);
+  const extras: string[] = [];
+  for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+    if (KNOWN.has(k)) continue;
+    if (typeof v === "string" && v.trim()) extras.push(`**${k}:** ${v.trim()}`);
+    else if (Array.isArray(v)) {
+      const items = v.filter((x): x is string => typeof x === "string" && Boolean(x.trim()));
+      if (items.length) extras.push(`**${k}:** ${items.join("; ")}`);
+    }
+  }
+  return [header.join("\n"), body, extras.join("\n")].filter(Boolean).join("\n\n");
 }
 
 function chunkBySection(text: string): string[] {

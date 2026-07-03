@@ -86,6 +86,13 @@ describe("resolveApprovalContent header block (summary/recommendedAction/risks)"
     expect(out).toBe("Only a summary");
   });
 
+  it("renders unknown payload fields — the 2026-07-04 blank-card incident (content in payload.note)", () => {
+    const out = resolveApprovalContent({
+      note: "2026-07-03 — probeclaw online. Relay assembled.",
+    });
+    expect(out).toBe("**note:** 2026-07-03 — probeclaw online. Relay assembled.");
+  });
+
   it("ignores non-string risks entries and non-string header fields", () => {
     const out = resolveApprovalContent({
       summary: 42,
