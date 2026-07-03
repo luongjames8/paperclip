@@ -252,11 +252,43 @@ export async function runApprovalsReminder(
     // approval.payload is typed as { title?: string } | null but runtime shape
     // is z.record(z.unknown()) — index as unknown to satisfy the string guard.
     const approvalPayloadUnknown = approval.payload as Record<string, unknown> | null | undefined;
-    const reviewableContent = resolveApprovalContent({
-      proposedComment: approvalPayloadUnknown?.proposedComment,
-      details: approvalPayloadUnknown?.details,
-      description: approvalPayloadUnknown?.description,
-    });
+    // Full payload, not a hand-picked subset — the resolver's header fields
+    // (summary/recommendedAction/risks) and render-everything backstop only
+    // work if they SEE the payload (2026-07-04: content in payload.note was
+    // invisible here because only three fields were forwarded).
+    let reviewableContent = resolveApprovalContent(approvalPayloadUnknown ?? {});
+    // Issue-digest fallback — same agent-independent floor as approval-created:
+    // the linked issue's comment trail is runtime-guaranteed; compose from it
+    // when the payload yields nothing.
+    if (!reviewableContent) {
+      try {
+        const linked = await paperclip.getApprovalIssues(approval.id);
+        const primary = linked[0];
+        if (primary) {
+          const comments = await paperclip.listIssueComments(primary.id);
+          // Newest-first API default (codex P2) — sort, newest 3, display oldest→newest.
+          const latest = comments
+            .filter((c) => typeof c.body === "string" && c.body.trim())
+            .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")))
+            .slice(-3);
+          const issueUrl = `${config.paperclipApiUrl}/${config.companyPrefix}/issues/${primary.identifier}`;
+          reviewableContent = [
+            `**${primary.identifier ?? primary.id} — ${primary.title ?? "linked issue"}** (${primary.status ?? "?"})`,
+            ...latest.map((c) => truncate((c.body as string).trim(), 900)),
+            `Full history: ${issueUrl}`,
+          ].join("\n\n");
+          ctx.logger.info("approvals-reminder: content derived from linked-issue digest", {
+            approvalId: approval.id,
+            issueId: primary.id,
+          });
+        }
+      } catch (err) {
+        ctx.logger.warn("approvals-reminder: linked-issue digest failed; reminder is header-only", {
+          approvalId: approval.id,
+          error: String(err),
+        });
+      }
+    }
     if (reviewableContent) {
       const chunks = chunkBySection(stripSecrets(reviewableContent));
       for (const chunk of chunks) {
