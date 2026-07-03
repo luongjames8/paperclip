@@ -208,8 +208,12 @@ export class PaperclipClient {
     return body as PaperclipIssue;
   }
 
-  async listIssueComments(issueId: string): Promise<Array<{ id?: string; body?: string; createdAt?: string; authorAgentId?: string | null }>> {
-    return this.requestArray(`${this.baseUrl}/api/issues/${issueId}/comments`);
+  async listIssueComments(issueId: string, opts: { limit?: number } = {}): Promise<Array<{ id?: string; body?: string; createdAt?: string; authorAgentId?: string | null }>> {
+    // Explicit order+limit (codex): the route defaults to order=desc with NO
+    // limit — an unbounded fetch of a long-running issue's whole history just
+    // to build one card. desc + small limit = the newest N, bounded.
+    const limit = opts.limit ?? 10;
+    return this.requestArray(`${this.baseUrl}/api/issues/${issueId}/comments?order=desc&limit=${limit}`);
   }
 
   async listIssueDocuments(issueId: string): Promise<PaperclipDocument[]> {

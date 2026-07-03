@@ -704,6 +704,52 @@ describe("handleApprovalCreated — rich renderer integration", () => {
 // Fix: when resolveApprovalContent over the event payload returns empty, fetch
 // the full approval via GET /api/approvals/:id and retry.
 
+describe("handleApprovalCreated — partial event payload is never trusted as complete", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("event has proposedComment BUT stored approval has summary+risks → card carries the stored payload", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        type: "request_board_approval",
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        payload: {
+          title: "Post week-27 batch",
+          summary: "3 posts ready for IG",
+          recommendedAction: "Approve",
+          risks: ["one venue unverified"],
+          proposedComment: "short note",
+        },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueComments: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+
+    await handleApprovalCreated(
+      harness.ctx as any,
+      makeApprovalCreatedEvent({ approvalId: "appr-001", title: "Post week-27 batch", proposedComment: "short note" }) as any,
+      client as any,
+      config as any,
+    );
+
+    const contentPosts = (postToChannel as any).mock.calls.map((c: any[]) => c[2]).join("\n");
+    expect(contentPosts).toContain("3 posts ready for IG");
+    expect(contentPosts).toContain("one venue unverified");
+  });
+});
+
 describe("handleApprovalCreated — linked-issue digest fallback (agent-independent card)", () => {
   beforeEach(() => {
     vi.clearAllMocks();

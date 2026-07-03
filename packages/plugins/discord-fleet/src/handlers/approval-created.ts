@@ -82,7 +82,7 @@ export function resolveApprovalContent(payload: {
   if (s(payload.recommendedAction)) header.push(`**Recommended:** ${s(payload.recommendedAction)}`);
   const risks = Array.isArray(payload.risks) ? payload.risks.map(s).filter(Boolean) : [];
   if (risks.length) header.push(`**Risks:** ${risks.join("; ")}`);
-  const body = s(payload.proposedComment) || s(payload.details) || s(payload.description) || "";
+  const body = s(payload.proposedComment) || s(payload.details) || s(payload.description) || s(payload.body) || "";
   // Render-everything backstop (live incident 2026-07-04: an agent shipped the
   // whole artifact in payload.note — a field NO allowlist reads — and the card
   // was blank while the content sat in paperclip). Any unknown payload key with
@@ -92,7 +92,7 @@ export function resolveApprovalContent(payload: {
   // infrastructure fields (routing + identity — never card content).
   const KNOWN = new Set([
     "proposedComment", "details", "description", "summary", "recommendedAction",
-    "risks", "title", "approvalId", "version", "nextActionOnApproval",
+    "risks", "title", "approvalId", "version", "nextActionOnApproval", "body",
     "type", "approvalType", "issueIds", "issueId", "requestedByAgentId",
     "status", "companyId", "entityId", "kind", "id", "createdAt", "updatedAt",
     "identifier", "projectId",
@@ -300,18 +300,25 @@ export async function handleApprovalCreated(
   // (server/src/routes/approvals.ts:134-150). If the approval content lives in
   // payload.details or payload.description, resolveApprovalContent returns empty
   // here — fetch the full approval to get the complete payload before posting.
+  // The created EVENT is ALWAYS partial — the server puts only title +
+  // proposedComment on it (routes/approvals.ts), so a non-empty proposedComment
+  // used to suppress the full-approval fetch and silently drop summary/risks/
+  // body/custom fields (codex). Fetch the stored approval whenever the client
+  // is available and let its payload win; the event payload is just the hint
+  // that arrives when the API is down.
   let effectiveContent = reviewableContent;
-  if (!effectiveContent && paperclip) {
+  if (paperclip) {
     try {
       const fullApproval = await paperclip.getApprovalById(approvalId);
       if (fullApproval?.payload) {
-        effectiveContent = resolveApprovalContent(fullApproval.payload);
-        if (effectiveContent) {
-          ctx.logger.info("approval-created: resolved content via full-approval fetch", { approvalId });
+        const full = resolveApprovalContent(fullApproval.payload);
+        if (full) {
+          effectiveContent = full;
+          ctx.logger.info("approval-created: content resolved from the stored approval payload", { approvalId });
         }
       }
     } catch (err) {
-      ctx.logger.warn("approval-created: full-approval fetch failed; posting header-only card", {
+      ctx.logger.warn("approval-created: full-approval fetch failed; using event-payload content", {
         approvalId,
         error: String(err),
       });
