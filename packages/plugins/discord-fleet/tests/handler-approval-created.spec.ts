@@ -728,9 +728,13 @@ describe("handleApprovalCreated — linked-issue digest fallback (agent-independ
       getApprovalIssues: vi.fn().mockResolvedValue([
         { id: "iss-1", identifier: "PRO-9", title: "Relay", status: "in_review" },
       ]),
+      // Real API shape: NEWEST-FIRST (routes/issues.ts:6032-6035). Four
+      // comments — the digest must surface the newest 3 and drop the oldest.
       listIssueComments: vi.fn().mockResolvedValue([
-        { id: "c1", body: "decomposition: created 3 sub-issues", createdAt: "2026-07-04T14:31:00Z" },
-        { id: "c2", body: "assembled note gated on board approval appr-001", createdAt: "2026-07-04T14:36:00Z" },
+        { id: "c4", body: "assembled note gated on board approval appr-001", createdAt: "2026-07-04T14:36:00Z" },
+        { id: "c3", body: "scouts complete, barrier resolved", createdAt: "2026-07-04T14:33:00Z" },
+        { id: "c2", body: "decomposition: created 3 sub-issues", createdAt: "2026-07-04T14:31:00Z" },
+        { id: "c1", body: "OLDEST bootstrap comment — must NOT appear", createdAt: "2026-07-04T14:30:00Z" },
       ]),
       listIssueDocuments: vi.fn().mockResolvedValue([]),
     }));
@@ -750,6 +754,9 @@ describe("handleApprovalCreated — linked-issue digest fallback (agent-independ
     expect(contentPosts).toContain("PRO-9");
     expect(contentPosts).toContain("assembled note gated on board approval");
     expect(contentPosts).toContain("/issues/PRO-9");
+    expect(contentPosts).not.toContain("OLDEST bootstrap comment");
+    // display order: oldest of the newest-3 first, newest last
+    expect(contentPosts.indexOf("decomposition")).toBeLessThan(contentPosts.indexOf("assembled note"));
   });
 });
 

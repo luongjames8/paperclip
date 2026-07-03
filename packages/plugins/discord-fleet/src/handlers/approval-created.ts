@@ -333,8 +333,12 @@ export async function handleApprovalCreated(
       const primary = linked[0];
       if (primary) {
         const comments = await paperclip.listIssueComments(primary.id);
+        // The route returns comments NEWEST-FIRST by default (codex P2:
+        // routes/issues.ts:6032-6035) — sort explicitly, take the newest 3,
+        // display oldest→newest so the thread reads naturally.
         const latest = comments
           .filter((c) => typeof c.body === "string" && c.body.trim())
+          .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")))
           .slice(-3);
         const issueUrl = `${companyConfig.paperclipApiUrl}/${companyConfig.companyPrefix}/issues/${primary.identifier}`;
         const parts = [
