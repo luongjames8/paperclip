@@ -318,6 +318,45 @@ export async function handleApprovalCreated(
     }
   }
 
+  // ISSUE-DIGEST fallback — the agent-independent path (2026-07-04 design:
+  // months of blank cards trace to composition duties assigned to agents, who
+  // fill approval payloads inconsistently. The one record the runtime FORCES
+  // to exist is the linked issue's comment trail — every issue-bound run must
+  // post a comment (execution-policy.md, comment-required backstop). So when
+  // the payload yields nothing, compose the card from the issue itself:
+  // identifier/title/status + the latest comments + the always-correct deep
+  // link. Deterministic code over runtime-guaranteed data; nothing for an
+  // agent to forget.)
+  if (!effectiveContent && paperclip) {
+    try {
+      const linked = await paperclip.getApprovalIssues(approvalId);
+      const primary = linked[0];
+      if (primary) {
+        const comments = await paperclip.listIssueComments(primary.id);
+        const latest = comments
+          .filter((c) => typeof c.body === "string" && c.body.trim())
+          .slice(-3);
+        const issueUrl = `${companyConfig.paperclipApiUrl}/${companyConfig.companyPrefix}/issues/${primary.identifier}`;
+        const parts = [
+          `**${primary.identifier ?? primary.id} — ${primary.title ?? "linked issue"}** (${primary.status ?? "?"})`,
+          ...latest.map((c) => truncate((c.body as string).trim(), 900)),
+          `Full history: ${issueUrl}`,
+        ];
+        effectiveContent = parts.join("\n\n");
+        ctx.logger.info("approval-created: content derived from linked-issue digest", {
+          approvalId,
+          issueId: primary.id,
+          commentCount: latest.length,
+        });
+      }
+    } catch (err) {
+      ctx.logger.warn("approval-created: linked-issue digest failed; posting header-only card", {
+        approvalId,
+        error: String(err),
+      });
+    }
+  }
+
   if (effectiveContent) {
     const chunks = chunkBySection(stripSecrets(effectiveContent));
     for (const chunk of chunks) {

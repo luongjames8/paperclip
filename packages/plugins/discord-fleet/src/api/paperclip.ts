@@ -208,6 +208,10 @@ export class PaperclipClient {
     return body as PaperclipIssue;
   }
 
+  async listIssueComments(issueId: string): Promise<Array<{ id?: string; body?: string; createdAt?: string; authorAgentId?: string | null }>> {
+    return this.requestArray(`${this.baseUrl}/api/issues/${issueId}/comments`);
+  }
+
   async listIssueDocuments(issueId: string): Promise<PaperclipDocument[]> {
     const rows = await this.requestArray<PaperclipDocument>(`${this.baseUrl}/api/issues/${issueId}/documents`);
     if (rows.length >= 100) {

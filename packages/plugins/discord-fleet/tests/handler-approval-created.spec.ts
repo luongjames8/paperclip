@@ -704,6 +704,55 @@ describe("handleApprovalCreated — rich renderer integration", () => {
 // Fix: when resolveApprovalContent over the event payload returns empty, fetch
 // the full approval via GET /api/approvals/:id and retry.
 
+describe("handleApprovalCreated — linked-issue digest fallback (agent-independent card)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("empty payload everywhere + linked issue with comments → digest posted from the issue record", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    // The 2026-07-04 incident shape: agent put content NOWHERE the renderer
+    // reads (or nowhere at all) — but the issue's comment trail exists,
+    // because the runtime forces it.
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        type: "request_board_approval",
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        payload: { title: "Relay" },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([
+        { id: "iss-1", identifier: "PRO-9", title: "Relay", status: "in_review" },
+      ]),
+      listIssueComments: vi.fn().mockResolvedValue([
+        { id: "c1", body: "decomposition: created 3 sub-issues", createdAt: "2026-07-04T14:31:00Z" },
+        { id: "c2", body: "assembled note gated on board approval appr-001", createdAt: "2026-07-04T14:36:00Z" },
+      ]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+
+    await handleApprovalCreated(
+      harness.ctx as any,
+      makeApprovalCreatedEvent({ approvalId: "appr-001", title: "Relay" }) as any,
+      client as any,
+      config as any,
+    );
+
+    const contentPosts = (postToChannel as any).mock.calls.map((c: any[]) => c[2]).join("\n");
+    expect(contentPosts).toContain("PRO-9");
+    expect(contentPosts).toContain("assembled note gated on board approval");
+    expect(contentPosts).toContain("/issues/PRO-9");
+  });
+});
+
 describe("handleApprovalCreated — full-approval fetch fallback", () => {
   beforeEach(() => {
     vi.clearAllMocks();
