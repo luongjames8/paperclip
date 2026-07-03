@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
+import { resolveApprovalContent } from "../src/handlers/approval-created.js";
 import type { DiscordFleetConfig } from "../src/config/schema.js";
 import type { PluginEvent } from "@paperclipai/plugin-sdk";
 import type { Client } from "discord.js";
@@ -66,6 +67,35 @@ function makeEvent(payloadOverrides: Record<string, unknown> = {}): PluginEvent 
 }
 
 // ── resolveApprovalContent unit tests ─────────────────────────────────────────
+
+describe("resolveApprovalContent header block (summary/recommendedAction/risks)", () => {
+  it("prepends summary, recommendedAction and risks ahead of the body", () => {
+    const out = resolveApprovalContent({
+      summary: "Ship the relay note",
+      recommendedAction: "Approve",
+      risks: ["low blast radius", "throwaway claw"],
+      proposedComment: "The assembled note body.",
+    });
+    expect(out).toBe(
+      "Ship the relay note\n**Recommended:** Approve\n**Risks:** low blast radius; throwaway claw\n\nThe assembled note body.",
+    );
+  });
+
+  it("returns header alone when no body field is present (previously empty → blank card)", () => {
+    const out = resolveApprovalContent({ summary: "Only a summary" });
+    expect(out).toBe("Only a summary");
+  });
+
+  it("ignores non-string risks entries and non-string header fields", () => {
+    const out = resolveApprovalContent({
+      summary: 42,
+      recommendedAction: null,
+      risks: [null, "real risk", 7],
+      details: "body",
+    });
+    expect(out).toBe("**Risks:** real risk\n\nbody");
+  });
+});
 
 describe("resolveApprovalContent", () => {
   it("returns proposedComment when present", async () => {

@@ -22,6 +22,7 @@ vi.mock("../src/api/paperclip.js", () => ({
     getApprovalById: vi.fn().mockResolvedValue(null),
     getApprovalIssues: vi.fn().mockResolvedValue([]),
     listIssueDocuments: vi.fn().mockResolvedValue([]),
+    addApprovalComment: vi.fn().mockResolvedValue(undefined),
   })),
 }));
 
@@ -543,6 +544,44 @@ describe("handleApprovalCreated — two-phase marker dedup guard", () => {
     // After successful retry: posted marker is now set as ISO string
     const postedAfterRetry = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTED_MARKER_PREFIX}appr-001` });
     expect(typeof postedAfterRetry).toBe("string");
+  });
+
+  it("header card post failure logs approvalId/companyId/destinationChannelId AND fires the delivery-failure fallback comment (incident live suspect)", async () => {
+    // Verifies the fix for the incident's flagged live suspect: a channel-level
+    // post failure (bad/deleted destinationChannelId, missing permission
+    // override, archived thread, etc.) while the bot IS a guild member used to
+    // terminate with only a plugin-log entry and no operator-visible trace.
+    const { handleApprovalCreated, POSTING_MARKER_PREFIX } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+    const event = makeApprovalCreatedEvent();
+
+    (postEmbedToChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("Unknown Channel"));
+    await expect(handleApprovalCreated(harness.ctx, event, client, config)).rejects.toThrow("Unknown Channel");
+
+    // Silent-failure fix: error log carries approvalId/companyId/destinationChannelId.
+    const errorLog = harness.logs.find((l) => l.message === "approval-created: header card post failed");
+    expect(errorLog?.meta).toMatchObject({
+      approvalId: "appr-001",
+      companyId: "c1",
+      destinationChannelId: "o1",
+    });
+
+    // Fallback comment fires so the operator sees non-delivery in Paperclip
+    // even without plugin-log access.
+    const paperclipInstance = (PaperclipClient as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
+    expect(paperclipInstance.addApprovalComment).toHaveBeenCalledWith(
+      "appr-001",
+      expect.stringContaining("could not deliver this approval to Discord"),
+    );
+
+    // The failed-send rollback (posting marker -> 0) still happens alongside the fallback.
+    const postingAfterFailure = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTING_MARKER_PREFIX}appr-001` });
+    expect(postingAfterFailure).toBe(0);
   });
 });
 

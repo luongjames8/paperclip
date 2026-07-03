@@ -190,6 +190,82 @@ describe("ApprovalPayloadRenderer", () => {
     });
   });
 
+  it("renders payload.body via MarkdownBody even when summary and recommendedAction are absent", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            body: "This content only lives in payload.body.",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Body");
+    expect(container.textContent).toContain("This content only lives in payload.body.");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("does not render an Additional fields section when payload has only known keys", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            title: "A proposal",
+            summary: "Short summary.",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).not.toContain("Additional fields");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("renders an Additional fields section for unrecognized payload keys", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            title: "A proposal",
+            customField: "xyz",
+          }}
+        />,
+      );
+    });
+
+    const trigger = Array.from(container.querySelectorAll<HTMLElement>('[data-slot="collapsible-trigger"]')).find(
+      (el) => el.textContent?.includes("Additional fields"),
+    );
+    expect(trigger).toBeTruthy();
+
+    act(() => {
+      trigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain("customField");
+    expect(container.textContent).toContain("xyz");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("skips details and description when absent or empty", () => {
     const root = createRoot(container);
 

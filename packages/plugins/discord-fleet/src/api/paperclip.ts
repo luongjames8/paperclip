@@ -315,6 +315,22 @@ export class PaperclipClient {
     await this.resolveApproval(approvalId, "request-revision", decisionNote);
   }
 
+  async addApprovalComment(approvalId: string, body: string): Promise<void> {
+    const url = `${this.baseUrl}/api/approvals/${approvalId}/comments`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body }),
+    });
+    if (res.status >= 400) {
+      const text = await res.text().catch(() => "");
+      throw new PaperclipApiError(`paperclip API addApprovalComment error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
+    }
+  }
+
   private async resolveApproval(
     approvalId: string,
     action: "approve" | "reject" | "request-revision",
