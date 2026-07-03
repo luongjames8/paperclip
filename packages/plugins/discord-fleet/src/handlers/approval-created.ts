@@ -14,8 +14,12 @@ import { getThreadForAncestors } from "../routing/thread-state.js";
 import { matchChannelByType } from "../routing/route.js";
 import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
 import { PaperclipClient } from "../api/paperclip.js";
+import { postDeliveryFailureFallback } from "./delivery-fallback.js";
 
 interface ApprovalCreatedPayload {
+  // Open-keyed: agents free-type payload field names (live 2026-07-04:
+  // the artifact arrived in payload.note) — the renderer must see them all.
+  [key: string]: unknown;
   approvalId?: unknown;
   // Canonical type field — set by server/src/routes/approvals.ts:118 as
   // `details: { type: approval.type }`, spread into payload by activity-log.
@@ -56,17 +60,53 @@ export const POSTING_STALE_MS = 2 * 60 * 1000;
 const CONTENT_CHUNK_MAX = 1900;
 
 // Resolve the reviewable content string from an approval payload.
-// Returns the first non-empty STRING of: proposedComment, details, description.
-// Non-string values (object, number, null) are silently ignored so a malformed
-// card cannot throw during an approvals-reminder sweep.
-// Returns empty string when none are present.
+// Composes the operator-facing card text. Header block: summary,
+// recommendedAction, risks — the fields the web UI treats as first-class but
+// which previously never reached Discord at all (live incident 2026-07-03:
+// operator saw a title-only card). Body: first non-empty STRING of
+// proposedComment, details, description. Non-string values (object, number,
+// null) are silently ignored so a malformed card cannot throw during an
+// approvals-reminder sweep. Returns empty string when nothing is present.
 export function resolveApprovalContent(payload: {
   proposedComment?: unknown;
   details?: unknown;
   description?: unknown;
+  summary?: unknown;
+  recommendedAction?: unknown;
+  risks?: unknown;
+  [key: string]: unknown;
 }): string {
   const s = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
-  return s(payload.proposedComment) || s(payload.details) || s(payload.description) || "";
+  const header: string[] = [];
+  if (s(payload.summary)) header.push(s(payload.summary));
+  if (s(payload.recommendedAction)) header.push(`**Recommended:** ${s(payload.recommendedAction)}`);
+  const risks = Array.isArray(payload.risks) ? payload.risks.map(s).filter(Boolean) : [];
+  if (risks.length) header.push(`**Risks:** ${risks.join("; ")}`);
+  const body = s(payload.proposedComment) || s(payload.details) || s(payload.description) || s(payload.body) || "";
+  // Render-everything backstop (live incident 2026-07-04: an agent shipped the
+  // whole artifact in payload.note — a field NO allowlist reads — and the card
+  // was blank while the content sat in paperclip). Any unknown payload key with
+  // string/string[] content is appended, so an agent's field-name choice can
+  // never blank the card again.
+  // Two exclusion classes: content fields already rendered above, and event/
+  // infrastructure fields (routing + identity — never card content).
+  const KNOWN = new Set([
+    "proposedComment", "details", "description", "summary", "recommendedAction",
+    "risks", "title", "approvalId", "version", "nextActionOnApproval", "body",
+    "type", "approvalType", "issueIds", "issueId", "requestedByAgentId",
+    "status", "companyId", "entityId", "kind", "id", "createdAt", "updatedAt",
+    "identifier", "projectId",
+  ]);
+  const extras: string[] = [];
+  for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+    if (KNOWN.has(k)) continue;
+    if (typeof v === "string" && v.trim()) extras.push(`**${k}:** ${v.trim()}`);
+    else if (Array.isArray(v)) {
+      const items = v.filter((x): x is string => typeof x === "string" && Boolean(x.trim()));
+      if (items.length) extras.push(`**${k}:** ${items.join("; ")}`);
+    }
+  }
+  return [header.join("\n"), body, extras.join("\n")].filter(Boolean).join("\n\n");
 }
 
 function chunkBySection(text: string): string[] {
@@ -111,14 +151,23 @@ export async function handleApprovalCreated(
   const approvalTitle = str(payload.title) || `Approval ${approvalId.slice(0, 8)}`;
   const reviewableContent = resolveApprovalContent(payload);
 
+  ctx.logger.info("approval-created: handling", { companyId, approvalId, approvalType, entityId: event.entityId });
+
   const companyConfig = config.companies.find((c) => c.companyId === companyId);
-  if (!companyConfig) return;
+  if (!companyConfig) {
+    ctx.logger.error("approval-created: no companyConfig for companyId — event delivered but this plugin instance has no config for this company", {
+      companyId,
+      approvalId,
+    });
+    return;
+  }
 
   // Fail closed on a missing id: without it the marker keys would collapse to
   // the bare prefix and every malformed event would dedup against the first.
   if (!approvalId) {
     ctx.logger.error("approval-created: missing approvalId — cannot dedup; dropping event", {
       entityId: event.entityId,
+      companyId,
     });
     return;
   }
@@ -128,7 +177,7 @@ export async function handleApprovalCreated(
   const postedKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: `${POSTED_MARKER_PREFIX}${approvalId}` };
   const postingKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: `${POSTING_MARKER_PREFIX}${approvalId}` };
   if (await ctx.state.get(postedKey)) {
-    ctx.logger.info("approval-created: already posted, skipping", { approvalId });
+    ctx.logger.info("approval-created: already posted, skipping", { approvalId, companyId });
     return;
   }
   const inFlightRaw = await ctx.state.get(postingKey);
@@ -139,7 +188,7 @@ export async function handleApprovalCreated(
     // marker goes stale within POSTING_STALE_MS and the reminder sweep (or the
     // next duplicate delivery) retries. Failed sends are never suppressed
     // durably, and successful sends are never doubled by the observed race.
-    ctx.logger.info("approval-created: concurrent post in flight, skipping", { approvalId });
+    ctx.logger.info("approval-created: concurrent post in flight, skipping", { approvalId, companyId });
     return;
   }
   // Ownership token: the state API has no compare-and-swap, so two deliveries
@@ -152,7 +201,7 @@ export async function handleApprovalCreated(
   await new Promise((r) => setTimeout(r, 150));
   const confirmed = await ctx.state.get(postingKey);
   if (confirmed !== ownershipToken) {
-    ctx.logger.info("approval-created: lost posting-ownership race to a concurrent delivery, skipping", { approvalId });
+    ctx.logger.info("approval-created: lost posting-ownership race to a concurrent delivery, skipping", { approvalId, companyId });
     return;
   }
 
@@ -191,6 +240,12 @@ export async function handleApprovalCreated(
   try {
     headerMessageId = await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
   } catch (err) {
+    ctx.logger.error("approval-created: header card post failed", {
+      approvalId,
+      companyId,
+      destinationChannelId,
+      error: String(err),
+    });
     // Clear the in-flight marker so a retried/duplicate delivery can post the
     // card immediately; even if this clear fails, the marker goes stale in
     // POSTING_STALE_MS. Failed sends are retryable BY CONSTRUCTION — there is
@@ -200,6 +255,19 @@ export async function handleApprovalCreated(
     } catch {
       // stale-marker expiry is the backstop
     }
+    // A channel-level failure (bad/deleted destinationChannelId, missing
+    // channel-level permission override, archived thread, etc.) while the bot
+    // IS a guild member would otherwise terminate here with only a plugin-log
+    // entry — no approval comment, so an operator watching Paperclip (not
+    // plugin logs) sees nothing. Fire the same durable-trace fallback
+    // worker.ts's no-connected-client branch uses so this failure mode is
+    // never silent either.
+    await postDeliveryFailureFallback(
+      ctx,
+      config,
+      event,
+      `header card post to Discord channel ${destinationChannelId} failed: ${String(err)}`,
+    );
     throw err;
   }
   // Durable marker ONLY after Discord confirmed the send (post-then-mark).
@@ -232,18 +300,68 @@ export async function handleApprovalCreated(
   // (server/src/routes/approvals.ts:134-150). If the approval content lives in
   // payload.details or payload.description, resolveApprovalContent returns empty
   // here — fetch the full approval to get the complete payload before posting.
+  // The created EVENT is ALWAYS partial — the server puts only title +
+  // proposedComment on it (routes/approvals.ts), so a non-empty proposedComment
+  // used to suppress the full-approval fetch and silently drop summary/risks/
+  // body/custom fields (codex). Fetch the stored approval whenever the client
+  // is available and let its payload win; the event payload is just the hint
+  // that arrives when the API is down.
   let effectiveContent = reviewableContent;
-  if (!effectiveContent && paperclip) {
+  if (paperclip) {
     try {
       const fullApproval = await paperclip.getApprovalById(approvalId);
       if (fullApproval?.payload) {
-        effectiveContent = resolveApprovalContent(fullApproval.payload);
-        if (effectiveContent) {
-          ctx.logger.info("approval-created: resolved content via full-approval fetch", { approvalId });
+        const full = resolveApprovalContent(fullApproval.payload);
+        if (full) {
+          effectiveContent = full;
+          ctx.logger.info("approval-created: content resolved from the stored approval payload", { approvalId });
         }
       }
     } catch (err) {
-      ctx.logger.warn("approval-created: full-approval fetch failed; posting header-only card", {
+      ctx.logger.warn("approval-created: full-approval fetch failed; using event-payload content", {
+        approvalId,
+        error: String(err),
+      });
+    }
+  }
+
+  // ISSUE-DIGEST fallback — the agent-independent path (2026-07-04 design:
+  // months of blank cards trace to composition duties assigned to agents, who
+  // fill approval payloads inconsistently. The one record the runtime FORCES
+  // to exist is the linked issue's comment trail — every issue-bound run must
+  // post a comment (execution-policy.md, comment-required backstop). So when
+  // the payload yields nothing, compose the card from the issue itself:
+  // identifier/title/status + the latest comments + the always-correct deep
+  // link. Deterministic code over runtime-guaranteed data; nothing for an
+  // agent to forget.)
+  if (!effectiveContent && paperclip) {
+    try {
+      const linked = await paperclip.getApprovalIssues(approvalId);
+      const primary = linked[0];
+      if (primary) {
+        const comments = await paperclip.listIssueComments(primary.id);
+        // The route returns comments NEWEST-FIRST by default (codex P2:
+        // routes/issues.ts:6032-6035) — sort explicitly, take the newest 3,
+        // display oldest→newest so the thread reads naturally.
+        const latest = comments
+          .filter((c) => typeof c.body === "string" && c.body.trim())
+          .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")))
+          .slice(-3);
+        const issueUrl = `${companyConfig.paperclipApiUrl}/${companyConfig.companyPrefix}/issues/${primary.identifier}`;
+        const parts = [
+          `**${primary.identifier ?? primary.id} — ${primary.title ?? "linked issue"}** (${primary.status ?? "?"})`,
+          ...latest.map((c) => truncate((c.body as string).trim(), 900)),
+          `Full history: ${issueUrl}`,
+        ];
+        effectiveContent = parts.join("\n\n");
+        ctx.logger.info("approval-created: content derived from linked-issue digest", {
+          approvalId,
+          issueId: primary.id,
+          commentCount: latest.length,
+        });
+      }
+    } catch (err) {
+      ctx.logger.warn("approval-created: linked-issue digest failed; posting header-only card", {
         approvalId,
         error: String(err),
       });

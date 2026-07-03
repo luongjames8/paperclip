@@ -1,6 +1,7 @@
-import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck } from "lucide-react";
+import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, ChevronRight } from "lucide-react";
 import { formatCents } from "../lib/utils";
 import { MarkdownBody } from "./MarkdownBody";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "./ui/collapsible";
 
 export const typeLabel: Record<string, string> = {
   hire_agent: "Hire Agent",
@@ -182,6 +183,10 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
     typeof payload.description === "string" && payload.description.trim().length > 0
       ? payload.description.trim()
       : null;
+  const body =
+    typeof payload.body === "string" && payload.body.trim().length > 0
+      ? payload.body.trim()
+      : null;
   // Suppress description if it duplicates details, proposedComment, or summary.
   const showDescription =
     description !== null &&
@@ -191,6 +196,21 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
   // Suppress details if it duplicates proposedComment or summary.
   const showDetails =
     details !== null && details !== proposedComment && details !== summary;
+  // Suppress body if it duplicates proposedComment, summary, details, or description.
+  const showBody =
+    body !== null &&
+    body !== proposedComment &&
+    body !== summary &&
+    body !== details &&
+    body !== description;
+
+  const KNOWN_BOARD_APPROVAL_KEYS = new Set([
+    "title", "summary", "recommendedAction", "nextActionOnApproval",
+    "risks", "proposedComment", "details", "description", "body",
+  ]);
+  const extraEntries = Object.entries(payload).filter(
+    ([key, value]) => !KNOWN_BOARD_APPROVAL_KEYS.has(key) && value !== undefined,
+  );
 
   return (
     <div className="mt-4 space-y-3.5 text-sm">
@@ -243,6 +263,12 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
           </pre>
         </div>
       )}
+      {showBody && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Body</p>
+          <MarkdownBody className="text-sm">{body}</MarkdownBody>
+        </div>
+      )}
       {showDetails && (
         <div className="space-y-1.5">
           <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Details</p>
@@ -254,6 +280,19 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
           <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Description</p>
           <MarkdownBody className="text-sm">{description}</MarkdownBody>
         </div>
+      )}
+      {extraEntries.length > 0 && (
+        <Collapsible>
+          <CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors group">
+            <ChevronRight className="h-3 w-3 transition-transform group-data-[state=open]:rotate-90" />
+            Additional fields
+          </CollapsibleTrigger>
+          <CollapsibleContent className="pt-2">
+            <pre className="max-h-48 overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-muted-foreground whitespace-pre-wrap">
+              {JSON.stringify(Object.fromEntries(extraEntries), null, 2)}
+            </pre>
+          </CollapsibleContent>
+        </Collapsible>
       )}
     </div>
   );

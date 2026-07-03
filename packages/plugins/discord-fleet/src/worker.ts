@@ -8,6 +8,7 @@ import { handleIssueCreated } from "./handlers/issue-created.js";
 import { handleIssueUpdated } from "./handlers/issue-updated.js";
 import { handleApprovalCreated } from "./handlers/approval-created.js";
 import { handleApprovalButton, handleApprovalRevisionModal } from "./handlers/approval-button.js";
+import { postDeliveryFailureFallback } from "./handlers/delivery-fallback.js";
 import { runDigest } from "./jobs/digest.js";
 import { runStuckDetector } from "./jobs/stuck-detector.js";
 import { runRoutineHealth } from "./jobs/routine-health.js";
@@ -17,7 +18,7 @@ import { handleStatusCommand } from "./slash/status.js";
 import { PaperclipClient } from "./api/paperclip.js";
 import { CoalesceBuffer } from "./util/coalesce.js";
 import type { Client } from "discord.js";
-import type { PluginContext } from "@paperclipai/plugin-sdk";
+import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 
 // Module-level state shared across handlers.
 //
@@ -242,6 +243,54 @@ async function buildClientMaps(
   return { newByToken, byCompanyId, tokenByCompanyId, tokensToDestroy };
 }
 
+// The approvals-reminder sweep (below) can't post cards for a company with no
+// connected Discord client — but a PENDING approval whose original
+// approval.created delivery silently failed for some OTHER reason (event-bus
+// delivery miss, a client that later dropped, etc.) is only ever re-surfaced
+// by this sweep. Without this, the sweep's skip left ZERO durable trace every
+// tick, forever — only a plugin-log line an operator watching Paperclip (not
+// logs) never sees. The Paperclip API factory needs no Discord client, so
+// fetch the company's actual pending approvals and fire the same
+// fallback-comment path the approval.created no-client branch uses, for each
+// one. postDeliveryFailureFallback owns per-approval dedup (its own durable
+// marker in delivery-fallback.ts), so re-running this every sweep tick posts
+// each pending approval's comment exactly once, not once per tick.
+async function notifyPendingApprovalsUndeliverable(
+  ctx: PluginContext,
+  cfg: DiscordFleetConfig,
+  companyId: string,
+  factory: (companyId: string) => Promise<PaperclipClient>,
+): Promise<void> {
+  let pending;
+  try {
+    const paperclip = await factory(companyId);
+    pending = await paperclip.getPendingApprovals(companyId);
+  } catch (err) {
+    ctx.logger.warn("discord-fleet: approvals-reminder no-client fallback — failed to list pending approvals", {
+      companyId,
+      error: String(err),
+    });
+    return;
+  }
+  for (const approval of pending) {
+    const event: PluginEvent = {
+      eventId: `no-client-fallback:${approval.id}`,
+      eventType: "approval.created",
+      occurredAt: new Date().toISOString(),
+      companyId,
+      entityId: approval.id,
+      entityType: "approval",
+      payload: { approvalId: approval.id },
+    };
+    await postDeliveryFailureFallback(
+      ctx,
+      cfg,
+      event,
+      "no Discord client connected for this company (bot not in guild, or connect failed)",
+    );
+  }
+}
+
 function bindEventHandlers(
   ctx: PluginContext,
   config: DiscordFleetConfig,
@@ -259,7 +308,14 @@ function bindEventHandlers(
     }),
     ctx.events.on("approval.created", async (event) => {
       const client = getClientForCompany(event.companyId);
-      if (!client) return;
+      if (!client) {
+        ctx.logger.error("discord-fleet: approval.created received for company with no connected client; dropping", {
+          companyId: event.companyId,
+          approvalId: (event.payload as { approvalId?: unknown })?.approvalId ?? event.entityId,
+        });
+        await postDeliveryFailureFallback(ctx, config, event, "no Discord client connected for this company (bot not in guild, or connect failed)");
+        return;
+      }
       await handleApprovalCreated(ctx, event, client, config);
     }),
   ];
@@ -376,7 +432,13 @@ const plugin = definePlugin({
       const clients = clientByCompanyId;
       for (const company of cfg.companies) {
         const client = clients.get(company.companyId);
-        if (!client) continue;
+        if (!client) {
+          ctx.logger.warn("discord-fleet: approvals-reminder sweep skipping company — no connected client", {
+            companyId: company.companyId,
+          });
+          await notifyPendingApprovalsUndeliverable(ctx, cfg, company.companyId, factory);
+          continue;
+        }
         const paperclip = await factory(company.companyId);
         await runApprovalsReminder(ctx, company.companyId, client, company, cfg, paperclip);
       }

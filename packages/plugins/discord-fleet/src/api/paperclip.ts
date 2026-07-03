@@ -208,6 +208,14 @@ export class PaperclipClient {
     return body as PaperclipIssue;
   }
 
+  async listIssueComments(issueId: string, opts: { limit?: number } = {}): Promise<Array<{ id?: string; body?: string; createdAt?: string; authorAgentId?: string | null }>> {
+    // Explicit order+limit (codex): the route defaults to order=desc with NO
+    // limit — an unbounded fetch of a long-running issue's whole history just
+    // to build one card. desc + small limit = the newest N, bounded.
+    const limit = opts.limit ?? 10;
+    return this.requestArray(`${this.baseUrl}/api/issues/${issueId}/comments?order=desc&limit=${limit}`);
+  }
+
   async listIssueDocuments(issueId: string): Promise<PaperclipDocument[]> {
     const rows = await this.requestArray<PaperclipDocument>(`${this.baseUrl}/api/issues/${issueId}/documents`);
     if (rows.length >= 100) {
@@ -313,6 +321,22 @@ export class PaperclipClient {
 
   async requestRevisionApproval(approvalId: string, decisionNote?: string): Promise<void> {
     await this.resolveApproval(approvalId, "request-revision", decisionNote);
+  }
+
+  async addApprovalComment(approvalId: string, body: string): Promise<void> {
+    const url = `${this.baseUrl}/api/approvals/${approvalId}/comments`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body }),
+    });
+    if (res.status >= 400) {
+      const text = await res.text().catch(() => "");
+      throw new PaperclipApiError(`paperclip API addApprovalComment error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
+    }
   }
 
   private async resolveApproval(

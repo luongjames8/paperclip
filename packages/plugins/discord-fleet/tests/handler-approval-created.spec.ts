@@ -22,6 +22,7 @@ vi.mock("../src/api/paperclip.js", () => ({
     getApprovalById: vi.fn().mockResolvedValue(null),
     getApprovalIssues: vi.fn().mockResolvedValue([]),
     listIssueDocuments: vi.fn().mockResolvedValue([]),
+    addApprovalComment: vi.fn().mockResolvedValue(undefined),
   })),
 }));
 
@@ -544,6 +545,44 @@ describe("handleApprovalCreated — two-phase marker dedup guard", () => {
     const postedAfterRetry = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTED_MARKER_PREFIX}appr-001` });
     expect(typeof postedAfterRetry).toBe("string");
   });
+
+  it("header card post failure logs approvalId/companyId/destinationChannelId AND fires the delivery-failure fallback comment (incident live suspect)", async () => {
+    // Verifies the fix for the incident's flagged live suspect: a channel-level
+    // post failure (bad/deleted destinationChannelId, missing permission
+    // override, archived thread, etc.) while the bot IS a guild member used to
+    // terminate with only a plugin-log entry and no operator-visible trace.
+    const { handleApprovalCreated, POSTING_MARKER_PREFIX } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+    const event = makeApprovalCreatedEvent();
+
+    (postEmbedToChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("Unknown Channel"));
+    await expect(handleApprovalCreated(harness.ctx, event, client, config)).rejects.toThrow("Unknown Channel");
+
+    // Silent-failure fix: error log carries approvalId/companyId/destinationChannelId.
+    const errorLog = harness.logs.find((l) => l.message === "approval-created: header card post failed");
+    expect(errorLog?.meta).toMatchObject({
+      approvalId: "appr-001",
+      companyId: "c1",
+      destinationChannelId: "o1",
+    });
+
+    // Fallback comment fires so the operator sees non-delivery in Paperclip
+    // even without plugin-log access.
+    const paperclipInstance = (PaperclipClient as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
+    expect(paperclipInstance.addApprovalComment).toHaveBeenCalledWith(
+      "appr-001",
+      expect.stringContaining("could not deliver this approval to Discord"),
+    );
+
+    // The failed-send rollback (posting marker -> 0) still happens alongside the fallback.
+    const postingAfterFailure = await harness.ctx.state.get({ scopeKind: "company", scopeId: "c1", stateKey: `${POSTING_MARKER_PREFIX}appr-001` });
+    expect(postingAfterFailure).toBe(0);
+  });
 });
 
 // ─── Rich renderer integration ───────────────────────────────────────────────
@@ -664,6 +703,108 @@ describe("handleApprovalCreated — rich renderer integration", () => {
 // payload.details or payload.description the initial card is blank.
 // Fix: when resolveApprovalContent over the event payload returns empty, fetch
 // the full approval via GET /api/approvals/:id and retry.
+
+describe("handleApprovalCreated — partial event payload is never trusted as complete", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("event has proposedComment BUT stored approval has summary+risks → card carries the stored payload", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        type: "request_board_approval",
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        payload: {
+          title: "Post week-27 batch",
+          summary: "3 posts ready for IG",
+          recommendedAction: "Approve",
+          risks: ["one venue unverified"],
+          proposedComment: "short note",
+        },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueComments: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+
+    await handleApprovalCreated(
+      harness.ctx as any,
+      makeApprovalCreatedEvent({ approvalId: "appr-001", title: "Post week-27 batch", proposedComment: "short note" }) as any,
+      client as any,
+      config as any,
+    );
+
+    const contentPosts = (postToChannel as any).mock.calls.map((c: any[]) => c[2]).join("\n");
+    expect(contentPosts).toContain("3 posts ready for IG");
+    expect(contentPosts).toContain("one venue unverified");
+  });
+});
+
+describe("handleApprovalCreated — linked-issue digest fallback (agent-independent card)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("empty payload everywhere + linked issue with comments → digest posted from the issue record", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    // The 2026-07-04 incident shape: agent put content NOWHERE the renderer
+    // reads (or nowhere at all) — but the issue's comment trail exists,
+    // because the runtime forces it.
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        type: "request_board_approval",
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        payload: { title: "Relay" },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([
+        { id: "iss-1", identifier: "PRO-9", title: "Relay", status: "in_review" },
+      ]),
+      // Real API shape: NEWEST-FIRST (routes/issues.ts:6032-6035). Four
+      // comments — the digest must surface the newest 3 and drop the oldest.
+      listIssueComments: vi.fn().mockResolvedValue([
+        { id: "c4", body: "assembled note gated on board approval appr-001", createdAt: "2026-07-04T14:36:00Z" },
+        { id: "c3", body: "scouts complete, barrier resolved", createdAt: "2026-07-04T14:33:00Z" },
+        { id: "c2", body: "decomposition: created 3 sub-issues", createdAt: "2026-07-04T14:31:00Z" },
+        { id: "c1", body: "OLDEST bootstrap comment — must NOT appear", createdAt: "2026-07-04T14:30:00Z" },
+      ]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+
+    await handleApprovalCreated(
+      harness.ctx as any,
+      makeApprovalCreatedEvent({ approvalId: "appr-001", title: "Relay" }) as any,
+      client as any,
+      config as any,
+    );
+
+    const contentPosts = (postToChannel as any).mock.calls.map((c: any[]) => c[2]).join("\n");
+    expect(contentPosts).toContain("PRO-9");
+    expect(contentPosts).toContain("assembled note gated on board approval");
+    expect(contentPosts).toContain("/issues/PRO-9");
+    expect(contentPosts).not.toContain("OLDEST bootstrap comment");
+    // display order: oldest of the newest-3 first, newest last
+    expect(contentPosts.indexOf("decomposition")).toBeLessThan(contentPosts.indexOf("assembled note"));
+  });
+});
 
 describe("handleApprovalCreated — full-approval fetch fallback", () => {
   beforeEach(() => {
