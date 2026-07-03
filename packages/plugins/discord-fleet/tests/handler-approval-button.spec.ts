@@ -194,6 +194,30 @@ describe("handleApprovalButton — reject happy path", () => {
 // worker. Non-10062 errors from deferUpdate must still rethrow so unexpected
 // failures aren't silently swallowed.
 
+describe("handleApprovalButton — feedback-first ordering (#409)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("card is edited (renderResolved) even when pending-state bookkeeping throws a scope error", async () => {
+    const { handleApprovalButton } = await import("../src/handlers/approval-button.js");
+    const harness = createTestHarness({ manifest });
+    // Reproduce the live 2026-07-03 failure: ctx.state.get rejects with the
+    // invocation-scope JsonRpcCallError in the gateway-event context.
+    (harness.ctx.state.get as any) = vi.fn().mockRejectedValue(
+      new Error('Plugin "x" is not allowed to perform "state.get": the worker referenced a missing, expired, or unknown invocation scope'),
+    );
+    const interaction = makeButtonInteraction("approval-reject:appr-9");
+
+    await handleApprovalButton(harness.ctx as any, interaction, makeConfig());
+
+    // The decision reached paperclip AND the operator got visual confirmation.
+    expect(interaction.editReply).toHaveBeenCalled();
+    const embeds = (interaction.editReply as any).mock.calls[0][0].embeds;
+    expect(JSON.stringify(embeds)).toContain("Rejected");
+  });
+});
+
 describe("handleApprovalButton — deferUpdate failure handling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
