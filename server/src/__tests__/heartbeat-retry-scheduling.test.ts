@@ -1398,7 +1398,17 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     );
   });
 
-  it.each(["openclaw_gateway_wait_error", "openclaw_gateway_wait_timeout"] as const)(
+  it.each([
+    "openclaw_gateway_wait_error",
+    "openclaw_gateway_wait_timeout",
+    // 2026-07-05 incident codes — the ones that actually persist for gateway
+    // transients ("timeout" is the run-finalizer's timed_out override; the
+    // other two are connection-level / restart-kill classes):
+    "timeout",
+    "openclaw_gateway_timeout",
+    "openclaw_gateway_request_failed",
+    "process_lost",
+  ] as const)(
     "classifies openclaw_gateway %s as transient and schedules a bounded retry",
     async (errorCode) => {
       const companyId = randomUUID();

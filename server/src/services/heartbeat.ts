@@ -314,6 +314,25 @@ const TRANSIENT_UPSTREAM_ERROR_CODES: ReadonlySet<string> = new Set([
   "claude_transient_upstream",
   "openclaw_gateway_wait_error",
   "openclaw_gateway_wait_timeout",
+  // Live incident 2026-07-05 (hinomaru, 3 agents stranded in one night): the
+  // codes that actually PERSIST for gateway transients were missing from this
+  // set, so the strands sailed past it into terminal status=error:
+  //   - "timeout": the run-finalizer overrides the adapter's errorCode for
+  //     every timed_out outcome (heartbeat.ts runErrorCode ternary), so the
+  //     adapter-specific "openclaw_gateway_timeout" never reaches the DB.
+  //   - "openclaw_gateway_request_failed": connection-level failures
+  //     (ECONNREFUSED / ws 1012 service restart / "gateway starting") — the
+  //     canonical cron-deploy-restart victim class.
+  //   - "process_lost": server restarted mid-run.
+  // All are safe here BECAUSE this family is the BOUNDED scheduled retry
+  // (4 attempts: 2m/10m/30m/2h + jitter), never a blind unbounded re-run.
+  // Deliberately excluded: openclaw_gateway_pairing_required (config problem —
+  // retrying cannot fix it) and openclaw_gateway_agent_error (the agent's own
+  // reported failure — needs its content read, not a resubmit).
+  "timeout",
+  "openclaw_gateway_timeout",
+  "openclaw_gateway_request_failed",
+  "process_lost",
 ]);
 
 function readHeartbeatRunErrorFamily(
