@@ -1449,6 +1449,39 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     },
   );
 
+  it("does NOT classify a bare timeout as transient for a non-gateway adapter (codex P2: HTTP replay hazard)", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date(2026, 6, 6, 10, 0, 0);
+
+    await seedRetryFixture({
+      runId,
+      companyId,
+      agentId,
+      now,
+      errorCode: "timeout",
+      status: "timed_out",
+      adapterType: "claude_local",
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(runId, {
+      now,
+      random: () => 0.5,
+    });
+
+    if (scheduled.outcome === "scheduled") {
+      const retryRun = await db
+        .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, scheduled.run.id))
+        .then((rows) => rows[0] ?? null);
+      expect(
+        (retryRun?.contextSnapshot as Record<string, unknown> | null)?.errorFamily,
+      ).not.toBe("transient_upstream");
+    }
+  });
+
   it("schedules a bounded retry for a TIMED_OUT gateway run (finalizer gate includes timed_out — 2026-07-05 strand class)", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

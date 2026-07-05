@@ -329,20 +329,37 @@ const TRANSIENT_UPSTREAM_ERROR_CODES: ReadonlySet<string> = new Set([
   // Deliberately excluded: openclaw_gateway_pairing_required (config problem —
   // retrying cannot fix it) and openclaw_gateway_agent_error (the agent's own
   // reported failure — needs its content read, not a resubmit).
-  "timeout",
   "openclaw_gateway_timeout",
   "openclaw_gateway_request_failed",
+]);
+
+// Bare codes that are NOT self-scoping: the finalizer stamps "timeout" on every
+// timed_out outcome regardless of adapter, and "process_lost" is heartbeat-level.
+// Auto-reissuing a timed-out HTTP adapter call would replay a request the remote
+// may already have processed (codex P2) — so these classify as transient ONLY
+// for openclaw_gateway runs, the incident class this targets. Gateway heartbeat
+// re-runs are safe: agents re-enter via issue checkout, which 409s duplicates.
+const GATEWAY_ONLY_TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "timeout",
   "process_lost",
 ]);
 
 function readHeartbeatRunErrorFamily(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  adapterType?: string | null,
 ) {
   const resultJson = parseObject(run.resultJson);
   const persistedFamily = readNonEmptyString(resultJson.errorFamily);
   if (persistedFamily) return persistedFamily;
 
   if (run.errorCode && TRANSIENT_UPSTREAM_ERROR_CODES.has(run.errorCode)) {
+    return "transient_upstream";
+  }
+  if (
+    run.errorCode &&
+    adapterType === "openclaw_gateway" &&
+    GATEWAY_ONLY_TRANSIENT_ERROR_CODES.has(run.errorCode)
+  ) {
     return "transient_upstream";
   }
   return null;
@@ -370,8 +387,9 @@ function readTransientRetryNotBeforeFromRun(run: Pick<typeof heartbeatRuns.$infe
 
 function readTransientRecoveryContractFromRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  adapterType?: string | null,
 ) {
-  return readHeartbeatRunErrorFamily(run) === "transient_upstream"
+  return readHeartbeatRunErrorFamily(run, adapterType) === "transient_upstream"
     ? {
         errorFamily: "transient_upstream" as const,
         retryNotBefore: readTransientRetryNotBeforeFromRun(run),
@@ -6145,7 +6163,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         : null;
     const transientRecovery =
       retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
-        ? readTransientRecoveryContractFromRun(run)
+        ? readTransientRecoveryContractFromRun(run, agent.adapterType)
         : null;
     const codexTransientFallbackMode =
       agent.adapterType === "codex_local" && transientRecovery
@@ -9378,7 +9396,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           // synthetic failed rows could retry. Membership in the transient
           // family is still decided solely by readTransientRecoveryContractFromRun.
           (outcome === "failed" || outcome === "timed_out") &&
-          readTransientRecoveryContractFromRun(livenessRun)
+          readTransientRecoveryContractFromRun(livenessRun, agent.adapterType)
         ) {
           await scheduleBoundedRetryForRun(livenessRun, agent);
         }
