@@ -72,6 +72,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     retryNotBefore?: string | null;
     scheduledRetryAttempt?: number;
     resultJson?: Record<string, unknown> | null;
+    status?: "failed" | "timed_out";
     adapterType?: "codex_local" | "claude_local" | "openclaw_gateway";
     agentName?: string;
   }) {
@@ -112,7 +113,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       companyId: input.companyId,
       agentId: input.agentId,
       invocationSource: "assignment",
-      status: "failed",
+      status: input.status ?? "failed",
       error: "upstream overload",
       errorCode: input.errorCode,
       finishedAt: input.now,
@@ -1447,6 +1448,42 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       );
     },
   );
+
+  it("schedules a bounded retry for a TIMED_OUT gateway run (finalizer gate includes timed_out — 2026-07-05 strand class)", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date(2026, 6, 5, 10, 0, 0);
+
+    // The real persisted shape of tonight's strands: status timed_out,
+    // errorCode "timeout" (the finalizer's override), no errorFamily.
+    await seedRetryFixture({
+      runId,
+      companyId,
+      agentId,
+      now,
+      errorCode: "timeout",
+      status: "timed_out",
+      adapterType: "openclaw_gateway",
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(runId, {
+      now,
+      random: () => 0.5,
+    });
+
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+
+    const retryRun = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scheduled.run.id))
+      .then((rows) => rows[0] ?? null);
+    expect((retryRun?.contextSnapshot as Record<string, unknown> | null)?.errorFamily).toBe(
+      "transient_upstream",
+    );
+  });
 
   it("schedules bounded retries for claude_transient_upstream and honors its retry-not-before hint", async () => {
     const companyId = randomUUID();

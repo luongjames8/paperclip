@@ -9370,7 +9370,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               },
             });
           }
-        } else if (outcome === "failed" && readTransientRecoveryContractFromRun(livenessRun)) {
+        } else if (
+          // timed_out joins failed here (codex on the 2026-07-05 strand fix):
+          // gateway agent.wait timeouts persist as outcome "timed_out" with
+          // errorCode "timeout" — gating transient recovery on failed-only left
+          // every real timed-out run stranded in terminal error while only
+          // synthetic failed rows could retry. Membership in the transient
+          // family is still decided solely by readTransientRecoveryContractFromRun.
+          (outcome === "failed" || outcome === "timed_out") &&
+          readTransientRecoveryContractFromRun(livenessRun)
+        ) {
           await scheduleBoundedRetryForRun(livenessRun, agent);
         }
         const issueCommentPolicyResult = await finalizeIssueCommentPolicy(livenessRun, agent);
