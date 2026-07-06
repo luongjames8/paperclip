@@ -372,16 +372,52 @@ const TRANSIENT_UPSTREAM_ERROR_CODES: ReadonlySet<string> = new Set([
   "claude_transient_upstream",
   "openclaw_gateway_wait_error",
   "openclaw_gateway_wait_timeout",
+  // Live incident 2026-07-05 (hinomaru, 3 agents stranded in one night): the
+  // codes that actually PERSIST for gateway transients were missing from this
+  // set, so the strands sailed past it into terminal status=error:
+  //   - "timeout": the run-finalizer overrides the adapter's errorCode for
+  //     every timed_out outcome (heartbeat.ts runErrorCode ternary), so the
+  //     adapter-specific "openclaw_gateway_timeout" never reaches the DB.
+  //   - "openclaw_gateway_request_failed": connection-level failures
+  //     (ECONNREFUSED / ws 1012 service restart / "gateway starting") — the
+  //     canonical cron-deploy-restart victim class.
+  //   - "process_lost": server restarted mid-run.
+  // All are safe here BECAUSE this family is the BOUNDED scheduled retry
+  // (4 attempts: 2m/10m/30m/2h + jitter), never a blind unbounded re-run.
+  // Deliberately excluded: openclaw_gateway_pairing_required (config problem —
+  // retrying cannot fix it) and openclaw_gateway_agent_error (the agent's own
+  // reported failure — needs its content read, not a resubmit).
+  "openclaw_gateway_timeout",
+  "openclaw_gateway_request_failed",
+]);
+
+// Bare codes that are NOT self-scoping: the finalizer stamps "timeout" on every
+// timed_out outcome regardless of adapter, and "process_lost" is heartbeat-level.
+// Auto-reissuing a timed-out HTTP adapter call would replay a request the remote
+// may already have processed (codex P2) — so these classify as transient ONLY
+// for openclaw_gateway runs, the incident class this targets. Gateway heartbeat
+// re-runs are safe: agents re-enter via issue checkout, which 409s duplicates.
+const GATEWAY_ONLY_TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "timeout",
+  "process_lost",
 ]);
 
 function readHeartbeatRunErrorFamily(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  adapterType?: string | null,
 ) {
   const resultJson = parseObject(run.resultJson);
   const persistedFamily = readNonEmptyString(resultJson.errorFamily);
   if (persistedFamily) return persistedFamily;
 
   if (run.errorCode && TRANSIENT_UPSTREAM_ERROR_CODES.has(run.errorCode)) {
+    return "transient_upstream";
+  }
+  if (
+    run.errorCode &&
+    adapterType === "openclaw_gateway" &&
+    GATEWAY_ONLY_TRANSIENT_ERROR_CODES.has(run.errorCode)
+  ) {
     return "transient_upstream";
   }
   return null;
@@ -409,8 +445,9 @@ function readTransientRetryNotBeforeFromRun(run: Pick<typeof heartbeatRuns.$infe
 
 function readTransientRecoveryContractFromRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  adapterType?: string | null,
 ) {
-  return readHeartbeatRunErrorFamily(run) === "transient_upstream"
+  return readHeartbeatRunErrorFamily(run, adapterType) === "transient_upstream"
     ? {
         errorFamily: "transient_upstream" as const,
         retryNotBefore: readTransientRetryNotBeforeFromRun(run),
@@ -8171,7 +8208,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         : null;
     const transientRecovery =
       retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
-        ? readTransientRecoveryContractFromRun(run)
+        ? readTransientRecoveryContractFromRun(run, agent.adapterType)
         : null;
     const codexTransientFallbackMode =
       agent.adapterType === "codex_local" && transientRecovery
@@ -9805,6 +9842,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now);
         }
       } else {
+        // Reaped runs never pass through the adapter-finalization gate that
+        // consults the transient classifier — without this, a gateway run
+        // lost to a server restart terminated with no retry even though
+        // process_lost classifies as transient for openclaw_gateway (codex
+        // P2 on the 2026-07-05 strand fix). Local-child adapters keep their
+        // dedicated one-shot enqueueProcessLossRetry path above.
+        const agent = await getAgent(run.agentId);
+        if (agent && readTransientRecoveryContractFromRun(finalizedRun, agent.adapterType)) {
+          await scheduleBoundedRetryForRun(finalizedRun, agent);
+        }
         await releaseIssueExecutionAndPromote(finalizedRun);
       }
 
@@ -12017,7 +12064,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               },
             });
           }
-        } else if (outcome === "failed" && readTransientRecoveryContractFromRun(livenessRun)) {
+        } else if (
+          // timed_out joins failed here (codex on the 2026-07-05 strand fix):
+          // gateway agent.wait timeouts persist as outcome "timed_out" with
+          // errorCode "timeout" — gating transient recovery on failed-only left
+          // every real timed-out run stranded in terminal error while only
+          // synthetic failed rows could retry. Membership in the transient
+          // family is still decided solely by readTransientRecoveryContractFromRun.
+          (outcome === "failed" || outcome === "timed_out") &&
+          readTransientRecoveryContractFromRun(livenessRun, agent.adapterType)
+        ) {
           await scheduleBoundedRetryForRun(livenessRun, agent);
         }
         const issueCommentPolicyResult = await finalizeIssueCommentPolicy(livenessRun, agent);

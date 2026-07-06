@@ -288,7 +288,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-recovery-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+    // embedded initdb takes >50s under I/O contention; 20s flaked on loaded machines
+  }, 120_000);
 
   afterEach(async () => {
     vi.clearAllMocks();
@@ -1291,6 +1292,38 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     );
     // Terminal run cleanup releases the checkout lock so future checkout 409s only mean a live owner exists.
     expect(checkoutReleasedIssue?.checkoutRunId).toBeNull();
+  });
+
+  it("schedules a BOUNDED retry when a reaped run belongs to an openclaw_gateway agent (server-restart strand class)", async () => {
+    const { agentId, runId } = await seedRunFixture({
+      agentStatus: "idle",
+      adapterType: "openclaw_gateway",
+      // gateway runs track no local pid/pgid — the local-child one-shot
+      // retry branch must NOT fire; the transient classifier route must.
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+    expect(result.runIds).toEqual([runId]);
+
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    const failedRun = runs.find((row) => row.id === runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("process_lost");
+
+    // the bounded transient retry (scheduled_retry), not the local-child
+    // one-shot (which would carry processLossRetryCount=1)
+    const retryRuns = runs.filter((row) => row.id !== runId);
+    expect(retryRuns).toHaveLength(1);
+    const retryRun = retryRuns[0];
+    expect(retryRun?.status).toBe("scheduled_retry");
+    expect(
+      (retryRun?.contextSnapshot as Record<string, unknown> | null)?.errorFamily,
+    ).toBe("transient_upstream");
   });
 
   it("releases active environment leases when an orphaned run is reaped", async () => {
