@@ -7606,6 +7606,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now);
         }
       } else {
+        // Reaped runs never pass through the adapter-finalization gate that
+        // consults the transient classifier — without this, a gateway run
+        // lost to a server restart terminated with no retry even though
+        // process_lost classifies as transient for openclaw_gateway (codex
+        // P2 on the 2026-07-05 strand fix). Local-child adapters keep their
+        // dedicated one-shot enqueueProcessLossRetry path above.
+        const agent = await getAgent(run.agentId);
+        if (agent && readTransientRecoveryContractFromRun(finalizedRun, agent.adapterType)) {
+          await scheduleBoundedRetryForRun(finalizedRun, agent);
+        }
         await releaseIssueExecutionAndPromote(finalizedRun);
       }
 
