@@ -72,6 +72,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     retryNotBefore?: string | null;
     scheduledRetryAttempt?: number;
     resultJson?: Record<string, unknown> | null;
+    status?: "failed" | "timed_out";
     adapterType?: "codex_local" | "claude_local" | "openclaw_gateway";
     agentName?: string;
   }) {
@@ -112,7 +113,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       companyId: input.companyId,
       agentId: input.agentId,
       invocationSource: "assignment",
-      status: "failed",
+      status: input.status ?? "failed",
       error: "upstream overload",
       errorCode: input.errorCode,
       finishedAt: input.now,
@@ -1398,7 +1399,17 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     );
   });
 
-  it.each(["openclaw_gateway_wait_error", "openclaw_gateway_wait_timeout"] as const)(
+  it.each([
+    "openclaw_gateway_wait_error",
+    "openclaw_gateway_wait_timeout",
+    // 2026-07-05 incident codes — the ones that actually persist for gateway
+    // transients ("timeout" is the run-finalizer's timed_out override; the
+    // other two are connection-level / restart-kill classes):
+    "timeout",
+    "openclaw_gateway_timeout",
+    "openclaw_gateway_request_failed",
+    "process_lost",
+  ] as const)(
     "classifies openclaw_gateway %s as transient and schedules a bounded retry",
     async (errorCode) => {
       const companyId = randomUUID();
@@ -1437,6 +1448,75 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       );
     },
   );
+
+  it("does NOT classify a bare timeout as transient for a non-gateway adapter (codex P2: HTTP replay hazard)", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date(2026, 6, 6, 10, 0, 0);
+
+    await seedRetryFixture({
+      runId,
+      companyId,
+      agentId,
+      now,
+      errorCode: "timeout",
+      status: "timed_out",
+      adapterType: "claude_local",
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(runId, {
+      now,
+      random: () => 0.5,
+    });
+
+    if (scheduled.outcome === "scheduled") {
+      const retryRun = await db
+        .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, scheduled.run.id))
+        .then((rows) => rows[0] ?? null);
+      expect(
+        (retryRun?.contextSnapshot as Record<string, unknown> | null)?.errorFamily,
+      ).not.toBe("transient_upstream");
+    }
+  });
+
+  it("schedules a bounded retry for a TIMED_OUT gateway run (finalizer gate includes timed_out — 2026-07-05 strand class)", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date(2026, 6, 5, 10, 0, 0);
+
+    // The real persisted shape of tonight's strands: status timed_out,
+    // errorCode "timeout" (the finalizer's override), no errorFamily.
+    await seedRetryFixture({
+      runId,
+      companyId,
+      agentId,
+      now,
+      errorCode: "timeout",
+      status: "timed_out",
+      adapterType: "openclaw_gateway",
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(runId, {
+      now,
+      random: () => 0.5,
+    });
+
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+
+    const retryRun = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scheduled.run.id))
+      .then((rows) => rows[0] ?? null);
+    expect((retryRun?.contextSnapshot as Record<string, unknown> | null)?.errorFamily).toBe(
+      "transient_upstream",
+    );
+  });
 
   it("schedules bounded retries for claude_transient_upstream and honors its retry-not-before hint", async () => {
     const companyId = randomUUID();
