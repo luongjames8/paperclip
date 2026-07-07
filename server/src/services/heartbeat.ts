@@ -360,6 +360,23 @@ function readTransientRecoveryContractFromRun(
     : null;
 }
 
+// The finalize-time gate for the bounded transient retry. Exported so tests can
+// pin the REAL production predicate against production-shaped runs: timed_out
+// finalization rewrites errorCode to generic "timeout", so a timed_out run only
+// qualifies via adapter-persisted resultJson.errorFamily (e.g. openclaw-gateway
+// agent.wait timeouts). Testing the classifier with a raw
+// "openclaw_gateway_wait_timeout" errorCode alone exercises a state finalize
+// never persists — that gap is how this gate shipped dead for timeouts.
+export function shouldScheduleTransientBoundedRetryForOutcome(
+  outcome: RunSessionOutcome,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+) {
+  return (
+    (outcome === "failed" || outcome === "timed_out") &&
+    readTransientRecoveryContractFromRun(run) !== null
+  );
+}
+
 function mergeAdapterRecoveryMetadata(input: {
   resultJson: Record<string, unknown> | null | undefined;
   errorFamily?: string | null;
@@ -9351,7 +9368,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               },
             });
           }
-        } else if (outcome === "failed" && readTransientRecoveryContractFromRun(livenessRun)) {
+        } else if (shouldScheduleTransientBoundedRetryForOutcome(outcome, livenessRun)) {
+          // Covers timed_out runs too: without this arm their ONLY follow-up is
+          // the status_only missing-comment retry, which is banned from
+          // deliverable writes — drafted work strands and the issue black-holes
+          // (GH #427 / fleet HIN-2253, HIN-2156).
           await scheduleBoundedRetryForRun(livenessRun, agent);
         }
         const issueCommentPolicyResult = await finalizeIssueCommentPolicy(livenessRun, agent);

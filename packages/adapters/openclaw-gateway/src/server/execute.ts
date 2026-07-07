@@ -1365,6 +1365,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             timedOut: true,
             errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
             errorCode: "openclaw_gateway_wait_timeout",
+            // The gateway run usually keeps executing after the wait gives up
+            // (often finishing its work in the shared session), so a bounded
+            // normal-model retry can pick the work back up. Finalize persists
+            // this into resultJson.errorFamily; without it, timed_out runs
+            // rewrite errorCode to generic "timeout" and the transient
+            // classifier can never engage.
+            errorFamily: "transient_upstream",
             resultJson: waitPayload,
           };
         }
@@ -1516,6 +1523,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           : pairingRequired
             ? "openclaw_gateway_pairing_required"
             : "openclaw_gateway_request_failed",
+        // RPC-level timeouts (including agent.wait) are the same failure class
+        // as the payload-status timeout above: the gateway run may still be
+        // executing. Mark them transient so finalize routes them into the
+        // bounded normal-model retry instead of the status_only dead end.
+        ...(timedOut ? { errorFamily: "transient_upstream" as const } : {}),
         resultJson: asRecord(latestResultPayload),
       };
     } finally {

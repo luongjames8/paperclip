@@ -23,6 +23,7 @@ import {
   MAX_TURN_CONTINUATION_RETRY_REASON,
   MAX_TURN_CONTINUATION_WAKE_REASON,
   heartbeatService,
+  shouldScheduleTransientBoundedRetryForOutcome,
 } from "../services/heartbeat.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -74,6 +75,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     resultJson?: Record<string, unknown> | null;
     adapterType?: "codex_local" | "claude_local" | "openclaw_gateway";
     agentName?: string;
+    status?: "failed" | "timed_out";
   }) {
     const adapterType = input.adapterType ?? "codex_local";
     const agentName =
@@ -112,7 +114,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       companyId: input.companyId,
       agentId: input.agentId,
       invocationSource: "assignment",
-      status: "failed",
+      status: input.status ?? "failed",
       error: "upstream overload",
       errorCode: input.errorCode,
       finishedAt: input.now,
@@ -1438,6 +1440,47 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     },
   );
 
+  it("schedules a bounded retry for a timed_out openclaw_gateway run in its production-persisted shape", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date(2026, 6, 7, 10, 0, 0);
+
+    // Production shape for an agent.wait timeout: finalize sets
+    // status=timed_out and rewrites errorCode to generic "timeout"; the ONLY
+    // transient marker that survives is the adapter-persisted
+    // resultJson.errorFamily. The it.each above seeds the raw adapter
+    // errorCode, a state finalize never persists for timeouts — which is how
+    // the timeout half of the classifier shipped dead (GH #427).
+    await seedRetryFixture({
+      runId,
+      companyId,
+      agentId,
+      now,
+      status: "timed_out",
+      errorCode: "timeout",
+      errorFamily: "transient_upstream",
+      adapterType: "openclaw_gateway",
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(runId, {
+      now,
+      random: () => 0.5,
+    });
+
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+
+    const retryRun = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scheduled.run.id))
+      .then((rows) => rows[0] ?? null);
+    expect((retryRun?.contextSnapshot as Record<string, unknown> | null)?.errorFamily).toBe(
+      "transient_upstream",
+    );
+  });
+
   it("schedules bounded retries for claude_transient_upstream and honors its retry-not-before hint", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -1491,4 +1534,45 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       retryNotBefore.toISOString(),
     );
   });
+});
+
+describe("shouldScheduleTransientBoundedRetryForOutcome (finalize gate)", () => {
+  it("admits a timed_out run whose adapter persisted errorFamily transient_upstream (gateway agent.wait timeout, production shape)", () => {
+    expect(
+      shouldScheduleTransientBoundedRetryForOutcome("timed_out", {
+        errorCode: "timeout",
+        resultJson: { errorFamily: "transient_upstream" },
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a timed_out run with no adapter errorFamily (e.g. codex/claude local timeouts stay terminal)", () => {
+    expect(
+      shouldScheduleTransientBoundedRetryForOutcome("timed_out", {
+        errorCode: "timeout",
+        resultJson: {},
+      }),
+    ).toBe(false);
+  });
+
+  it("admits a failed run classified by errorCode alone (gateway quota wait_error path)", () => {
+    expect(
+      shouldScheduleTransientBoundedRetryForOutcome("failed", {
+        errorCode: "openclaw_gateway_wait_error",
+        resultJson: {},
+      }),
+    ).toBe(true);
+  });
+
+  it.each(["succeeded", "cancelled"] as const)(
+    "rejects %s runs even when a transient errorFamily is persisted",
+    (outcome) => {
+      expect(
+        shouldScheduleTransientBoundedRetryForOutcome(outcome, {
+          errorCode: "timeout",
+          resultJson: { errorFamily: "transient_upstream" },
+        }),
+      ).toBe(false);
+    },
+  );
 });
