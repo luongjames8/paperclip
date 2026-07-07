@@ -309,6 +309,16 @@ function resolveCodexTransientFallbackMode(attempt: number): CodexTransientFallb
 // predicate (quota errors + 600s run timeouts must not blindly re-run);
 // classifying them here routes them into the bounded scheduled retry instead of
 // stranding in status=error.
+//
+// NOTE: for timed_out runs, finalize rewrites the persisted errorCode to the
+// generic "timeout" (which recovery/service.ts's continuation classifier
+// matches on), so "openclaw_gateway_wait_timeout" below can only match runs
+// whose raw adapter code was persisted verbatim — the LIVE classification
+// channel for gateway timeouts is the adapter-set resultJson.errorFamily,
+// which readHeartbeatRunErrorFamily prefers. Consolidating these two channels
+// (preserving the adapter code at finalize) is tracked as a follow-up; it
+// requires updating recovery/service.ts's "timeout" literal in the same
+// change.
 const TRANSIENT_UPSTREAM_ERROR_CODES: ReadonlySet<string> = new Set([
   "codex_transient_upstream",
   "claude_transient_upstream",
