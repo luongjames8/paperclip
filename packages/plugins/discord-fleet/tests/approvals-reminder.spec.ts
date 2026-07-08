@@ -84,6 +84,37 @@ describe("runApprovalsReminder", () => {
     expect(reminders["approval-1"]).toBe(NOW.toISOString());
   });
 
+  it("routes the reminder on payload.approvalType when the title misses every regex (mirrors handleApprovalCreated)", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const fleetConfig = makeFleetConfig(company);
+    fleetConfig.approvalsChannelsByType!["company-1"] = [
+      ["^content_batch_approval$", "channel-batch"],
+      ["content batch", "channel-batch"],
+    ];
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, fleetConfig,
+      makePaperclip([
+        approval({
+          payload: {
+            title: "Totally Reworded Weekly Posts Card",
+            approvalType: "content_batch_approval",
+          },
+        }),
+      ]),
+      NOW,
+    );
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+    const [, channelId] = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    // Without the discriminator candidate this would have fallen to the
+    // orphan/work-thread path while the ORIGINAL card sat in channel-batch.
+    expect(channelId).toBe("channel-batch");
+  });
+
   it("skips approvals younger than the remind threshold", async () => {
     const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
     const { postEmbedToChannel } = await import("../src/discord/rest.js");

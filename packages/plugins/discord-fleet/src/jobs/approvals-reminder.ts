@@ -194,9 +194,18 @@ export async function runApprovalsReminder(
     // Mirror handleApprovalCreated's routing tiers: explicit type route, then
     // the linked issue's work thread (so reminders land where the original
     // card did), then the per-company fallback/orphan channel.
+    // Candidates mirror the handler too (codex P2, PR #26): the stable
+    // payload.approvalType discriminator first — this job reads the FULL
+    // approval record, so the field is directly available — then the
+    // LLM-authored title. Without this, a discriminator-routed card's
+    // REMINDER would fall to the work thread/fallback while the original
+    // card sat in the right channel.
+    const reminderRoutingKeyRaw = approval.payload?.approvalType;
+    const reminderRoutingKey =
+      typeof reminderRoutingKeyRaw === "string" ? reminderRoutingKeyRaw : "";
     let destinationChannelId = matchChannelByType(
       fleetConfig.approvalsChannelsByType?.[companyId],
-      [title],
+      [reminderRoutingKey, title],
     );
     if (!destinationChannelId) {
       try {
