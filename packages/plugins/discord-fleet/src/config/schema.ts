@@ -70,7 +70,11 @@ export interface DiscordFleetConfig {
   // thread spawning.
   issuesChannelsByType?: Record<string, ChannelTypeRoute[]>;
   // Per-content-surface routing for approvals, keyed by companyId. Same
-  // semantics as issuesChannelsByType but matched against approval title.
+  // semantics as issuesChannelsByType; match candidates in order are the
+  // approval's stable payload.approvalType discriminator (a copy-paste
+  // constant the card-creating skill emits — preferred; never LLM prose)
+  // then the LLM-authored payload.title (legacy fallback — a paraphrase can
+  // miss, which is how the 2026-07-07 card landed in the fallback channel).
   // On no match, falls back to the company's approvalFallbackChannelId
   // (or channels.orphan if absent — see backward-compat note on
   // CompanyConfig.approvalFallbackChannelId).

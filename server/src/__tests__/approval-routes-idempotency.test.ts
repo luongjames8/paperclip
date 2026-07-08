@@ -629,7 +629,11 @@ describe("approval routes idempotent retries", () => {
       .send({
         type: "request_board_approval",
         issueIds: ["00000000-0000-0000-0000-000000000001"],
-        payload: { title: "Approve hosting spend", proposedComment: "## Section\nProposed body" },
+        payload: {
+          title: "Approve hosting spend",
+          proposedComment: "## Section\nProposed body",
+          approvalType: "content_batch_approval",
+        },
       });
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
@@ -663,6 +667,11 @@ describe("approval routes idempotent retries", () => {
           issueIds: ["00000000-0000-0000-0000-000000000001"],
           title: "Approve hosting spend",
           proposedComment: "## Section\nProposed body",
+          // The slot-8 routing discriminator MUST ride the event details —
+          // the plugin handler receives these details, not the stored
+          // payload; dropping this forwards silently kills discriminator
+          // routing (codex P1, PR #26).
+          approvalType: "content_batch_approval",
         }),
       }),
     );

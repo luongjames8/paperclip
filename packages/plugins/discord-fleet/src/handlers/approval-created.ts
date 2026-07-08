@@ -11,7 +11,7 @@ import { buildApprovalActionRow, buildApprovalEmbed } from "../render/embeds.js"
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
-import { matchChannelByType } from "../routing/route.js";
+import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
 import { PaperclipClient } from "../api/paperclip.js";
 import { postDeliveryFailureFallback } from "./delivery-fallback.js";
@@ -219,10 +219,24 @@ export async function handleApprovalCreated(
   //      leakage in multi-company deployments).
   //   4. companyConfig.channels.orphan (backward-compat default when
   //      approvalFallbackChannelId is absent).
-  const matchedChannelId = matchChannelByType(
-    config.approvalsChannelsByType?.[companyId],
-    [approvalTitle],
-  );
+  // Stable, skill-authored routing discriminator (the 2026-05-15 plan's
+  // slot-8 design, wired here for the first time): payload.approvalType is a
+  // copy-paste constant the card-creating skill emits (e.g.
+  // "content_batch_approval") — never LLM prose, so it cannot
+  // paraphrase-drift the way the title did on 2026-07-07 (card fell to the
+  // fallback channel on a one-character case miss). Deliberately NOT
+  // payload.type: that is the closed server enum ("request_board_approval")
+  // shared by every content card — useless as a surface discriminator.
+  // Title stays as the second candidate for cards that predate the constant.
+  const routingKey = str(payload.approvalType);
+  // Candidate-major, not route-major (codex P2): the discriminator is tried
+  // against the WHOLE table before the title sees any route. Passing both
+  // candidates in one call would let a broad legacy title row placed above a
+  // literal ^…$ row steal the match — priority must not depend on config row
+  // ordering, which is convention a future config edit can silently break.
+  const matchedChannelId =
+    matchChannelByExactKey(config.approvalsChannelsByType?.[companyId], routingKey) ??
+    matchChannelByType(config.approvalsChannelsByType?.[companyId], [approvalTitle]);
   let destinationChannelId: string;
   if (matchedChannelId) {
     destinationChannelId = matchedChannelId;
