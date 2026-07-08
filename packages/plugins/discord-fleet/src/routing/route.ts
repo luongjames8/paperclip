@@ -49,26 +49,25 @@ export function matchChannelByType(
   return null;
 }
 
-// Exact-identification matching for the payload.approvalType discriminator
-// pass (codex P2, PR #26): a discriminator is a TOKEN, so a row wins the key
-// only when its pattern matches the key WHOLLY. A broad legacy title regex
-// (e.g. /batch/) can substring-match the constant's text but will never
-// full-match it — so keyed routing cannot depend on config row order, by
-// construction, with no separate route set needed. Title matching stays
-// substring (matchChannelByType) in the second pass.
+// Discriminator-pass matching (codex P2 rounds, PR #26): the key pass runs
+// NO REGEX AT ALL. Only literal-anchored rows — pattern shaped exactly
+// ^plain_token$ (letters/digits/_/-) — participate, compared by string
+// equality against the key. That is the "split keyed routes from title
+// regexes" split expressed without a schema change: literal rows ARE the
+// keyed route set by definition. Every capture class dies by construction:
+// broad substrings (/batch/), wildcards (/.*/, /.*batch.*/), and ordering
+// games cannot match a key because their rows never enter this pass.
+// Title matching stays substring regex (matchChannelByType) in pass 2.
+const LITERAL_KEY_ROW = /^\^[A-Za-z0-9_-]+\$$/;
+
 export function matchChannelByExactKey(
   routes: ChannelTypeRoute[] | undefined,
   key: string | undefined,
 ): string | null {
   if (!routes || routes.length === 0 || !key) return null;
   for (const [pattern, channelId] of routes) {
-    let re: RegExp;
-    try {
-      re = new RegExp(`^(?:${pattern})$`);
-    } catch {
-      continue;
-    }
-    if (re.test(key)) return channelId;
+    if (!LITERAL_KEY_ROW.test(pattern)) continue;
+    if (pattern.slice(1, -1) === key) return channelId;
   }
   return null;
 }

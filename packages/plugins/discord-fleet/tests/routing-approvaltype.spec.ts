@@ -96,3 +96,25 @@ describe("matchChannelByExactKey — the discriminator pass is exact identificat
     expect(matchChannelByExactKey(ROWS, "x")).toBe("chan-x");
   });
 });
+
+describe("matchChannelByExactKey — key pass executes no regex (literal rows only)", () => {
+  it("a wildcard title row (.* / .*batch.*) can never capture a key", () => {
+    // codex P2 round 6: /.*/  full-matches ANY key under regex full-match.
+    // Under literal-row matching, wildcard rows never enter the key pass.
+    const WILDCARDED: ChannelTypeRoute[] = [
+      [".*", "chan-catchall"],
+      [".*batch.*", "chan-broad"],
+      ["^content_batch_approval$", "chan-content"],
+    ];
+    expect(matchChannelByExactKey(WILDCARDED, "content_batch_approval")).toBe("chan-content");
+    expect(matchChannelByExactKey(WILDCARDED, "unknown_key")).toBeNull();
+  });
+
+  it("non-literal anchored patterns are excluded from the key pass too", () => {
+    const ROWS: ChannelTypeRoute[] = [
+      ["^content_.*$", "chan-anchored-regex"], // anchored but NOT literal
+      ["^content_batch_approval$", "chan-content"],
+    ];
+    expect(matchChannelByExactKey(ROWS, "content_batch_approval")).toBe("chan-content");
+  });
+});
