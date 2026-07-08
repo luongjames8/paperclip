@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchChannelByType } from "../src/routing/route.js";
+import { matchChannelByExactKey, matchChannelByType } from "../src/routing/route.js";
 import type { ChannelTypeRoute } from "../src/config/schema.js";
 
 // Routing-table shape mirrors hinomaru's live approvalsChannelsByType: the
@@ -55,7 +55,7 @@ describe("matchChannelByType — approvalType discriminator + title fallback", (
     const routingKey = "carousel_batch_approval";
     const title = "Content batch approval — week of X"; // matches the broad row
     const composed =
-      matchChannelByType(MISORDERED, [routingKey]) ??
+      matchChannelByExactKey(MISORDERED, routingKey) ??
       matchChannelByType(MISORDERED, [title]);
     expect(composed).toBe("chan-carousel");
     // The single-call route-major shape WOULD misroute — pinned so the
@@ -72,5 +72,27 @@ describe("matchChannelByType — approvalType discriminator + title fallback", (
     expect(
       matchChannelByType(withBadRow, ["content_batch_approval", undefined]),
     ).toBe("chan-content");
+  });
+});
+
+describe("matchChannelByExactKey — the discriminator pass is exact identification", () => {
+  it("a broad legacy regex that substring-matches the constant's TEXT cannot steal the key", () => {
+    // codex P2 round 5: /batch/ substring-matches "content_batch_approval",
+    // so a substring pass-1 still depended on row order. Full-match does not.
+    const NASTY: ChannelTypeRoute[] = [
+      ["batch", "chan-broad"], // matches the constant's text as a substring
+      ["^content_batch_approval$", "chan-content"],
+    ];
+    expect(matchChannelByExactKey(NASTY, "content_batch_approval")).toBe("chan-content");
+    // and the substring matcher WOULD have misrouted — pinned:
+    expect(matchChannelByType(NASTY, ["content_batch_approval"])).toBe("chan-broad");
+  });
+
+  it("returns null for missing key, no-full-match, and invalid regex rows", () => {
+    const ROWS: ChannelTypeRoute[] = [["([", "chan-bad"], ["^x$", "chan-x"]];
+    expect(matchChannelByExactKey(ROWS, undefined)).toBeNull();
+    expect(matchChannelByExactKey(ROWS, "")).toBeNull();
+    expect(matchChannelByExactKey(ROWS, "xy")).toBeNull();
+    expect(matchChannelByExactKey(ROWS, "x")).toBe("chan-x");
   });
 });

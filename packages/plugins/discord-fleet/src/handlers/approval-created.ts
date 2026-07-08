@@ -11,7 +11,7 @@ import { buildApprovalActionRow, buildApprovalEmbed } from "../render/embeds.js"
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
-import { matchChannelByType } from "../routing/route.js";
+import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
 import { PaperclipClient } from "../api/paperclip.js";
 import { postDeliveryFailureFallback } from "./delivery-fallback.js";
@@ -235,7 +235,7 @@ export async function handleApprovalCreated(
   // literal ^…$ row steal the match — priority must not depend on config row
   // ordering, which is convention a future config edit can silently break.
   const matchedChannelId =
-    matchChannelByType(config.approvalsChannelsByType?.[companyId], [routingKey]) ??
+    matchChannelByExactKey(config.approvalsChannelsByType?.[companyId], routingKey) ??
     matchChannelByType(config.approvalsChannelsByType?.[companyId], [approvalTitle]);
   let destinationChannelId: string;
   if (matchedChannelId) {

@@ -6,7 +6,7 @@ import { postEmbedToChannel, postToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
-import { matchChannelByType } from "../routing/route.js";
+import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
 import { resolveApprovalContent, PENDING_APPROVALS_KEY } from "../handlers/approval-created.js";
 import { PaperclipApiError } from "../api/paperclip.js";
@@ -207,7 +207,7 @@ export async function runApprovalsReminder(
     // the whole table first, title only as a separate second pass — so config
     // row ordering can never let a broad title rule steal a keyed card.
     let destinationChannelId =
-      matchChannelByType(fleetConfig.approvalsChannelsByType?.[companyId], [reminderRoutingKey]) ??
+      matchChannelByExactKey(fleetConfig.approvalsChannelsByType?.[companyId], reminderRoutingKey) ??
       matchChannelByType(fleetConfig.approvalsChannelsByType?.[companyId], [title]);
     if (!destinationChannelId) {
       try {

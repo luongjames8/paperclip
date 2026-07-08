@@ -48,3 +48,27 @@ export function matchChannelByType(
   }
   return null;
 }
+
+// Exact-identification matching for the payload.approvalType discriminator
+// pass (codex P2, PR #26): a discriminator is a TOKEN, so a row wins the key
+// only when its pattern matches the key WHOLLY. A broad legacy title regex
+// (e.g. /batch/) can substring-match the constant's text but will never
+// full-match it — so keyed routing cannot depend on config row order, by
+// construction, with no separate route set needed. Title matching stays
+// substring (matchChannelByType) in the second pass.
+export function matchChannelByExactKey(
+  routes: ChannelTypeRoute[] | undefined,
+  key: string | undefined,
+): string | null {
+  if (!routes || routes.length === 0 || !key) return null;
+  for (const [pattern, channelId] of routes) {
+    let re: RegExp;
+    try {
+      re = new RegExp(`^(?:${pattern})$`);
+    } catch {
+      continue;
+    }
+    if (re.test(key)) return channelId;
+  }
+  return null;
+}
