@@ -219,9 +219,19 @@ export async function handleApprovalCreated(
   //      leakage in multi-company deployments).
   //   4. companyConfig.channels.orphan (backward-compat default when
   //      approvalFallbackChannelId is absent).
+  // Stable, skill-authored routing discriminator (the 2026-05-15 plan's
+  // slot-8 design, wired here for the first time): payload.approvalType is a
+  // copy-paste constant the card-creating skill emits (e.g.
+  // "content_batch_approval") — never LLM prose, so it cannot
+  // paraphrase-drift the way the title did on 2026-07-07 (card fell to the
+  // fallback channel on a one-character case miss). Deliberately NOT
+  // payload.type: that is the closed server enum ("request_board_approval")
+  // shared by every content card — useless as a surface discriminator.
+  // Title stays as the second candidate for cards that predate the constant.
+  const routingKey = str(payload.approvalType);
   const matchedChannelId = matchChannelByType(
     config.approvalsChannelsByType?.[companyId],
-    [approvalTitle],
+    [routingKey, approvalTitle],
   );
   let destinationChannelId: string;
   if (matchedChannelId) {
