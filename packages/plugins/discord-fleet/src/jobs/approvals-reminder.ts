@@ -203,10 +203,12 @@ export async function runApprovalsReminder(
     const reminderRoutingKeyRaw = approval.payload?.approvalType;
     const reminderRoutingKey =
       typeof reminderRoutingKeyRaw === "string" ? reminderRoutingKeyRaw : "";
-    let destinationChannelId = matchChannelByType(
-      fleetConfig.approvalsChannelsByType?.[companyId],
-      [reminderRoutingKey, title],
-    );
+    // Candidate-major, mirroring handleApprovalCreated: discriminator across
+    // the whole table first, title only as a separate second pass — so config
+    // row ordering can never let a broad title rule steal a keyed card.
+    let destinationChannelId =
+      matchChannelByType(fleetConfig.approvalsChannelsByType?.[companyId], [reminderRoutingKey]) ??
+      matchChannelByType(fleetConfig.approvalsChannelsByType?.[companyId], [title]);
     if (!destinationChannelId) {
       try {
         const issues = await paperclip.getApprovalIssues(approval.id);

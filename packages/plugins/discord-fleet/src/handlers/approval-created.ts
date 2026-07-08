@@ -229,10 +229,14 @@ export async function handleApprovalCreated(
   // shared by every content card — useless as a surface discriminator.
   // Title stays as the second candidate for cards that predate the constant.
   const routingKey = str(payload.approvalType);
-  const matchedChannelId = matchChannelByType(
-    config.approvalsChannelsByType?.[companyId],
-    [routingKey, approvalTitle],
-  );
+  // Candidate-major, not route-major (codex P2): the discriminator is tried
+  // against the WHOLE table before the title sees any route. Passing both
+  // candidates in one call would let a broad legacy title row placed above a
+  // literal ^…$ row steal the match — priority must not depend on config row
+  // ordering, which is convention a future config edit can silently break.
+  const matchedChannelId =
+    matchChannelByType(config.approvalsChannelsByType?.[companyId], [routingKey]) ??
+    matchChannelByType(config.approvalsChannelsByType?.[companyId], [approvalTitle]);
   let destinationChannelId: string;
   if (matchedChannelId) {
     destinationChannelId = matchedChannelId;

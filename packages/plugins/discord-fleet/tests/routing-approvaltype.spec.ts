@@ -38,10 +38,29 @@ describe("matchChannelByType — approvalType discriminator + title fallback", (
 
   it("route-major order: an earlier title row can win over a later one, but never over a literal discriminator row placed first", () => {
     // Candidates are tested per-route, so placing ^…$ rows first in the table
-    // is what gives the discriminator priority.
+    // is what gives the discriminator priority WITHIN a single call.
     expect(
       matchChannelByType(ROUTES, ["content_batch_approval", "Carousel-ish title"]),
     ).toBe("chan-content");
+  });
+
+  it("candidate-major composition: the discriminator wins even when a broad title row is misordered ABOVE the literal row (mirrors the handler + reminder call shape)", () => {
+    // The exact two-pass expression handleApprovalCreated and
+    // approvals-reminder use — priority must not depend on config row
+    // ordering (codex P2, PR #26).
+    const MISORDERED: ChannelTypeRoute[] = [
+      ["[Cc]ontent batch", "chan-content-title"], // broad legacy row FIRST
+      ["^carousel_batch_approval$", "chan-carousel"],
+    ];
+    const routingKey = "carousel_batch_approval";
+    const title = "Content batch approval — week of X"; // matches the broad row
+    const composed =
+      matchChannelByType(MISORDERED, [routingKey]) ??
+      matchChannelByType(MISORDERED, [title]);
+    expect(composed).toBe("chan-carousel");
+    // The single-call route-major shape WOULD misroute — pinned so the
+    // handler is never "simplified" back to one call:
+    expect(matchChannelByType(MISORDERED, [routingKey, title])).toBe("chan-content-title");
   });
 
   it("returns null when nothing matches (caller falls back to approvalFallbackChannelId)", () => {
