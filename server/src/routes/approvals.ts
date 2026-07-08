@@ -186,6 +186,16 @@ export function approvalRoutes(
           const pc = (normalizedPayload as Record<string, unknown>).proposedComment;
           return typeof pc === "string" ? pc : null;
         })(),
+        // The stable routing discriminator (slot-8 design): a copy-paste
+        // constant the card-creating skill stores in payload.approvalType.
+        // Without forwarding it here the plugin handler — which receives
+        // THESE details, not the stored payload — could never route on it
+        // (the classic details-vs-entity trap; cf. the helper-runner
+        // trigger-payload lesson).
+        approvalType: (() => {
+          const at = (normalizedPayload as Record<string, unknown>).approvalType;
+          return typeof at === "string" ? at : null;
+        })(),
       },
     });
 

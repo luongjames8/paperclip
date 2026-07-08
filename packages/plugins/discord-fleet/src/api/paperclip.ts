@@ -40,6 +40,10 @@ export interface PaperclipApproval {
   updatedAt?: string;
   payload?: {
     title?: string;
+    // Stable routing discriminator (slot-8): a copy-paste constant the
+    // card-creating skill stores; matched ahead of the title by both
+    // handleApprovalCreated and the approvals-reminder job.
+    approvalType?: string;
     proposedComment?: unknown;
     details?: unknown;
     description?: unknown;

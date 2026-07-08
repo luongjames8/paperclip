@@ -6,7 +6,7 @@ import { postEmbedToChannel, postToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
-import { matchChannelByType } from "../routing/route.js";
+import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
 import { resolveApprovalContent, PENDING_APPROVALS_KEY } from "../handlers/approval-created.js";
 import { PaperclipApiError } from "../api/paperclip.js";
@@ -194,10 +194,21 @@ export async function runApprovalsReminder(
     // Mirror handleApprovalCreated's routing tiers: explicit type route, then
     // the linked issue's work thread (so reminders land where the original
     // card did), then the per-company fallback/orphan channel.
-    let destinationChannelId = matchChannelByType(
-      fleetConfig.approvalsChannelsByType?.[companyId],
-      [title],
-    );
+    // Candidates mirror the handler too (codex P2, PR #26): the stable
+    // payload.approvalType discriminator first — this job reads the FULL
+    // approval record, so the field is directly available — then the
+    // LLM-authored title. Without this, a discriminator-routed card's
+    // REMINDER would fall to the work thread/fallback while the original
+    // card sat in the right channel.
+    const reminderRoutingKeyRaw = approval.payload?.approvalType;
+    const reminderRoutingKey =
+      typeof reminderRoutingKeyRaw === "string" ? reminderRoutingKeyRaw : "";
+    // Candidate-major, mirroring handleApprovalCreated: discriminator across
+    // the whole table first, title only as a separate second pass — so config
+    // row ordering can never let a broad title rule steal a keyed card.
+    let destinationChannelId =
+      matchChannelByExactKey(fleetConfig.approvalsChannelsByType?.[companyId], reminderRoutingKey) ??
+      matchChannelByType(fleetConfig.approvalsChannelsByType?.[companyId], [title]);
     if (!destinationChannelId) {
       try {
         const issues = await paperclip.getApprovalIssues(approval.id);
