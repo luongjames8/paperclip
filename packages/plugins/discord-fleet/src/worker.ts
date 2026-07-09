@@ -8,6 +8,16 @@ import { handleIssueCreated } from "./handlers/issue-created.js";
 import { handleIssueUpdated } from "./handlers/issue-updated.js";
 import { handleApprovalCreated } from "./handlers/approval-created.js";
 import { handleApprovalButton, handleApprovalRevisionModal } from "./handlers/approval-button.js";
+import {
+  handleCarouselConfirmationButton,
+  handleCarouselConfirmationRejectModal,
+} from "./handlers/carousel-confirmation-button.js";
+import {
+  CAROUSEL_CONFIRM_BUTTON_PREFIX,
+  CAROUSEL_CONFIRM_BUTTON_PREFIX_LEGACY,
+  CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX,
+  CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY,
+} from "./render/embeds.js";
 import { postDeliveryFailureFallback } from "./handlers/delivery-fallback.js";
 import { runDigest } from "./jobs/digest.js";
 import { runStuckDetector } from "./jobs/stuck-detector.js";
@@ -291,6 +301,47 @@ async function notifyPendingApprovalsUndeliverable(
   }
 }
 
+// Dispatch a button click to the carousel-confirmation handler or the
+// approval-button handler based on customId prefix — two distinct entities
+// (issue_thread_interactions vs approvals) that never share a prefix. LEGACY
+// (pre-versioning) carousel prefixes are routed here too — the handler itself
+// refuses them as stale (unverifiable, no hash token) rather than dropping
+// the click silently (PR #27 codex round 3).
+async function dispatchButton(
+  ctx: PluginContext,
+  interaction: Parameters<typeof handleApprovalButton>[1],
+  config: DiscordFleetConfig,
+): Promise<void> {
+  if (
+    interaction.customId.startsWith(CAROUSEL_CONFIRM_BUTTON_PREFIX.accept) ||
+    interaction.customId.startsWith(CAROUSEL_CONFIRM_BUTTON_PREFIX.reject) ||
+    interaction.customId.startsWith(CAROUSEL_CONFIRM_BUTTON_PREFIX_LEGACY.accept) ||
+    interaction.customId.startsWith(CAROUSEL_CONFIRM_BUTTON_PREFIX_LEGACY.reject)
+  ) {
+    await handleCarouselConfirmationButton(ctx, interaction, config);
+    return;
+  }
+  await handleApprovalButton(ctx, interaction, config);
+}
+
+// Dispatch a modal submit to the carousel-reject-reason handler or the
+// approval-revision handler based on customId prefix. LEGACY reject-modal
+// prefix routed here too, same stale-refusal reasoning as dispatchButton.
+async function dispatchModal(
+  ctx: PluginContext,
+  interaction: Parameters<typeof handleApprovalRevisionModal>[1],
+  config: DiscordFleetConfig,
+): Promise<void> {
+  if (
+    interaction.customId.startsWith(CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX) ||
+    interaction.customId.startsWith(CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY)
+  ) {
+    await handleCarouselConfirmationRejectModal(ctx, interaction, config);
+    return;
+  }
+  await handleApprovalRevisionModal(ctx, interaction, config);
+}
+
 function bindEventHandlers(
   ctx: PluginContext,
   config: DiscordFleetConfig,
@@ -377,10 +428,10 @@ const plugin = definePlugin({
           await handleStatusCommand(interaction, ctx, companyConfig, paperclip);
         },
         async (interaction) => {
-          await handleApprovalButton(ctx, interaction, clientConfig);
+          await dispatchButton(ctx, interaction, clientConfig);
         },
         async (interaction) => {
-          await handleApprovalRevisionModal(ctx, interaction, clientConfig);
+          await dispatchModal(ctx, interaction, clientConfig);
         },
       );
     }
@@ -534,7 +585,11 @@ const plugin = definePlugin({
         },
         async (interaction) => {
           if (!savedCtx) return;
-          await handleApprovalButton(savedCtx, interaction, clientConfig);
+          await dispatchButton(savedCtx, interaction, clientConfig);
+        },
+        async (interaction) => {
+          if (!savedCtx) return;
+          await dispatchModal(savedCtx, interaction, clientConfig);
         },
       );
     }

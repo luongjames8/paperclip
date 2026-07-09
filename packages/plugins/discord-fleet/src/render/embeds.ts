@@ -14,6 +14,72 @@ export const APPROVAL_BUTTON_PREFIX = {
 export const APPROVAL_REVISION_MODAL_PREFIX = "approval-revision-modal:";
 export const APPROVAL_REVISION_NOTE_FIELD = "revisionNote";
 
+// Carousel-batch confirmation buttons — a DIFFERENT entity (issue_thread_interactions)
+// from approvals, so these NEVER reuse the approval-* prefixes above. customId
+// encodes a version token + both ids: `prefix:hash8:issueId:interactionId`. The
+// hash8 (first 8 hex chars of the posted artifact's sha256) is what lets the
+// click-time handler detect a STALE trailer — see FIX (a) in PR #27 codex round 3.
+export const CAROUSEL_CONFIRM_BUTTON_PREFIX = {
+  accept: "car-ok:",
+  reject: "car-no:",
+} as const;
+
+// OLD (pre-versioning) prefixes. May still exist on already-posted Discord
+// messages after a deploy that ships this change. They carry no hash token,
+// so a click on one is UNVERIFIABLE — routed to the same stale-refusal path
+// as a hash mismatch, never accepted/rejected directly. Never remove without
+// checking no live trailer still carries one.
+export const CAROUSEL_CONFIRM_BUTTON_PREFIX_LEGACY = {
+  accept: "carousel-confirm-accept:",
+  reject: "carousel-confirm-reject:",
+} as const;
+
+// Modal shown when the operator clicks "Reject" — customId carries the hash8
+// token + BOTH ids; the modal collects the required rejection reason.
+export const CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX = "car-rjm:";
+// OLD (pre-versioning) reject-modal prefix — same legacy handling as above.
+export const CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY = "carousel-reject-modal:";
+export const CAROUSEL_CONFIRM_REJECT_REASON_FIELD = "rejectReason";
+
+// Length of the version token embedded in every new-format customId (first N
+// hex chars of the artifact's sha256).
+export const CAROUSEL_HASH_TOKEN_LEN = 8;
+
+// custom_id hard limit is 100 chars — verified by the runtime guard in
+// buildCarouselConfirmationActionRow, which throws on overflow (longest:
+// reject prefix 7 + hash8 8 + 1 + 36 + 1 + 36 = 89).
+const MAX_CUSTOM_ID_LEN = 100;
+
+export function buildCarouselConfirmationActionRow(
+  issueId: string,
+  interactionId: string,
+  hash8: string,
+): APIActionRowComponent<APIComponentInMessageActionRow> {
+  const acceptId = `${CAROUSEL_CONFIRM_BUTTON_PREFIX.accept}${hash8}:${issueId}:${interactionId}`;
+  const rejectId = `${CAROUSEL_CONFIRM_BUTTON_PREFIX.reject}${hash8}:${issueId}:${interactionId}`;
+  if (acceptId.length > MAX_CUSTOM_ID_LEN || rejectId.length > MAX_CUSTOM_ID_LEN) {
+    throw new Error(
+      `carousel confirmation custom_id exceeds Discord's ${MAX_CUSTOM_ID_LEN}-char limit (accept=${acceptId.length}, reject=${rejectId.length})`,
+    );
+  }
+  const accept: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Success,
+    label: "✅ Accept",
+    custom_id: acceptId,
+  };
+  const reject: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Danger,
+    label: "❌ Reject",
+    custom_id: rejectId,
+  };
+  return {
+    type: ComponentType.ActionRow,
+    components: [accept, reject],
+  };
+}
+
 export function buildApprovalActionRow(opts: {
   approvalId: string;
   issueUrl: string;
@@ -48,7 +114,7 @@ export function buildApprovalActionRow(opts: {
   };
 }
 
-function safe(text: string, max = 1900): string {
+export function safe(text: string, max = 1900): string {
   return stripSecrets(truncate(text, max));
 }
 
