@@ -1,11 +1,17 @@
 import type { APIEmbed } from "discord.js";
-import { enforceEmbedLimits } from "./embeds.js";
-import { stripSecrets } from "./secrets.js";
-import { truncate } from "./plain.js";
+import { enforceEmbedLimits, safe } from "./embeds.js";
+
+// NOTE: renderSlidesDoc in ./issue-docs.ts renders the SAME artifact kind
+// (carousel slides) for the request_board_approval flow from a JSON slides
+// doc. If the carousel gate ever migrates entity types again, both surfaces
+// must move together — that migration silently dropping the renderer is
+// exactly the historical failure this file exists to fix (see PR #27 body).
 
 // Section heading: **N. slug (Day)** — the documented carousel-batch authoring
-// form. Captures the 1-based index, slug, and day label.
-const SECTION_HEADING_RE = /^\*\*(\d+)\.\s+([\w-]+)\s+\(([^)]+)\)\*\*/m;
+// form. Captures the 1-based index, slug, and day label. Exported so callers
+// (e.g. the confirmation-sweep's shape detection) test against the same
+// pattern instead of maintaining a duplicate.
+export const SECTION_HEADING_RE = /^\*\*(\d+)\.\s+([\w-]+)\s+\(([^)]+)\)\*\*/m;
 const IMAGE_RE = /!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g;
 
 export interface CarouselSection {
@@ -121,10 +127,10 @@ export function parseCarouselBatchMarkdown(detailsMarkdown: string): ParsedCarou
  */
 export function renderCarouselSlideEmbeds(section: CarouselSection): APIEmbed[] {
   const total = section.slideUrls.length;
-  const footerText = truncate(stripSecrets(`${section.slug} · ${section.day}`), 2048);
+  const footerText = safe(`${section.slug} · ${section.day}`, 2048);
   return section.slideUrls.map((url, i) =>
     enforceEmbedLimits({
-      title: truncate(stripSecrets(`Slide ${i + 1}/${total}`), 256),
+      title: safe(`Slide ${i + 1}/${total}`, 256),
       image: { url },
       footer: { text: footerText },
     }),

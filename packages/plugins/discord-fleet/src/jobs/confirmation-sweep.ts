@@ -9,6 +9,7 @@ import { chunkEmbedsForDiscord } from "../render/issue-docs.js";
 import {
   parseCarouselBatchMarkdown,
   renderCarouselSlideEmbeds,
+  SECTION_HEADING_RE,
   type CarouselSection,
 } from "../render/carousel-batch.js";
 import { stripSecrets } from "../render/secrets.js";
@@ -52,7 +53,7 @@ function sha256(text: string): string {
 // the sweep takes the carousel-batch path below; otherwise the existing
 // generic single-embed path (unchanged) runs.
 function looksLikeCarouselBatch(detailsMarkdown: string): boolean {
-  return /^\*\*(\d+)\.\s+([\w-]+)\s+\(([^)]+)\)\*\*/m.test(detailsMarkdown);
+  return SECTION_HEADING_RE.test(detailsMarkdown);
 }
 
 // Extract the first image URL from markdown text (first `![...](url)` match).
@@ -111,7 +112,9 @@ async function postCarouselBatch(
   const artifactHash = sha256(detailsMarkdown);
   const existing = state[interaction.id];
 
-  // Fully posted AND hash unchanged: nothing to do.
+  // Fully posted AND hash unchanged: nothing to do. Checked before parsing —
+  // this is the common steady-state tick (no section work left), so it must
+  // not pay for parseCarouselBatchMarkdown just to find that out.
   if (
     existing &&
     existing.artifactHash === artifactHash &&
@@ -119,6 +122,20 @@ async function postCarouselBatch(
     existing.trailerPosted &&
     existing.sectionsPosted >= existing.totalSections
   ) {
+    return;
+  }
+
+  // Trailer-only resume: header + all sections already posted under the same
+  // hash, only the trailer is missing. The trailer needs only ids/counts
+  // already in the record — post it without re-parsing the markdown.
+  if (
+    existing &&
+    existing.artifactHash === artifactHash &&
+    existing.headerPosted &&
+    !existing.trailerPosted &&
+    existing.sectionsPosted >= existing.totalSections
+  ) {
+    await postCarouselTrailer(ctx, client, channelId, company.companyId, issue, interaction, issueUrl, existing, state, now);
     return;
   }
 
@@ -175,30 +192,8 @@ async function postCarouselBatch(
   }
 
   if (!record.trailerPosted) {
-    try {
-      await postEmbedsToChannel(
-        client,
-        channelId,
-        [
-          enforceEmbedLimits({
-            color: 0x5865f2,
-            title: "Decision needed",
-            description: `[View full batch in Paperclip](${issueUrl})`,
-          }),
-        ],
-        [buildCarouselConfirmationActionRow(issue.id, interaction.id)],
-      );
-      record.trailerPosted = true;
-      record.postedAt = new Date(now).toISOString();
-      state[interaction.id] = { ...record };
-    } catch (err) {
-      ctx.logger.warn("confirmation-sweep: carousel-batch trailer post failed — will retry next sweep", {
-        companyId: company.companyId,
-        interactionId: interaction.id,
-        error: String(err),
-      });
-      return;
-    }
+    const ok = await postCarouselTrailer(ctx, client, channelId, company.companyId, issue, interaction, issueUrl, record, state, now);
+    if (!ok) return;
   }
 
   ctx.logger.info("confirmation-sweep: posted carousel-batch interaction", {
@@ -208,6 +203,48 @@ async function postCarouselBatch(
     channelId,
     totalSections,
   });
+}
+
+// Post the trailer message (decision embed + accept/reject buttons) for an
+// already-fully-sectioned carousel-batch interaction and persist the updated
+// record. Needs only ids/counts already on `record` — never the parsed
+// markdown. Returns true on success (state persisted), false on failure
+// (caller stops; next sweep retries).
+async function postCarouselTrailer(
+  ctx: PluginContext,
+  client: Client,
+  channelId: string,
+  companyId: string,
+  issue: PaperclipIssue,
+  interaction: PaperclipInteraction,
+  issueUrl: string,
+  record: CarouselBatchSweepRecord,
+  state: CarouselBatchSweepState,
+  now: number,
+): Promise<boolean> {
+  try {
+    await postEmbedsToChannel(
+      client,
+      channelId,
+      [
+        enforceEmbedLimits({
+          color: 0x5865f2,
+          title: "Decision needed",
+          description: `[View full batch in Paperclip](${issueUrl})`,
+        }),
+      ],
+      [buildCarouselConfirmationActionRow(issue.id, interaction.id)],
+    );
+    state[interaction.id] = { ...record, trailerPosted: true, postedAt: new Date(now).toISOString() };
+    return true;
+  } catch (err) {
+    ctx.logger.warn("confirmation-sweep: carousel-batch trailer post failed — will retry next sweep", {
+      companyId,
+      interactionId: interaction.id,
+      error: String(err),
+    });
+    return false;
+  }
 }
 
 // Post one carousel section: slide embeds (chunked for Discord's ≤10-per-message
@@ -364,7 +401,14 @@ export async function runConfirmationSweep(
           // accept/reject-buttons path entirely, bypassing the generic
           // single-embed path below. postCarouselBatch owns its own
           // idempotency/resume state (carouselState), not `posted`.
-          if (detailsMarkdown && looksLikeCarouselBatch(detailsMarkdown)) {
+          //
+          // A carouselState record already existing for this interaction means
+          // it was already identified as carousel-batch on a prior sweep — skip
+          // the shape regex entirely and go straight to the known path (avoids
+          // re-running SECTION_HEADING_RE over the whole markdown every tick
+          // once shape is settled).
+          const knownCarousel = Boolean(carouselState[interaction.id]);
+          if (detailsMarkdown && (knownCarousel || looksLikeCarouselBatch(detailsMarkdown))) {
             await postCarouselBatch(ctx, client, rule.channelId, company, issue, interaction, detailsMarkdown, carouselState, now);
             continue;
           }

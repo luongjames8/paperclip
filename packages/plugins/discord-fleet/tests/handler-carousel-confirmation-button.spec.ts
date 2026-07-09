@@ -50,14 +50,14 @@ function makeConfig(): DiscordFleetConfig {
   };
 }
 
-function makeButtonInteraction(customId: string, username = "alice"): any {
+function makeInteraction(customId: string, opts?: { username?: string; reason?: string }): any {
   const embed = {
     toJSON: () => ({ title: "Decision needed", color: 0x5865f2, description: "some description" }),
   };
-  return {
+  const interaction: any = {
     customId,
     guildId: "g1",
-    user: { id: "discord-user-alice", username },
+    user: { id: "discord-user-alice", username: opts?.username ?? "alice" },
     message: { embeds: [embed] },
     deferUpdate: vi.fn().mockResolvedValue(undefined),
     editReply: vi.fn().mockResolvedValue(undefined),
@@ -65,23 +65,10 @@ function makeButtonInteraction(customId: string, username = "alice"): any {
     followUp: vi.fn().mockResolvedValue(undefined),
     showModal: vi.fn().mockResolvedValue(undefined),
   };
-}
-
-function makeModalInteraction(customId: string, reason: string, username = "alice"): any {
-  const embed = {
-    toJSON: () => ({ title: "Decision needed", color: 0x5865f2, description: "some description" }),
-  };
-  return {
-    customId,
-    guildId: "g1",
-    user: { id: "discord-user-alice", username },
-    message: { embeds: [embed] },
-    fields: { getTextInputValue: vi.fn().mockReturnValue(reason) },
-    deferUpdate: vi.fn().mockResolvedValue(undefined),
-    editReply: vi.fn().mockResolvedValue(undefined),
-    reply: vi.fn().mockResolvedValue(undefined),
-    followUp: vi.fn().mockResolvedValue(undefined),
-  };
+  if (opts?.reason !== undefined) {
+    interaction.fields = { getTextInputValue: vi.fn().mockReturnValue(opts.reason) };
+  }
+  return interaction;
 }
 
 describe("parseCarouselConfirmCustomId", () => {
@@ -149,7 +136,7 @@ describe("handleCarouselConfirmationButton — accept happy path", () => {
     const harness = createTestHarness({ manifest });
     vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
 
-    const interaction = makeButtonInteraction(`carousel-confirm-accept:${ISSUE_ID}:${INTERACTION_ID}`, "alice");
+    const interaction = makeInteraction(`carousel-confirm-accept:${ISSUE_ID}:${INTERACTION_ID}`, { username: "alice" });
     await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
 
     expect(mockAcceptInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID);
@@ -166,7 +153,7 @@ describe("handleCarouselConfirmationButton — accept happy path", () => {
     vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
     mockAcceptInteraction.mockRejectedValueOnce(new PaperclipApiError("conflict", 409, "http://x"));
 
-    const interaction = makeButtonInteraction(`carousel-confirm-accept:${ISSUE_ID}:${INTERACTION_ID}`);
+    const interaction = makeInteraction(`carousel-confirm-accept:${ISSUE_ID}:${INTERACTION_ID}`);
     await expect(handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
 
     expect(interaction.followUp).toHaveBeenCalledTimes(1);
@@ -182,7 +169,7 @@ describe("handleCarouselConfirmationButton — accept happy path", () => {
     vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
     mockAcceptInteraction.mockRejectedValueOnce(new PaperclipApiError("unprocessable", 422, "http://x"));
 
-    const interaction = makeButtonInteraction(`carousel-confirm-accept:${ISSUE_ID}:${INTERACTION_ID}`);
+    const interaction = makeInteraction(`carousel-confirm-accept:${ISSUE_ID}:${INTERACTION_ID}`);
     await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
 
     expect(interaction.followUp).toHaveBeenCalledTimes(1);
@@ -200,7 +187,7 @@ describe("handleCarouselConfirmationButton — reject opens a modal", () => {
     const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
 
-    const interaction = makeButtonInteraction(`carousel-confirm-reject:${ISSUE_ID}:${INTERACTION_ID}`);
+    const interaction = makeInteraction(`carousel-confirm-reject:${ISSUE_ID}:${INTERACTION_ID}`);
     await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
 
     expect(interaction.showModal).toHaveBeenCalledTimes(1);
@@ -220,7 +207,7 @@ describe("handleCarouselConfirmationRejectModal", () => {
     const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
 
-    const interaction = makeModalInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${ISSUE_ID}:${INTERACTION_ID}`, "   ");
+    const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${ISSUE_ID}:${INTERACTION_ID}`, { reason: "   " });
     await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
 
     expect(mockRejectInteraction).not.toHaveBeenCalled();
@@ -232,7 +219,7 @@ describe("handleCarouselConfirmationRejectModal", () => {
     const harness = createTestHarness({ manifest });
     vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
 
-    const interaction = makeModalInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${ISSUE_ID}:${INTERACTION_ID}`, "Wrong week's slides", "bob");
+    const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${ISSUE_ID}:${INTERACTION_ID}`, { reason: "Wrong week's slides", username: "bob" });
     await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
 
     expect(mockRejectInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID, "Wrong week's slides");
@@ -248,7 +235,7 @@ describe("handleCarouselConfirmationRejectModal", () => {
     vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
     mockRejectInteraction.mockRejectedValueOnce(new PaperclipApiError("unprocessable — reason required", 422, "http://x"));
 
-    const interaction = makeModalInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${ISSUE_ID}:${INTERACTION_ID}`, "some reason");
+    const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${ISSUE_ID}:${INTERACTION_ID}`, { reason: "some reason" });
     await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
 
     expect(interaction.followUp).toHaveBeenCalledTimes(1);

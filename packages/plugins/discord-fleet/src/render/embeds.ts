@@ -23,17 +23,13 @@ export const CAROUSEL_CONFIRM_BUTTON_PREFIX = {
 } as const;
 
 // Modal shown when the operator clicks "Reject" — customId carries BOTH ids;
-// the modal collects the required rejection reason. Kept short (22 chars):
-// prefix + issueId(36) + ":" + interactionId(36) = 95, under Discord's
-// 100-char custom_id limit (the longer "carousel-confirm-reject-modal:" form
-// would overflow to 103).
+// the modal collects the required rejection reason.
 export const CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX = "carousel-reject-modal:";
 export const CAROUSEL_CONFIRM_REJECT_REASON_FIELD = "rejectReason";
 
-// Discord hard-caps custom_id at 100 chars. UUIDs are 36 chars each, so the
-// longest prefix (reject, 24 chars) + issueId + ":" + interactionId tops out
-// at 24 + 36 + 1 + 36 = 97 — verified here so a future prefix rename can't
-// silently exceed the limit (Discord rejects the whole component on send).
+// custom_id hard limit is 100 chars — verified by the runtime guard in
+// buildCarouselConfirmationActionRow, which throws on overflow (longest:
+// reject prefix 24 + 36 + 1 + 36 = 97).
 const MAX_CUSTOM_ID_LEN = 100;
 
 export function buildCarouselConfirmationActionRow(
@@ -99,7 +95,7 @@ export function buildApprovalActionRow(opts: {
   };
 }
 
-function safe(text: string, max = 1900): string {
+export function safe(text: string, max = 1900): string {
   return stripSecrets(truncate(text, max));
 }
 

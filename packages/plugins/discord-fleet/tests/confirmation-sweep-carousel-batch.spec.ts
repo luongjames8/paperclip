@@ -339,6 +339,79 @@ describe("runConfirmationSweep — carousel-batch idempotent resume", () => {
     expect(postToChannel).not.toHaveBeenCalled();
   });
 
+  it("fully-posted + unchanged-hash tick performs NO parse (fast path — no wasted regex/hash/parse work)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const carouselBatchModule = await import("../src/render/carousel-batch.js");
+    const parseSpy = vi.spyOn(carouselBatchModule, "parseCarouselBatchMarkdown");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+        },
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(parseSpy).not.toHaveBeenCalled();
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+    parseSpy.mockRestore();
+  });
+
+  it("trailer-only resume (all sections posted, trailer missing) posts exactly one message and does NOT re-parse", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const carouselBatchModule = await import("../src/render/carousel-batch.js");
+    const parseSpy = vi.spyOn(carouselBatchModule, "parseCarouselBatchMarkdown");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: false,
+        },
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(parseSpy).not.toHaveBeenCalled();
+    // Exactly one message posted: the trailer (postEmbedsToChannel call WITH components).
+    expect(postToChannel).not.toHaveBeenCalled();
+    const embedCalls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    expect(embedCalls).toHaveLength(1);
+    const trailerCalls = embedCalls.filter(([, , , components]) => components !== undefined);
+    expect(trailerCalls).toHaveLength(1);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].trailerPosted).toBe(true);
+    parseSpy.mockRestore();
+  });
+
   it("partial failure (a section embed post throws) persists progress up to the last successful section, not beyond", async () => {
     const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
     const { postEmbedsToChannel } = await import("../src/discord/rest.js");
