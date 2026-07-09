@@ -163,6 +163,8 @@ export function renderPostsDoc(body: string, approvalShort: string): APIEmbed[] 
   return out;
 }
 
+// See ./carousel-batch.ts for the sibling renderer of this same artifact kind
+// (carousel slides) on the confirmation-sweep path — keep both in sync.
 export function renderSlidesDoc(body: string, approvalShort: string): APIEmbed[] {
   const obj = trySafeParseJSON(body) as SlidesDocShape | null;
   if (!obj || !Array.isArray(obj.slides) || obj.slides.length === 0) return [];

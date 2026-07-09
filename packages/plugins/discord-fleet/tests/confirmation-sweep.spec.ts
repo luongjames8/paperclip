@@ -194,6 +194,30 @@ describe("runConfirmationSweep — CHANGE 4", () => {
     expect(postEmbedToChannel).not.toHaveBeenCalled();
   });
 
+  // Companion to the carousel migration pin (confirmation-sweep-carousel-batch.spec.ts):
+  // proves the carousel-shape-before-throttle reorder did NOT loosen the
+  // generic path's own throttle — a non-carousel interaction with a fresh
+  // `posted` marker is still skipped exactly as before.
+  it("non-carousel interaction with a fresh posted marker (<24h) is still throttled — unchanged behavior", async () => {
+    const { runConfirmationSweep, CONFIRMATION_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig({
+      c1: [{ titleRegex: "Carousel", channelId: "ch-carousel" }],
+    });
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction()]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CONFIRMATION_SWEEP_STATE_KEY },
+      { "int-1": new Date(Date.now() - 2 * 3_600_000).toISOString() },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip);
+
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+  });
+
   it("re-posts after 24h has elapsed", async () => {
     const { runConfirmationSweep, CONFIRMATION_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
     const { postEmbedToChannel } = await import("../src/discord/rest.js");

@@ -315,6 +315,38 @@ export class PaperclipClient {
     return rows;
   }
 
+  async acceptInteraction(issueId: string, interactionId: string): Promise<void> {
+    const url = `${this.baseUrl}/api/issues/${issueId}/interactions/${interactionId}/accept`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+    if (res.status >= 400) {
+      const text = await res.text().catch(() => "");
+      throw new PaperclipApiError(`paperclip API acceptInteraction error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
+    }
+  }
+
+  async rejectInteraction(issueId: string, interactionId: string, reason: string): Promise<void> {
+    const url = `${this.baseUrl}/api/issues/${issueId}/interactions/${interactionId}/reject`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ reason }),
+    });
+    if (res.status >= 400) {
+      const text = await res.text().catch(() => "");
+      throw new PaperclipApiError(`paperclip API rejectInteraction error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
+    }
+  }
+
   async approveApproval(approvalId: string, decisionNote?: string): Promise<void> {
     await this.resolveApproval(approvalId, "approve", decisionNote);
   }
