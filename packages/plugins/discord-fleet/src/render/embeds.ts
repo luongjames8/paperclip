@@ -14,6 +14,57 @@ export const APPROVAL_BUTTON_PREFIX = {
 export const APPROVAL_REVISION_MODAL_PREFIX = "approval-revision-modal:";
 export const APPROVAL_REVISION_NOTE_FIELD = "revisionNote";
 
+// Carousel-batch confirmation buttons — a DIFFERENT entity (issue_thread_interactions)
+// from approvals, so these NEVER reuse the approval-* prefixes above. customId
+// encodes both ids: `prefix:issueId:interactionId`.
+export const CAROUSEL_CONFIRM_BUTTON_PREFIX = {
+  accept: "carousel-confirm-accept:",
+  reject: "carousel-confirm-reject:",
+} as const;
+
+// Modal shown when the operator clicks "Reject" — customId carries BOTH ids;
+// the modal collects the required rejection reason. Kept short (22 chars):
+// prefix + issueId(36) + ":" + interactionId(36) = 95, under Discord's
+// 100-char custom_id limit (the longer "carousel-confirm-reject-modal:" form
+// would overflow to 103).
+export const CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX = "carousel-reject-modal:";
+export const CAROUSEL_CONFIRM_REJECT_REASON_FIELD = "rejectReason";
+
+// Discord hard-caps custom_id at 100 chars. UUIDs are 36 chars each, so the
+// longest prefix (reject, 24 chars) + issueId + ":" + interactionId tops out
+// at 24 + 36 + 1 + 36 = 97 — verified here so a future prefix rename can't
+// silently exceed the limit (Discord rejects the whole component on send).
+const MAX_CUSTOM_ID_LEN = 100;
+
+export function buildCarouselConfirmationActionRow(
+  issueId: string,
+  interactionId: string,
+): APIActionRowComponent<APIComponentInMessageActionRow> {
+  const acceptId = `${CAROUSEL_CONFIRM_BUTTON_PREFIX.accept}${issueId}:${interactionId}`;
+  const rejectId = `${CAROUSEL_CONFIRM_BUTTON_PREFIX.reject}${issueId}:${interactionId}`;
+  if (acceptId.length > MAX_CUSTOM_ID_LEN || rejectId.length > MAX_CUSTOM_ID_LEN) {
+    throw new Error(
+      `carousel confirmation custom_id exceeds Discord's ${MAX_CUSTOM_ID_LEN}-char limit (accept=${acceptId.length}, reject=${rejectId.length})`,
+    );
+  }
+  const accept: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Success,
+    label: "✅ Accept",
+    custom_id: acceptId,
+  };
+  const reject: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Danger,
+    label: "❌ Reject",
+    custom_id: rejectId,
+  };
+  return {
+    type: ComponentType.ActionRow,
+    components: [accept, reject],
+  };
+}
+
 export function buildApprovalActionRow(opts: {
   approvalId: string;
   issueUrl: string;
