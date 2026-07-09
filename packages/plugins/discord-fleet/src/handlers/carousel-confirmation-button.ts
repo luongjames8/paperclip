@@ -5,9 +5,13 @@ import type { CompanyConfig, DiscordFleetConfig, UserMapping } from "../config/s
 import { PaperclipClient, PaperclipApiError } from "../api/paperclip.js";
 import {
   CAROUSEL_CONFIRM_BUTTON_PREFIX,
+  CAROUSEL_CONFIRM_BUTTON_PREFIX_LEGACY,
   CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX,
+  CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY,
   CAROUSEL_CONFIRM_REJECT_REASON_FIELD,
+  CAROUSEL_HASH_TOKEN_LEN,
 } from "../render/embeds.js";
+import { sha256 } from "../jobs/confirmation-sweep.js";
 
 export type CarouselConfirmAction = "accept" | "reject";
 
@@ -15,13 +19,29 @@ export interface ParsedCarouselConfirmCustomId {
   action: CarouselConfirmAction;
   issueId: string;
   interactionId: string;
+  // Version token (first CAROUSEL_HASH_TOKEN_LEN hex chars of the posted
+  // artifact's sha256). Absent (undefined) means this customId came from a
+  // pre-versioning trailer — unverifiable, always treated as stale.
+  hash8?: string;
 }
 
-// customId shape: `<prefix>:<issueId>:<interactionId>` — issueId and
-// interactionId are UUIDs (no ":" in either), so splitting on the FIRST ":"
-// after the prefix is unambiguous.
+// New (versioned) customId shape: `<prefix>:<hash8>:<issueId>:<interactionId>`.
+// Legacy (pre-versioning) shape: `<legacyPrefix><issueId>:<interactionId>` (no
+// hash segment) — parsed with hash8 left undefined so callers can route it to
+// the stale-refusal path (see FIX (a), PR #27 codex round 3).
 export function parseCarouselConfirmCustomId(customId: string): ParsedCarouselConfirmCustomId | null {
   for (const [action, prefix] of Object.entries(CAROUSEL_CONFIRM_BUTTON_PREFIX) as Array<
+    [CarouselConfirmAction, string]
+  >) {
+    if (!customId.startsWith(prefix)) continue;
+    const rest = customId.slice(prefix.length);
+    const parts = rest.split(":");
+    if (parts.length !== 3) return null;
+    const [hash8, issueId, interactionId] = parts;
+    if (!hash8 || !issueId || !interactionId) return null;
+    return { action, issueId, interactionId, hash8 };
+  }
+  for (const [action, prefix] of Object.entries(CAROUSEL_CONFIRM_BUTTON_PREFIX_LEGACY) as Array<
     [CarouselConfirmAction, string]
   >) {
     if (!customId.startsWith(prefix)) continue;
@@ -36,16 +56,67 @@ export function parseCarouselConfirmCustomId(customId: string): ParsedCarouselCo
   return null;
 }
 
-export function parseCarouselConfirmRejectModalCustomId(customId: string): { issueId: string; interactionId: string } | null {
-  if (!customId.startsWith(CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX)) return null;
-  const rest = customId.slice(CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX.length);
-  const sep = rest.indexOf(":");
-  if (sep === -1) return null;
-  const issueId = rest.slice(0, sep);
-  const interactionId = rest.slice(sep + 1);
-  if (!issueId || !interactionId) return null;
-  return { issueId, interactionId };
+export interface ParsedCarouselConfirmRejectModalCustomId {
+  issueId: string;
+  interactionId: string;
+  hash8?: string;
 }
+
+export function parseCarouselConfirmRejectModalCustomId(customId: string): ParsedCarouselConfirmRejectModalCustomId | null {
+  if (customId.startsWith(CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX)) {
+    const rest = customId.slice(CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX.length);
+    const parts = rest.split(":");
+    if (parts.length !== 3) return null;
+    const [hash8, issueId, interactionId] = parts;
+    if (!hash8 || !issueId || !interactionId) return null;
+    return { issueId, interactionId, hash8 };
+  }
+  if (customId.startsWith(CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY)) {
+    const rest = customId.slice(CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY.length);
+    const sep = rest.indexOf(":");
+    if (sep === -1) return null;
+    const issueId = rest.slice(0, sep);
+    const interactionId = rest.slice(sep + 1);
+    if (!issueId || !interactionId) return null;
+    return { issueId, interactionId };
+  }
+  return null;
+}
+
+// Re-fetches the interaction and recomputes its detailsMarkdown hash8 to
+// compare against the customId's version token (FIX (a), PR #27 codex round
+// 3). Returns true when the click is safe to act on: the token is present AND
+// matches the CURRENT artifact hash. Any other outcome (no token — legacy
+// customId; interaction not found/gone; hash mismatch — a newer version was
+// posted) returns false and the caller must refuse with NO further API call.
+async function isCurrentVersion(
+  paperclip: PaperclipClient,
+  issueId: string,
+  interactionId: string,
+  hash8: string | undefined,
+): Promise<boolean> {
+  if (!hash8) return false;
+  let interactions;
+  try {
+    interactions = await paperclip.listIssueInteractions(issueId);
+  } catch {
+    return false;
+  }
+  const current = interactions.find((i) => i.id === interactionId);
+  if (!current) return false;
+  const rawDetails = current.payload?.detailsMarkdown;
+  const rawPrompt = current.payload?.prompt;
+  const detailsMarkdown =
+    typeof rawDetails === "string" && rawDetails.trim()
+      ? rawDetails.trim()
+      : typeof rawPrompt === "string" && rawPrompt.trim()
+        ? rawPrompt.trim()
+        : "";
+  return sha256(detailsMarkdown).slice(0, CAROUSEL_HASH_TOKEN_LEN) === hash8;
+}
+
+const STALE_TRAILER_MESSAGE =
+  "This card is stale — a newer version of the batch was posted below. Use the newest card.";
 
 function resolveCompany(config: DiscordFleetConfig, guildId: string | null): CompanyConfig | undefined {
   if (!guildId) return undefined;
@@ -95,12 +166,25 @@ export async function handleCarouselConfirmationButton(
     return;
   }
 
+  // Version-token check (FIX (a), PR #27 codex round 3): a legacy (no hash8)
+  // customId or a hash8 that no longer matches the interaction's CURRENT
+  // detailsMarkdown means either a stale trailer from before a revision, or
+  // an un-versioned pre-deploy trailer — either way, unverifiable, so refuse
+  // before any accept/reject API call and before opening the reject modal.
+  const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
+  const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
+  const isCurrent = await isCurrentVersion(paperclip, parsed.issueId, parsed.interactionId, parsed.hash8);
+  if (!isCurrent) {
+    await interaction.reply({ content: STALE_TRAILER_MESSAGE, ephemeral: true });
+    return;
+  }
+
   // Reject opens a modal to collect the required reason — showModal MUST be
   // the interaction's first response (mirrors the approval-button revision
   // pattern), so this branch runs BEFORE deferUpdate.
   if (parsed.action === "reject") {
     const modal = new ModalBuilder()
-      .setCustomId(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${parsed.issueId}:${parsed.interactionId}`)
+      .setCustomId(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${parsed.hash8}:${parsed.issueId}:${parsed.interactionId}`)
       .setTitle("Reject carousel batch")
       .addComponents(
         new ActionRowBuilder<TextInputBuilder>().addComponents(
@@ -131,8 +215,6 @@ export async function handleCarouselConfirmationButton(
   }
 
   try {
-    const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
-    const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
     await paperclip.acceptInteraction(parsed.issueId, parsed.interactionId);
   } catch (err) {
     ctx.logger.warn("carousel-confirmation-button: acceptInteraction failed", {
@@ -187,11 +269,21 @@ export async function handleCarouselConfirmationRejectModal(
     return;
   }
 
+  // Version-token re-check on submit (FIX (a), PR #27 codex round 3): time may
+  // have passed between the modal being shown and submitted, and a legacy
+  // (no hash8) modal customId is unverifiable regardless — refuse before any
+  // rejectInteraction API call.
+  const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
+  const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
+  const isCurrent = await isCurrentVersion(paperclip, parsed.issueId, parsed.interactionId, parsed.hash8);
+  if (!isCurrent) {
+    await interaction.reply({ content: STALE_TRAILER_MESSAGE, ephemeral: true });
+    return;
+  }
+
   await interaction.deferUpdate();
 
   try {
-    const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
-    const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
     await paperclip.rejectInteraction(parsed.issueId, parsed.interactionId, reason);
   } catch (err) {
     ctx.logger.warn("carousel-confirmation-reject-modal: rejectInteraction failed", {

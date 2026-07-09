@@ -48,6 +48,25 @@ export function postEmbedToChannel(
   return postEmbedsToChannel(client, channelId, [embed], components);
 }
 
+// Edit an already-posted channel message's embeds/components in place — used
+// to best-effort disable a superseded carousel-batch trailer (strip buttons +
+// annotate) when a hashChanged re-post makes it stale. Never throws on a
+// "message not found/already deleted" style failure classification here —
+// callers are expected to catch and log (this is a best-effort layer; the
+// customId version-token check is the authoritative stale-click guard).
+export async function editMessageInChannel(
+  client: Client,
+  channelId: string,
+  messageId: string,
+  opts: { embeds?: APIEmbed[]; components?: Array<APIActionRowComponent<APIComponentInMessageActionRow>> },
+): Promise<void> {
+  await rateLimit.enqueue(channelId, async () => {
+    const channel = await fetchTextChannel(client, channelId);
+    const msg = await channel.messages.fetch(messageId);
+    await msg.edit({ embeds: opts.embeds, components: opts.components });
+  });
+}
+
 export async function postToThread(client: Client, threadId: string, text: string): Promise<string> {
   return rateLimit.enqueue(threadId, async () => {
     const thread = await fetchThreadChannel(client, threadId);

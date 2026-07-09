@@ -17,6 +17,7 @@ vi.mock("../src/discord/rest.js", () => ({
   postToChannel: vi.fn().mockResolvedValue("msg-3"),
   postEmbedToThread: vi.fn().mockResolvedValue("msg-4"),
   postToThread: vi.fn().mockResolvedValue("msg-5"),
+  editMessageInChannel: vi.fn().mockResolvedValue(undefined),
 }));
 
 function sha256(text: string): string {
@@ -125,6 +126,50 @@ describe("runConfirmationSweep — carousel-batch shape detection", () => {
     expect(postEmbedsToChannel).not.toHaveBeenCalled();
   });
 
+  // ─── THE MIGRATION PIN (codex round-3 P2, PR #27) ────────────────────────
+  //
+  // Deploy-day exact case: an interaction the OLD generic sweep already
+  // rendered as a 1-of-N generic card (< 24h ago — so it carries a fresh
+  // `posted` marker) but has NO carousel state yet (never seen by the new
+  // path). Carousel-shape detection MUST run before the generic throttle
+  // check consults that marker, or the interaction is stuck behind the
+  // generic path for up to 24h despite being carousel-shaped.
+  it("pending carousel interaction with a fresh generic 'posted' marker and NO carousel state → carousel path posts fully (deploy-day migration case)", async () => {
+    const { runConfirmationSweep, CONFIRMATION_SWEEP_STATE_KEY, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedToChannel, postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([3, 3]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    // Seed: the OLD generic sweep already posted this interactionId 2h ago —
+    // well within the 24h throttle window.
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CONFIRMATION_SWEEP_STATE_KEY },
+      { "int-1": new Date(Date.now() - 2 * 3_600_000).toISOString() },
+    );
+    // No pre-existing carousel state — this is the FIRST time the new sweep
+    // sees this interaction.
+    const carouselStateBefore = await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    });
+    expect(carouselStateBefore).toBeNull();
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // Carousel path fired fully — NOT blocked by the generic throttle.
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+    expect(postEmbedsToChannel).toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+
+    const carouselStateAfter = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(carouselStateAfter["int-1"].headerPosted).toBe(true);
+    expect(carouselStateAfter["int-1"].trailerPosted).toBe(true);
+    expect(carouselStateAfter["int-1"].sectionsPosted).toBe(2);
+  });
+
   it("posts a header message with week/batch title, carousel count, total image count, and paperclip link", async () => {
     const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
     const { postToChannel } = await import("../src/discord/rest.js");
@@ -191,8 +236,9 @@ describe("runConfirmationSweep — carousel-batch shape detection", () => {
     expect(trailerCalls).toHaveLength(1);
     const row = trailerCalls[0][3][0];
     const customIds = row.components.map((c: any) => c.custom_id);
-    expect(customIds.some((id: string) => id.startsWith("carousel-confirm-accept:"))).toBe(true);
-    expect(customIds.some((id: string) => id.startsWith("carousel-confirm-reject:"))).toBe(true);
+    // New versioned prefixes carry a hash8 token: car-ok:<hash8>:issueId:interactionId.
+    expect(customIds.some((id: string) => id.startsWith("car-ok:"))).toBe(true);
+    expect(customIds.some((id: string) => id.startsWith("car-no:"))).toBe(true);
   });
 });
 
@@ -486,5 +532,135 @@ describe("runConfirmationSweep — carousel-batch artifact-hash invalidation", (
     expect(finalState["int-1"].totalSections).toBe(3);
     expect(finalState["int-1"].artifactHash).toBe(sha256(newMarkdown.trim()));
     expect(finalState["int-1"].sectionsPosted).toBe(3);
+  });
+
+  it("trailer's posted messageId is persisted in state (needed to disable it on a later re-post)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_client: unknown, _channelId: string, _embeds: unknown, components?: unknown) =>
+        components !== undefined ? "trailer-msg-id-123" : "slide-msg-id",
+    );
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].trailerMessageId).toBe("trailer-msg-id-123");
+  });
+});
+
+// ─── Best-effort old-trailer disable on hashChanged re-post (FIX (b), codex round 3, PR #27) ───
+
+describe("runConfirmationSweep — hashChanged re-post attempts to disable the PREVIOUS trailer", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls editMessageInChannel for the old trailerMessageId, stripping components + annotating", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    const newMarkdown = buildBatch([3, 3, 3]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(oldMarkdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "old-trailer-msg-id",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: newMarkdown } })]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, messageId, opts] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("ch-carousel");
+    expect(messageId).toBe("old-trailer-msg-id");
+    expect(opts.components).toEqual([]);
+  });
+
+  it("tolerates editMessageInChannel throwing (Discord API failure) — re-post proceeds to completion regardless", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel, postToChannel } = await import("../src/discord/rest.js");
+    (editMessageInChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("message not found: old-trailer-msg-id"));
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    const newMarkdown = buildBatch([3, 3, 3]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(oldMarkdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "old-trailer-msg-id",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: newMarkdown } })]);
+    await expect(
+      runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip),
+    ).resolves.not.toThrow();
+
+    // The full re-post still completes (header re-posted) despite the edit failure.
+    const textCalls = (postToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const headerCalls = textCalls.filter(([, , msg]) => (msg as string).includes("Carousel batch awaiting confirmation"));
+    expect(headerCalls).toHaveLength(1);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].sectionsPosted).toBe(3);
+  });
+
+  it("no trailerMessageId on the existing record (older pre-field state) → does NOT call editMessageInChannel, proceeds normally", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    const newMarkdown = buildBatch([3, 3, 3]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(oldMarkdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          // no trailerMessageId
+        },
+      },
+    );
+
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: newMarkdown } })]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).not.toHaveBeenCalled();
   });
 });

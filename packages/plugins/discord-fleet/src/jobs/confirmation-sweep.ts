@@ -3,8 +3,8 @@ import type { Client } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { DiscordFleetConfig } from "../config/schema.js";
 import type { PaperclipClient, PaperclipIssue, PaperclipInteraction } from "../api/paperclip.js";
-import { postEmbedToChannel, postEmbedsToChannel, postToChannel } from "../discord/rest.js";
-import { enforceEmbedLimits, buildCarouselConfirmationActionRow } from "../render/embeds.js";
+import { postEmbedToChannel, postEmbedsToChannel, postToChannel, editMessageInChannel } from "../discord/rest.js";
+import { enforceEmbedLimits, buildCarouselConfirmationActionRow, CAROUSEL_HASH_TOKEN_LEN } from "../render/embeds.js";
 import { chunkEmbedsForDiscord } from "../render/issue-docs.js";
 import {
   parseCarouselBatchMarkdown,
@@ -41,10 +41,16 @@ export interface CarouselBatchSweepRecord {
   artifactHash: string;
   headerPosted: boolean;
   trailerPosted: boolean;
+  // The posted trailer message's Discord id — lets a later hashChanged
+  // re-post best-effort-disable this (now stale) trailer's buttons. Absent on
+  // records created before this field existed (older re-post can't be found).
+  trailerMessageId?: string;
 }
 type CarouselBatchSweepState = Record<string, CarouselBatchSweepRecord>;
 
-function sha256(text: string): string {
+// Exported so the carousel-confirmation button handler can recompute the same
+// hash at click time (customId version-token verification — PR #27 codex round 3).
+export function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
@@ -150,6 +156,35 @@ async function postCarouselBatch(
       ? { postedAt: new Date(now).toISOString(), sectionsPosted: 0, totalSections, artifactHash, headerPosted: false, trailerPosted: false }
       : { ...existing, totalSections };
 
+  // Best-effort disable of the PREVIOUS trailer (FIX (b), PR #27 codex round 3):
+  // its buttons carry the OLD hash8 and would otherwise sit live forever,
+  // confusing operators into thinking they can still act on it. This is
+  // belt-and-suspenders only — the customId version-token check at click time
+  // (FIX (a)) is what actually prevents a stale accept/reject from taking
+  // effect, so a failure here (message deleted, permissions, API hiccup) is
+  // logged and swallowed, never fatal to the re-post.
+  if (hashChanged && existing?.trailerMessageId) {
+    try {
+      await editMessageInChannel(client, channelId, existing.trailerMessageId, {
+        embeds: [
+          enforceEmbedLimits({
+            color: 0x99aab5,
+            title: "⚠️ Superseded by a newer version below",
+            description: "This batch was revised — use the newest decision card for this issue.",
+          }),
+        ],
+        components: [],
+      });
+    } catch (err) {
+      ctx.logger.warn("confirmation-sweep: best-effort disable of superseded trailer failed — proceeding (version-token guard still applies)", {
+        companyId: company.companyId,
+        interactionId: interaction.id,
+        trailerMessageId: existing.trailerMessageId,
+        error: String(err),
+      });
+    }
+  }
+
   if (!record.headerPosted) {
     const totalImages = parsed.totalImagesFound;
     const headerLines = [
@@ -223,7 +258,8 @@ async function postCarouselTrailer(
   now: number,
 ): Promise<boolean> {
   try {
-    await postEmbedsToChannel(
+    const hash8 = record.artifactHash.slice(0, CAROUSEL_HASH_TOKEN_LEN);
+    const messageId = await postEmbedsToChannel(
       client,
       channelId,
       [
@@ -233,9 +269,9 @@ async function postCarouselTrailer(
           description: `[View full batch in Paperclip](${issueUrl})`,
         }),
       ],
-      [buildCarouselConfirmationActionRow(issue.id, interaction.id)],
+      [buildCarouselConfirmationActionRow(issue.id, interaction.id, hash8)],
     );
-    state[interaction.id] = { ...record, trailerPosted: true, postedAt: new Date(now).toISOString() };
+    state[interaction.id] = { ...record, trailerPosted: true, postedAt: new Date(now).toISOString(), trailerMessageId: messageId };
     return true;
   } catch (err) {
     ctx.logger.warn("confirmation-sweep: carousel-batch trailer post failed — will retry next sweep", {
@@ -379,11 +415,6 @@ export async function runConfirmationSweep(
 
         for (const interaction of pendingConfirmations) {
           try {
-          // safeParseMs: a corrupted stored timestamp becomes null ("never
-          // posted") instead of NaN silently bypassing the 24h throttle.
-          const lastPosted = safeParseMs(posted[interaction.id]);
-          if (lastPosted !== null && now - lastPosted < RETHRESHOLD_MS) continue;
-
           const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
           // interaction.payload is Record<string,unknown> — guard against non-string detailsMarkdown.
           // Fall back to payload.prompt (string) when detailsMarkdown is absent or empty, as the
@@ -397,10 +428,16 @@ export async function runConfirmationSweep(
                 ? rawPrompt.trim()
                 : "";
 
-          // Carousel-batch shape: take the dedicated multi-slide-embed +
-          // accept/reject-buttons path entirely, bypassing the generic
-          // single-embed path below. postCarouselBatch owns its own
-          // idempotency/resume state (carouselState), not `posted`.
+          // Carousel-batch shape detection happens BEFORE the generic 24h
+          // `posted` throttle below (codex round-3 P2, PR #27): a carousel
+          // interaction migrating from the OLD generic sweep can already carry
+          // a `posted` marker from when it was rendered as a 1-of-N generic
+          // card. Consulting that marker here would `continue` past the new
+          // renderer for up to 24h — exactly the deploy-day case this PR
+          // exists to fix. Once an interaction is carousel-shaped, it is
+          // governed ONLY by carouselState (postCarouselBatch's own resume/
+          // hash idempotency) — the generic `posted` marker for it is ignored
+          // permanently, not just this tick.
           //
           // A carouselState record already existing for this interaction means
           // it was already identified as carousel-batch on a prior sweep — skip
@@ -412,6 +449,12 @@ export async function runConfirmationSweep(
             await postCarouselBatch(ctx, client, rule.channelId, company, issue, interaction, detailsMarkdown, carouselState, now);
             continue;
           }
+
+          // Generic path only: safeParseMs turns a corrupted stored timestamp
+          // into null ("never posted") instead of NaN silently bypassing the
+          // 24h throttle.
+          const lastPosted = safeParseMs(posted[interaction.id]);
+          if (lastPosted !== null && now - lastPosted < RETHRESHOLD_MS) continue;
 
           const imageUrl = detailsMarkdown ? extractFirstImageUrl(detailsMarkdown) : null;
           const bodyText = detailsMarkdown ? stripImageLines(detailsMarkdown) : "";
