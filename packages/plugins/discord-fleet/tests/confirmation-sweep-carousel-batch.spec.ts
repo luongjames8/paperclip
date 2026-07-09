@@ -220,6 +220,25 @@ describe("runConfirmationSweep — carousel-batch shape detection", () => {
     expect(header).not.toContain("20000-char cap");
   });
 
+  // Reconciliation guard (seam-hardening P1, PR #27): an image the parser
+  // could not attribute to any section must surface as a loud header
+  // warning, never a silent drop.
+  it("emits the 'could not be attributed' warning line in the header when an image sits above the first heading", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const orphanImage = `![orphan](https://r2.example.com/orphan/slide-1.jpg)\n`;
+    const markdown = orphanImage + buildBatch([2, 2]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const calls = (postToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const header = calls[0][2] as string;
+    expect(header).toContain("could not be attributed");
+  });
+
   it("posts a trailer message with decision buttons (accept/reject action row) exactly once", async () => {
     const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
     const { postEmbedsToChannel } = await import("../src/discord/rest.js");
@@ -662,5 +681,408 @@ describe("runConfirmationSweep — hashChanged re-post attempts to disable the P
     await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
 
     expect(editMessageInChannel).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Persistence boundary: state.set fires per-post, not just once at the end ───
+
+describe("runConfirmationSweep — carousel-batch persistence boundary (durable checkpoint per post)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("a 3-section batch calls ctx.state.set for the carousel key repeatedly during the run — header, each section, and trailer — not just once at sweep end", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+
+    const harness = createTestHarness({ manifest });
+    const setSpy = vi.spyOn(harness.ctx.state, "set");
+    const markdown = buildBatch([2, 2, 2]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const carouselStateKey = { scopeKind: "company" as const, scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY };
+    const carouselSetCalls = setSpy.mock.calls.filter(([key]) => (key as typeof carouselStateKey).stateKey === carouselStateKey.stateKey);
+
+    // header (1) + section 1 (1) + section 2 (1) + section 3 (1) + trailer (1)
+    // + the final unconditional write at sweep end == at least 5 durable
+    // writes for this one batch, not a single write at the very end.
+    expect(carouselSetCalls.length).toBeGreaterThanOrEqual(5);
+
+    // The record was ALREADY fully posted (headerPosted, all sections,
+    // trailerPosted) by an intermediate call — not only by the very last one.
+    const intermediateFullyPosted = carouselSetCalls.slice(0, -1).some(([, value]) => {
+      const rec = (value as Record<string, any>)["int-1"];
+      return rec?.headerPosted === true && rec?.sectionsPosted === 3 && rec?.trailerPosted === true;
+    });
+    expect(intermediateFullyPosted).toBe(true);
+  });
+
+  it("a section-post failure mid-batch persists the partial record via state.set BEFORE runConfirmationSweep returns (durable checkpoint, not an end-of-run write)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const setSpy = vi.spyOn(harness.ctx.state, "set");
+    const markdown = buildBatch([2, 2, 2]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    // Fail on the 2nd section's slide-embed post.
+    let slideEmbedCallCount = 0;
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockImplementation(async (_client, _channelId, _embeds, components) => {
+      if (components === undefined) {
+        slideEmbedCallCount++;
+        if (slideEmbedCallCount === 2) throw new Error("simulated Discord outage");
+      }
+      return "msg-x";
+    });
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const carouselStateKey = { scopeKind: "company" as const, scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY };
+    const carouselSetCalls = setSpy.mock.calls.filter(([key]) => (key as typeof carouselStateKey).stateKey === carouselStateKey.stateKey);
+
+    // At least one persisted call already carries the partial record
+    // (section 1 done, section 2 failed) — proving the write happened at the
+    // point of failure, not merely reconstructable from the final state.
+    const partialPersisted = carouselSetCalls.some(([, value]) => {
+      const rec = (value as Record<string, any>)["int-1"];
+      return rec?.headerPosted === true && rec?.sectionsPosted === 1 && rec?.trailerPosted === false;
+    });
+    expect(partialPersisted).toBe(true);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].sectionsPosted).toBe(1);
+    expect(finalState["int-1"].trailerPosted).toBe(false);
+  });
+});
+
+// ─── Orphan-resume pass: partial records whose issue no longer rule-matches ───
+
+describe("runConfirmationSweep — carousel-batch orphan-resume pass", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("resumes sections 2-3 + trailer to the RECORDED channelId for a partial record whose issue is no longer rule-matched", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2, 2]);
+
+    // The issue is retitled — no longer matches CONFIG's "Carousel" titleRegex
+    // — and getOpenIssues() no longer returns it (dropped out of the rule's
+    // reach). Only the orphan-resume pass's listIssueInteractions(issueId)
+    // call can find its pending interaction.
+    const orphanedInteraction = makeInteraction({ payload: { detailsMarkdown: markdown } });
+    const paperclip = makePaperclip([], [orphanedInteraction]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 1,
+          totalSections: 3,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: false,
+          issueId: "iss-1",
+          issueIdentifier: "ISS-1",
+          issueTitle: "Retitled — no longer matches",
+          channelId: "ch-recorded-orphan",
+        },
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // Sections 2 and 3 (resume from sectionsPosted=1) plus the trailer posted
+    // to the RECORDED channelId, not the rule's channelId (the rule never
+    // matched — there is no rule channelId available for this issue).
+    const textCalls = (postToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const captionCalls = textCalls.filter(([, , msg]) => /^\*\*\d+\./.test(msg as string));
+    expect(captionCalls).toHaveLength(2);
+    captionCalls.forEach(([, channelId]) => expect(channelId).toBe("ch-recorded-orphan"));
+    const postedIndices = captionCalls.map(([, , msg]) => Number(/^\*\*(\d+)\./.exec(msg as string)![1]));
+    expect(postedIndices.sort()).toEqual([2, 3]);
+
+    const embedCalls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const trailerCalls = embedCalls.filter(([, , , components]) => components !== undefined);
+    expect(trailerCalls).toHaveLength(1);
+    expect(trailerCalls[0][1]).toBe("ch-recorded-orphan");
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].sectionsPosted).toBe(3);
+    expect(finalState["int-1"].trailerPosted).toBe(true);
+  });
+
+  it("orphaned interaction resolved to 'accepted' while orphaned → record deleted from state, nothing posted", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2, 2]);
+
+    // The interaction resolved (accepted) while it sat orphaned — no longer pending.
+    const resolvedInteraction = makeInteraction({ status: "accepted", payload: { detailsMarkdown: markdown } });
+    const paperclip = makePaperclip([], [resolvedInteraction]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 1,
+          totalSections: 3,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: false,
+          issueId: "iss-1",
+          issueIdentifier: "ISS-1",
+          issueTitle: "Retitled — no longer matches",
+          channelId: "ch-recorded-orphan",
+        },
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any> | null;
+    expect(finalState?.["int-1"]).toBeUndefined();
+  });
+});
+
+// ─── Trailer attempt-marker: persist-before-post ordering + "may duplicate" ───
+
+describe("runConfirmationSweep — trailer attempt-marker persists BEFORE the post", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("ctx.state.set (carrying trailerAttemptAt) is called before postEmbedsToChannel for the trailer", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const setSpy = vi.spyOn(harness.ctx.state, "set");
+    const markdown = buildBatch([2, 2]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    const order: string[] = [];
+    setSpy.mockImplementation(async (key: any, value: any) => {
+      if (key.stateKey === CAROUSEL_BATCH_SWEEP_STATE_KEY && value?.["int-1"]?.trailerAttemptAt) {
+        order.push("persist-attempt-marker");
+      }
+    });
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_client: unknown, _channelId: string, _embeds: unknown, components?: unknown) => {
+        if (components !== undefined) order.push("post-trailer");
+        return "msg-x";
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const attemptIdx = order.indexOf("persist-attempt-marker");
+    const postIdx = order.indexOf("post-trailer");
+    expect(attemptIdx).toBeGreaterThanOrEqual(0);
+    expect(postIdx).toBeGreaterThanOrEqual(0);
+    expect(attemptIdx).toBeLessThan(postIdx);
+  });
+
+  it("a record with trailerAttemptAt set but trailerPosted false → the posted trailer embed description contains 'may duplicate'", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    // Simulates a crash between the trailer post and the success persist on a
+    // prior tick: attemptAt is set, trailerPosted is still false, sections done.
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: false,
+          trailerAttemptAt: new Date(Date.now() - 60_000).toISOString(),
+        },
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const embedCalls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const trailerCalls = embedCalls.filter(([, , , components]) => components !== undefined);
+    expect(trailerCalls).toHaveLength(1);
+    const trailerEmbeds = trailerCalls[0][2] as any[];
+    expect(trailerEmbeds[0].description).toContain("may duplicate");
+  });
+});
+
+// ─── Orphan pass: fully-posted branch (resolved vs still-pending) ───
+
+describe("runConfirmationSweep — orphan pass, fully-posted branch", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("resolved interaction (status accepted) → editMessageInChannel called on trailerMessageId with components: [], record deleted", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    // Not rule-matched this tick (getOpenIssues returns []) — only the orphan
+    // pass's own listIssueInteractions(rec.issueId) call can see it, and it
+    // reports the interaction as resolved (status "accepted").
+    const resolvedInteraction = makeInteraction({ status: "accepted", payload: { detailsMarkdown: markdown } });
+    const paperclip = makePaperclip([], [resolvedInteraction]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "trailer-msg-resolved",
+          issueId: "iss-1",
+          issueIdentifier: "ISS-1",
+          issueTitle: "Some batch",
+          channelId: "ch-carousel",
+        },
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, messageId, opts] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("ch-carousel");
+    expect(messageId).toBe("trailer-msg-resolved");
+    expect(opts.components).toEqual([]);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any> | null;
+    expect(finalState?.["int-1"]).toBeUndefined();
+  });
+
+  it("still-pending interaction → record kept, nothing edited", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    // Fully posted per the record, but the re-fetched interaction is STILL
+    // pending (e.g. the operator hasn't decided yet) — the fully-posted
+    // orphan branch must leave it alone.
+    const stillPendingInteraction = makeInteraction({ status: "pending", payload: { detailsMarkdown: markdown } });
+    const paperclip = makePaperclip([], [stillPendingInteraction]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "trailer-msg-pending",
+          issueId: "iss-1",
+          issueIdentifier: "ISS-1",
+          issueTitle: "Some batch",
+          channelId: "ch-carousel",
+        },
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).not.toHaveBeenCalled();
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"]).toBeDefined();
+    expect(finalState["int-1"].sectionsPosted).toBe(2);
+  });
+});
+
+// ─── Pre-provenance orphan: partial record from older code, no issueId/channelId ───
+
+describe("runConfirmationSweep — pre-provenance orphan (no issueId/channelId, not rule-matched)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("logs a warning and keeps the record, posting nothing, when a partial record lacks provenance and its issue isn't rule-matched", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const warnSpy = vi.spyOn(harness.ctx.logger, "warn");
+    const markdown = buildBatch([2, 2, 2]);
+
+    // No issue matches the rule at all this tick (getOpenIssues returns []) —
+    // the pre-provenance record cannot be reached by the rule loop AND has no
+    // issueId/channelId for the orphan-resume pass to use.
+    const paperclip = makePaperclip([], []);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 1,
+          totalSections: 3,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: false,
+          // no issueId / issueIdentifier / issueTitle / channelId — pre-upgrade record.
+        },
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+
+    const warnCalls = warnSpy.mock.calls;
+    const provenanceWarning = warnCalls.find(([message]) =>
+      typeof message === "string" && message.includes("lacks provenance"),
+    );
+    expect(provenanceWarning).toBeDefined();
+
+    // Record is kept (not deleted) — it may still complete if a rule matches
+    // its issue again later.
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"]).toBeDefined();
+    expect(finalState["int-1"].sectionsPosted).toBe(1);
   });
 });

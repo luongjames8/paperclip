@@ -123,6 +123,11 @@ function resolveCompany(config: DiscordFleetConfig, guildId: string | null): Com
   return config.companies.find((c) => c.guildId === guildId);
 }
 
+// NOTE: authorization here is PRESENCE in userMappings only — the mapping's
+// `role` field is declarative metadata and is NOT enforced (same behavior as
+// the approval-button gate; the whole plugin never reads `role`). Do not
+// configure roles expecting per-role decision rights: plugin-wide role
+// enforcement is tracked in openclaw-fleet#462.
 function resolveUserMapping(company: CompanyConfig, discordUserId: string): UserMapping | undefined {
   return company.userMappings?.find((m) => m.discordUserId === discordUserId);
 }
@@ -281,7 +286,21 @@ export async function handleCarouselConfirmationRejectModal(
     return;
   }
 
-  await interaction.deferUpdate();
+  // Same 10062 guard as the accept path: if the 3s ack window expired (slow
+  // pre-ack API round-trips), the operator's typed reason is LOST — log it
+  // loudly so the loss is diagnosable; they must click Reject again.
+  try {
+    await interaction.deferUpdate();
+  } catch (err: any) {
+    if (err?.code === 10062) {
+      ctx.logger.warn("carousel-confirmation-reject-modal: interaction expired before deferUpdate (3s window) — typed rejection reason LOST, operator must retry", {
+        issueId: parsed.issueId,
+        interactionId: parsed.interactionId,
+      });
+      return;
+    }
+    throw err;
+  }
 
   try {
     await paperclip.rejectInteraction(parsed.issueId, parsed.interactionId, reason);

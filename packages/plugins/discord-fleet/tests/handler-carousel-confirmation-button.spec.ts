@@ -548,4 +548,34 @@ describe("handleCarouselConfirmationRejectModal", () => {
     );
     expect(mockRejectInteraction).not.toHaveBeenCalled();
   });
+
+  // ─── deferUpdate 3s-window guard on modal submit ───────────────────────────
+  // If deferUpdate throws Discord's "Unknown interaction" (code 10062) — the
+  // 3s ack window expired before the API round-trip completed — the typed
+  // rejection reason is LOST. This must log loudly (so the loss is
+  // diagnosable) and return quietly: no rejectInteraction call, no throw.
+  it("deferUpdate throwing {code:10062} → warn logged containing 'reason LOST', no rejectInteraction call, no throw", async () => {
+    const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    const warnSpy = vi.spyOn(harness.ctx.logger, "warn");
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(
+      `${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`,
+      { reason: "Wrong week's slides" },
+    );
+    const expiredErr: any = new Error("Unknown interaction");
+    expiredErr.code = 10062;
+    interaction.deferUpdate = vi.fn().mockRejectedValue(expiredErr);
+
+    await expect(
+      handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig()),
+    ).resolves.toBeUndefined();
+
+    expect(mockRejectInteraction).not.toHaveBeenCalled();
+    const lostWarning = warnSpy.mock.calls.find(
+      ([message]) => typeof message === "string" && message.includes("reason LOST"),
+    );
+    expect(lostWarning).toBeDefined();
+  });
 });

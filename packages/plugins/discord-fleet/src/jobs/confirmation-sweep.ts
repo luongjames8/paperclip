@@ -45,6 +45,27 @@ export interface CarouselBatchSweepRecord {
   // re-post best-effort-disable this (now stale) trailer's buttons. Absent on
   // records created before this field existed (older re-post can't be found).
   trailerMessageId?: string;
+  // Set (and durably persisted) IMMEDIATELY BEFORE attempting the trailer
+  // post. If a crash lands between the Discord post and the success persist,
+  // the next tick sees attemptAt-without-trailerPosted and knows a live
+  // duplicate MAY exist — the re-post then carries an explicit supersede note.
+  // Correctness floor either way: both trailers carry the same hash8 and the
+  // server resolves the interaction once (second click → 409 already-resolved).
+  trailerAttemptAt?: string;
+  // Same pre-post markers for the header and the current section — a crash in
+  // the post↔persist window is then detectable on resume, and the re-post
+  // carries a "may repeat content above" note instead of a silent twin.
+  headerAttemptAt?: string;
+  sectionAttemptAt?: string;
+  // Provenance (seam-hardening pass, PR #27): where this partial batch lives,
+  // recorded so a mid-resume interaction stays resumable even when the issue
+  // no longer matches any rule's titleRegex / open-status filter (retitle,
+  // rule edit, status drift). Absent on records created by older code — those
+  // can only resume via the rule match (logged when orphaned).
+  issueId?: string;
+  issueIdentifier?: string;
+  issueTitle?: string;
+  channelId?: string;
 }
 type CarouselBatchSweepState = Record<string, CarouselBatchSweepRecord>;
 
@@ -71,6 +92,20 @@ function extractFirstImageUrl(text: string): string | null {
 // Strip all image markdown lines from text.
 function stripImageLines(text: string): string {
   return text.split("\n").filter((line) => !/^!\[/.test(line.trim())).join("\n").trim();
+}
+
+// Extract the renderable markdown from an interaction payload:
+// detailsMarkdown preferred, prompt as fallback (the interactions schema
+// requires prompt; agents may omit detailsMarkdown). One definition — the
+// sweep loop, the orphan-resume pass, and hashing must all see the same text.
+export function extractInteractionDetails(interaction: PaperclipInteraction): string {
+  const rawDetails = interaction.payload?.detailsMarkdown;
+  const rawPrompt = interaction.payload?.prompt;
+  return typeof rawDetails === "string" && rawDetails.trim()
+    ? rawDetails.trim()
+    : typeof rawPrompt === "string" && rawPrompt.trim()
+      ? rawPrompt.trim()
+      : "";
 }
 
 function chunkBySection(text: string): string[] {
@@ -113,6 +148,12 @@ async function postCarouselBatch(
   detailsMarkdown: string,
   state: CarouselBatchSweepState,
   now: number,
+  // Durably writes `state` NOW. Called after EVERY record mutation that
+  // follows an irreversible Discord post — the persistence boundary must
+  // match the side-effect boundary (seam-hardening P1: a crash between a
+  // post and the end-of-loop state write used to revert the record and
+  // duplicate the whole card next tick).
+  persist: () => Promise<void>,
 ): Promise<void> {
   const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
   const artifactHash = sha256(detailsMarkdown);
@@ -141,20 +182,29 @@ async function postCarouselBatch(
     !existing.trailerPosted &&
     existing.sectionsPosted >= existing.totalSections
   ) {
-    await postCarouselTrailer(ctx, client, channelId, company.companyId, issue, interaction, issueUrl, existing, state, now);
+    await postCarouselTrailer(ctx, client, channelId, company.companyId, issue, interaction, issueUrl, existing, state, now, persist);
     return;
   }
 
   const parsed = parseCarouselBatchMarkdown(detailsMarkdown);
   const totalSections = parsed.sections.length;
 
+  // Provenance recorded on every record (new or carried) so a mid-resume
+  // interaction survives rule/title/status drift (orphan-resume pass).
+  const provenance = {
+    issueId: issue.id,
+    issueIdentifier: issue.identifier,
+    issueTitle: issue.title,
+    channelId,
+  };
+
   // Hash changed from a previously (partially or fully) posted record: full
   // re-post — reset the resume record to start from zero.
   const hashChanged = existing && existing.artifactHash !== artifactHash;
   const record: CarouselBatchSweepRecord =
     !existing || hashChanged
-      ? { postedAt: new Date(now).toISOString(), sectionsPosted: 0, totalSections, artifactHash, headerPosted: false, trailerPosted: false }
-      : { ...existing, totalSections };
+      ? { postedAt: new Date(now).toISOString(), sectionsPosted: 0, totalSections, artifactHash, headerPosted: false, trailerPosted: false, ...provenance }
+      : { ...existing, totalSections, ...provenance };
 
   // Best-effort disable of the PREVIOUS trailer (FIX (b), PR #27 codex round 3):
   // its buttons carry the OLD hash8 and would otherwise sit live forever,
@@ -197,10 +247,33 @@ async function postCarouselBatch(
         `⚠️ artifact hit the 20000-char cap — showing FIRST SLIDE ONLY per carousel; full sets in paperclip: ${issueUrl}`,
       );
     }
+    if (parsed.unattributedImages > 0) {
+      // Reconciliation guard (seam-hardening P1): the parser could not
+      // attribute every raw image to a section (image above the first
+      // heading, or a heading the grammar rejected). Losing slides silently
+      // is the historical failure this whole surface exists to fix.
+      headerLines.push(
+        `⚠️ ${parsed.unattributedImages} image(s) in the artifact could not be attributed to a carousel section and are NOT shown below — review the full batch in Paperclip: ${issueUrl}`,
+      );
+    }
+    if (parsed.rejectedHeadingLines.length > 0) {
+      // Name the dropped sections — never an anonymous statistic.
+      headerLines.push(
+        `⚠️ heading-like line(s) the parser rejected (their sections are NOT shown below): ${parsed.rejectedHeadingLines.map((l) => `"${l}"`).join(" · ")} — review in Paperclip: ${issueUrl}`,
+      );
+    }
+    if (record.headerAttemptAt && !record.headerPosted) {
+      headerLines.push("⚠️ This may repeat a header just above (retry after an interrupted post).");
+    }
     try {
+      // Durable attempt marker BEFORE the post (crash-window detection).
+      record.headerAttemptAt = new Date(now).toISOString();
+      state[interaction.id] = { ...record };
+      await persist();
       await postToChannel(client, channelId, stripSecrets(headerLines.join("\n")));
       record.headerPosted = true;
       state[interaction.id] = { ...record };
+      await persist();
     } catch (err) {
       ctx.logger.warn("confirmation-sweep: carousel-batch header post failed — will retry next sweep", {
         companyId: company.companyId,
@@ -215,19 +288,31 @@ async function postCarouselBatch(
   // already posted (both embeds and caption succeeded for each).
   for (let i = record.sectionsPosted; i < parsed.sections.length; i++) {
     const section = parsed.sections[i];
-    const posted = await postCarouselSection(ctx, client, channelId, company.companyId, interaction.id, issueUrl, section);
+    // Ambiguous prior attempt on THIS index (crash between the section's
+    // posts and the checkpoint persist) → the caption carries a note.
+    const maybeRepeats = i === record.sectionsPosted && Boolean(record.sectionAttemptAt);
+    // Durable attempt marker BEFORE the section's posts.
+    record.sectionAttemptAt = new Date(now).toISOString();
+    state[interaction.id] = { ...record };
+    await persist();
+    const posted = await postCarouselSection(ctx, client, channelId, company.companyId, interaction.id, issueUrl, section, maybeRepeats);
     if (!posted) {
       // Partial failure: persist what succeeded so far and stop — next sweep
       // resumes from this same section index.
       state[interaction.id] = { ...record };
+      await persist();
       return;
     }
     record.sectionsPosted = i + 1;
+    record.sectionAttemptAt = undefined;
     state[interaction.id] = { ...record };
+    // Durable checkpoint per section, cleared attempt marker — a crash after
+    // this section's messages landed must never replay them silently.
+    await persist();
   }
 
   if (!record.trailerPosted) {
-    const ok = await postCarouselTrailer(ctx, client, channelId, company.companyId, issue, interaction, issueUrl, record, state, now);
+    const ok = await postCarouselTrailer(ctx, client, channelId, company.companyId, issue, interaction, issueUrl, record, state, now, persist);
     if (!ok) return;
   }
 
@@ -256,9 +341,20 @@ async function postCarouselTrailer(
   record: CarouselBatchSweepRecord,
   state: CarouselBatchSweepState,
   now: number,
+  persist: () => Promise<void>,
 ): Promise<boolean> {
   try {
     const hash8 = record.artifactHash.slice(0, CAROUSEL_HASH_TOKEN_LEN);
+    // A prior attempt with unknown outcome (crash between post and persist)
+    // means an identical live trailer MAY already be above — say so rather
+    // than posting a silent twin. The hash-versioned buttons + the server's
+    // single-resolution guard keep correctness regardless.
+    const maybeDuplicate = Boolean(record.trailerAttemptAt && !record.trailerPosted);
+    // Durable attempt marker BEFORE the irreversible post (persistence
+    // boundary precedes the side effect for the one message with buttons).
+    record.trailerAttemptAt = new Date(now).toISOString();
+    state[interaction.id] = { ...record };
+    await persist();
     const messageId = await postEmbedsToChannel(
       client,
       channelId,
@@ -266,12 +362,17 @@ async function postCarouselTrailer(
         enforceEmbedLimits({
           color: 0x5865f2,
           title: "Decision needed",
-          description: `[View full batch in Paperclip](${issueUrl})`,
+          description:
+            `[View full batch in Paperclip](${issueUrl})` +
+            (maybeDuplicate
+              ? "\n⚠️ This may duplicate an identical card just above (a retry after an interrupted post) — either works; the first decision wins."
+              : ""),
         }),
       ],
       [buildCarouselConfirmationActionRow(issue.id, interaction.id, hash8)],
     );
     state[interaction.id] = { ...record, trailerPosted: true, postedAt: new Date(now).toISOString(), trailerMessageId: messageId };
+    await persist();
     return true;
   } catch (err) {
     ctx.logger.warn("confirmation-sweep: carousel-batch trailer post failed — will retry next sweep", {
@@ -296,6 +397,7 @@ async function postCarouselSection(
   interactionId: string,
   issueUrl: string,
   section: CarouselSection,
+  maybeRepeats = false,
 ): Promise<boolean> {
   const allEmbeds = renderCarouselSlideEmbeds(section);
   const elided = allEmbeds.length > SECTION_EMBED_ELISION_CAP;
@@ -316,12 +418,18 @@ async function postCarouselSection(
     return false;
   }
 
+  // Order matters under truncation: the elision notice and repeat note go
+  // BEFORE the caption body so a long caption can never truncate them away
+  // (truncate() cuts the tail).
   const captionLines = [`**${section.index}. ${section.slug} (${section.day})**`];
-  if (section.caption) captionLines.push(section.caption);
   if (elided) {
     const remaining = allEmbeds.length - embedsToPost.length;
     captionLines.push(`+${remaining} more slides not shown — ${issueUrl}`);
   }
+  if (maybeRepeats) {
+    captionLines.push("⚠️ may repeat slides just above (retry after an interrupted post)");
+  }
+  if (section.caption) captionLines.push(section.caption);
 
   try {
     await postToChannel(client, channelId, truncate(stripSecrets(captionLines.join("\n")), CONTENT_CHUNK_MAX));
@@ -388,6 +496,14 @@ export async function runConfirmationSweep(
     const carouselStateKey = { scopeKind: "company" as const, scopeId: company.companyId, stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY };
     const carouselState = ((await ctx.state.get(carouselStateKey)) as CarouselBatchSweepState | null) ?? {};
     const now = Date.now();
+    // Durable-write closure for the carousel path: called by postCarouselBatch
+    // after every irreversible Discord post (persistence boundary == post
+    // boundary — seam-hardening P1).
+    const persistCarouselState = () => ctx.state.set(carouselStateKey, carouselState);
+    // Interaction ids the rule loop below actually processed this tick — the
+    // orphan-resume pass afterwards covers known-partial records the rules no
+    // longer reach (retitle / rule edit / status drift).
+    const visitedCarouselIds = new Set<string>();
 
     for (const rule of rules) {
       let regex: RegExp;
@@ -416,17 +532,7 @@ export async function runConfirmationSweep(
         for (const interaction of pendingConfirmations) {
           try {
           const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
-          // interaction.payload is Record<string,unknown> — guard against non-string detailsMarkdown.
-          // Fall back to payload.prompt (string) when detailsMarkdown is absent or empty, as the
-          // interactions schema requires prompt and agents may omit detailsMarkdown.
-          const rawDetails = interaction.payload?.detailsMarkdown;
-          const rawPrompt = interaction.payload?.prompt;
-          const detailsMarkdown =
-            typeof rawDetails === "string" && rawDetails.trim()
-              ? rawDetails.trim()
-              : typeof rawPrompt === "string" && rawPrompt.trim()
-                ? rawPrompt.trim()
-                : "";
+          const detailsMarkdown = extractInteractionDetails(interaction);
 
           // Carousel-batch shape detection happens BEFORE the generic 24h
           // `posted` throttle below (codex round-3 P2, PR #27): a carousel
@@ -446,7 +552,19 @@ export async function runConfirmationSweep(
           // once shape is settled).
           const knownCarousel = Boolean(carouselState[interaction.id]);
           if (detailsMarkdown && (knownCarousel || looksLikeCarouselBatch(detailsMarkdown))) {
-            await postCarouselBatch(ctx, client, rule.channelId, company, issue, interaction, detailsMarkdown, carouselState, now);
+            if (visitedCarouselIds.has(interaction.id)) {
+              // A SECOND rule matched the same issue this tick. The resume
+              // record is scoped to one channel (the first rule's) — multi-
+              // channel carousel posting is not supported. Loud, not silent.
+              ctx.logger.warn("confirmation-sweep: second rule matched an already-processed carousel interaction — skipping (record is channel-scoped to the first matching rule)", {
+                companyId: company.companyId,
+                interactionId: interaction.id,
+                skippedChannelId: rule.channelId,
+              });
+              continue;
+            }
+            visitedCarouselIds.add(interaction.id);
+            await postCarouselBatch(ctx, client, rule.channelId, company, issue, interaction, detailsMarkdown, carouselState, now, persistCarouselState);
             continue;
           }
 
@@ -513,6 +631,92 @@ export async function runConfirmationSweep(
             });
           }
         }
+      }
+    }
+
+    // Orphan-resume pass (seam-hardening P2): a partially-posted carousel
+    // record whose issue no longer matches any rule (retitled, rule edited)
+    // or dropped out of the open-issue status filter is unreachable by the
+    // rule loop above — without this pass it would stall forever, half-posted
+    // with no trailer/buttons and no error. Resume it from its recorded
+    // provenance; GC it when its interaction resolved while orphaned.
+    for (const [interactionId, rec] of Object.entries(carouselState)) {
+      if (visitedCarouselIds.has(interactionId)) continue;
+      const fullyPosted = rec.headerPosted && rec.trailerPosted && rec.sectionsPosted >= rec.totalSections;
+      if (fullyPosted) {
+        // Resolved-record GC: once the interaction leaves `pending`, its
+        // record is dead weight AND its trailer's buttons may still render
+        // live if the click-time strip was interrupted (accept succeeded,
+        // edit crashed). Strip best-effort, then drop the record.
+        if (!rec.issueId) continue; // cannot check without provenance; inert
+        try {
+          const interactions = await paperclip.listIssueInteractions(rec.issueId);
+          const inter = interactions.find((i) => i.id === interactionId);
+          if (inter && inter.status === "pending") continue; // still live; keep record
+          if (rec.trailerMessageId && rec.channelId) {
+            try {
+              await editMessageInChannel(client, rec.channelId, rec.trailerMessageId, {
+                embeds: [
+                  enforceEmbedLimits({
+                    color: 0x99aab5,
+                    title: "Resolved",
+                    description: "This batch decision was resolved — buttons removed.",
+                  }),
+                ],
+                components: [],
+              });
+            } catch {
+              /* best-effort; version-token click guard still refuses stale clicks */
+            }
+          }
+          delete carouselState[interactionId];
+          await persistCarouselState();
+        } catch {
+          /* API hiccup — retry next tick */
+        }
+        continue;
+      }
+      if (!rec.issueId || !rec.channelId) {
+        // Defensive only: the carousel state key is born in the same commit
+        // as these provenance fields, so records without them cannot occur in
+        // a real deployment (no pre-provenance build ever ran). Kept as a
+        // loud guard against future field removal.
+        ctx.logger.warn("confirmation-sweep: partial carousel record lacks provenance (pre-upgrade) — cannot orphan-resume; will complete only if a rule matches its issue again", {
+          companyId: company.companyId,
+          interactionId,
+        });
+        continue;
+      }
+      try {
+        const interactions = await paperclip.listIssueInteractions(rec.issueId);
+        const inter = interactions.find((i) => i.id === interactionId);
+        if (!inter || inter.status !== "pending") {
+          // Resolved (or deleted) while orphaned — the partial card is moot.
+          delete carouselState[interactionId];
+          await persistCarouselState();
+          continue;
+        }
+        const detailsMarkdown = extractInteractionDetails(inter);
+        if (!detailsMarkdown) continue;
+        const issueLike: PaperclipIssue = {
+          id: rec.issueId,
+          identifier: rec.issueIdentifier ?? rec.issueId,
+          title: rec.issueTitle ?? rec.issueIdentifier ?? "carousel batch",
+        } as PaperclipIssue;
+        ctx.logger.info("confirmation-sweep: orphan-resuming partial carousel batch (issue no longer rule-matched)", {
+          companyId: company.companyId,
+          interactionId,
+          issueId: rec.issueId,
+          sectionsPosted: rec.sectionsPosted,
+          totalSections: rec.totalSections,
+        });
+        await postCarouselBatch(ctx, client, rec.channelId, company, issueLike, inter, detailsMarkdown, carouselState, now, persistCarouselState);
+      } catch (err) {
+        ctx.logger.warn("confirmation-sweep: orphan-resume attempt failed — will retry next sweep", {
+          companyId: company.companyId,
+          interactionId,
+          error: String(err),
+        });
       }
     }
 

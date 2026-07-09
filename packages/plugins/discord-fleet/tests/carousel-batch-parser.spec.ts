@@ -151,6 +151,152 @@ describe("parseCarouselBatchMarkdown", () => {
   });
 });
 
+// Seam-hardening pass (PR #27): the slug group is permissive (`.+?`) so a
+// dot, space, or unicode char in an LLM-authored slug doesn't silently drop
+// the whole section from the parse.
+describe("parseCarouselBatchMarkdown — widened slug grammar", () => {
+  it("parses a slug containing a dot ('day-1.5-tour')", () => {
+    const markdown =
+      `**1. day-1.5-tour (Mon)**\n` +
+      `![slide1](https://r2.example.com/day-1.5-tour/slide-1.jpg)\n\n` +
+      `Caption for the half-day tour.\n`;
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    expect(parsed.sections).toHaveLength(1);
+    expect(parsed.sections[0].slug).toBe("day-1.5-tour");
+    expect(parsed.sections[0].day).toBe("Mon");
+    expect(parsed.sections[0].slideUrls).toEqual(["https://r2.example.com/day-1.5-tour/slide-1.jpg"]);
+  });
+
+  it("parses a slug containing a space ('tokyo tour')", () => {
+    const markdown =
+      `**2. tokyo tour (Wed)**\n` +
+      `![slide1](https://r2.example.com/tokyo-tour/slide-1.jpg)\n\n` +
+      `Caption for the tokyo tour.\n`;
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    expect(parsed.sections).toHaveLength(1);
+    expect(parsed.sections[0].slug).toBe("tokyo tour");
+    expect(parsed.sections[0].day).toBe("Wed");
+    expect(parsed.sections[0].slideUrls).toEqual(["https://r2.example.com/tokyo-tour/slide-1.jpg"]);
+  });
+
+  it("parses a unicode slug ('京都-散歩')", () => {
+    const markdown =
+      `**3. 京都-散歩 (Fri)**\n` +
+      `![slide1](https://r2.example.com/kyoto-walk/slide-1.jpg)\n\n` +
+      `Caption for the kyoto walk.\n`;
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    expect(parsed.sections).toHaveLength(1);
+    expect(parsed.sections[0].slug).toBe("京都-散歩");
+    expect(parsed.sections[0].day).toBe("Fri");
+    expect(parsed.sections[0].slideUrls).toEqual(["https://r2.example.com/kyoto-walk/slide-1.jpg"]);
+  });
+});
+
+// Seam-hardening pass (PR #27): the heading pattern is full-line anchored —
+// a heading-shaped string embedded mid-sentence in caption prose must not
+// split the section at a phantom boundary.
+describe("parseCarouselBatchMarkdown — full-line anchoring (no mid-sentence split)", () => {
+  it("a caption referencing a heading-shaped string mid-sentence does not start a new section", () => {
+    const markdown =
+      `**1. tokyo-by-car-guide (Mon)**\n` +
+      `![slide1](https://r2.example.com/tokyo-by-car-guide/slide-1.jpg)\n\n` +
+      `See below…see **2. shibuya-night (Tue)** which covers nightlife too.\n` +
+      `**2. shibuya-crossing-tips (Tue)**\n` +
+      `![slide1](https://r2.example.com/shibuya-crossing-tips/slide-1.jpg)\n\n` +
+      `Real second section caption.\n`;
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    // Only 2 TRUE sections — the mid-sentence "**2. shibuya-night (Tue)**"
+    // string does not create a phantom 3rd section, and does not truncate
+    // section 1's caption.
+    expect(parsed.sections).toHaveLength(2);
+    expect(parsed.sections[0].slug).toBe("tokyo-by-car-guide");
+    expect(parsed.sections[0].caption).toContain("See below…see **2. shibuya-night (Tue)** which covers nightlife too.");
+    expect(parsed.sections[1].slug).toBe("shibuya-crossing-tips");
+    expect(parsed.sections[1].caption).toBe("Real second section caption.");
+  });
+});
+
+// Seam-hardening pass (PR #27): reconciliation — an image above the first
+// heading is never silently dropped; it surfaces as unattributedImages, and
+// the sweep's header warns about it.
+describe("parseCarouselBatchMarkdown — unattributedImages reconciliation", () => {
+  it("an image line ABOVE the first heading is not attributed to any section", () => {
+    const markdown =
+      `![orphan](https://r2.example.com/orphan/slide-1.jpg)\n` +
+      `**1. tokyo-by-car-guide (Mon)**\n` +
+      `![slide1](https://r2.example.com/tokyo-by-car-guide/slide-1.jpg)\n\n` +
+      `Caption for section 1.\n`;
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    expect(parsed.sections).toHaveLength(1);
+    expect(parsed.unattributedImages).toBe(1);
+    // totalImagesFound counts only attributed (in-section) images.
+    expect(parsed.totalImagesFound).toBe(1);
+  });
+});
+
+// Pin: a URL containing a literal '(' before the closing ')' (e.g. an R2 key
+// with "(final)" in it) must be captured IN FULL — the lazy capture + boundary
+// lookahead must not truncate at the first ')' inside the URL.
+describe("parseCarouselBatchMarkdown — URL containing a literal paren", () => {
+  it("captures the full URL including '(final).jpg', unattributedImages 0", () => {
+    const markdown =
+      `**1. ${SLUGS[0]} (${DAYS[0]})**\n` +
+      `![s](https://r2.dev/a/slide-1(final).jpg)\n\n` +
+      `Caption text.\n`;
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    expect(parsed.sections).toHaveLength(1);
+    expect(parsed.sections[0].slideUrls).toEqual(["https://r2.dev/a/slide-1(final).jpg"]);
+    expect(parsed.unattributedImages).toBe(0);
+  });
+});
+
+// Pin: an image tag whose captured URL matches IMAGE_RE (no whitespace inside)
+// but throws on `new URL()` must be excluded from slideUrls and surfaced as
+// unattributedImages, never posted as a broken embed. `https://:bad` has no
+// host and is rejected by the URL constructor while still matching \S+.
+describe("parseCarouselBatchMarkdown — URL that matches the regex but fails new URL()", () => {
+  it("is excluded from slideUrls, unattributedImages 1", () => {
+    const markdown =
+      `**1. ${SLUGS[0]} (${DAYS[0]})**\n` +
+      `![x](https://:bad)\n\n` +
+      `Caption text.\n`;
+    // Sanity: the raw capture matches IMAGE_RE but new URL() rejects it —
+    // otherwise this pin would be testing the wrong failure mode.
+    expect(() => new URL("https://:bad")).toThrow();
+
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    expect(parsed.sections).toHaveLength(1);
+    expect(parsed.sections[0].slideUrls).toEqual([]);
+    expect(parsed.unattributedImages).toBe(1);
+  });
+});
+
+// Pin: a caption line that merely STARTS WITH an image-tag prefix but has no
+// URL part (so it never matches IMAGE_LINE_RE) is prose, not an image tag —
+// it must stay in the caption, not be stripped, and must not be counted as
+// an unattributed image (it never matched IMAGE_RE either).
+describe("parseCarouselBatchMarkdown — prose line starting with '![' but no URL", () => {
+  it("stays in the caption, unattributedImages 0", () => {
+    const markdown =
+      `**1. ${SLUGS[0]} (${DAYS[0]})**\n` +
+      `![slide1](https://r2.example.com/${SLUGS[0]}/slide-1.jpg)\n` +
+      `![Note: this is not an image]\n`;
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    expect(parsed.sections).toHaveLength(1);
+    expect(parsed.sections[0].caption).toBe("![Note: this is not an image]");
+    expect(parsed.sections[0].slideUrls).toEqual([`https://r2.example.com/${SLUGS[0]}/slide-1.jpg`]);
+    expect(parsed.unattributedImages).toBe(0);
+  });
+});
+
 describe("renderCarouselSlideEmbeds", () => {
   it("renders one embed per slide with distinct image.url (never a shared embed.url across slides)", () => {
     const parsed = parseCarouselBatchMarkdown(buildBatch(1, 3));

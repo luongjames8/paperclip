@@ -11,8 +11,39 @@ import { enforceEmbedLimits, safe } from "./embeds.js";
 // form. Captures the 1-based index, slug, and day label. Exported so callers
 // (e.g. the confirmation-sweep's shape detection) test against the same
 // pattern instead of maintaining a duplicate.
-export const SECTION_HEADING_RE = /^\*\*(\d+)\.\s+([\w-]+)\s+\(([^)]+)\)\*\*/m;
-const IMAGE_RE = /!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g;
+//
+// Two deliberate properties (seam-hardening pass, PR #27):
+// - The slug group is permissive (`.+?`, not `[\w-]+`): a dot, space, or
+//   unicode char in an LLM-authored slug must not make its whole section
+//   silently vanish from the parse. Backtracking resolves slug-vs-day when
+//   the slug itself contains parentheses.
+// - The pattern is FULL-LINE anchored (`\s*$`): a heading-shaped string
+//   embedded mid-sentence in caption prose (e.g. "…see **2. x (Tue)** which…")
+//   must not split the section at a phantom boundary. Only a line that IS a
+//   heading starts a section.
+export const SECTION_HEADING_RE = /^\*\*(\d+)\.\s+(.+?)\s+\(([^)]+)\)\*\*[.,;:]?\s*$/m;
+// A line that LOOKS like it wants to be a heading (bold + index) but was
+// rejected by the full grammar. Surfaced by name in the header warning so a
+// dropped section is never an anonymous statistic.
+const HEADING_LIKE_RE = /^\s*\*\*\d+\./;
+// Image tag: lazy URL capture with a boundary lookahead so a ')' INSIDE the
+// URL (e.g. …/slide-1(final).jpg) doesn't truncate the capture at the first
+// paren. The lookahead tolerates common prose/markdown terminators after the
+// closing paren (period, emphasis, comma…) so adjoining punctuation can't
+// make the whole tag invisible. An optional CommonMark title attribute
+// (`"…"`) is consumed but not captured. Captured URLs are additionally
+// validated with `new URL()` at attribution time; an unparseable capture
+// counts as unattributed (warned), never silently posted as a broken embed.
+// GREEDY URL capture (not lazy): with punctuation allowed after the closing
+// paren, a lazy capture would stop at the FIRST ')' inside a paren-bearing
+// URL (…slide-1(final).jpg → truncated at "(final"). Greedy prefers the
+// longest URL still ending at a valid ')'+terminator, satisfying both the
+// paren-in-URL and punctuation-after-tag cases (each pinned by tests).
+const IMAGE_RE = /!\[[^\]]*\]\((https?:\/\/\S+)(?:\s+"[^"]*")?\)(?=[\s.,;:!?*_~)]|$)/g;
+// A caption line is stripped ONLY when it is a complete image tag — the same
+// shape IMAGE_RE matches — never on the loose "starts with ![" prefix (a
+// literal prose line beginning with "![" must stay in the caption, not vanish).
+const IMAGE_LINE_RE = /^\s*!\[[^\]]*\]\(https?:\/\/\S+(?:\s+"[^"]*")?\)[.,;:!?]*\s*$/;
 
 export interface CarouselSection {
   index: number;
@@ -31,6 +62,15 @@ export interface ParsedCarouselBatch {
   // true when the whole artifact appears to have hit the authoring skill's
   // 20000-char cap and fallen back to first-slide + R2 path + caption form.
   wasCapFallback: boolean;
+  // Image-markdown matches in the RAW artifact that no parsed section
+  // attributed (images before the first heading, or under a heading the
+  // grammar rejected). Non-zero means the parse LOST slides — callers must
+  // surface this explicitly (never silent truncation).
+  unattributedImages: number;
+  // Lines that look heading-shaped (bold + numeric index) but were rejected
+  // by the full heading grammar — surfaced BY NAME so a dropped section is
+  // never an anonymous statistic.
+  rejectedHeadingLines: string[];
 }
 
 // Split detailsMarkdown into per-section raw text blocks using the section
@@ -54,20 +94,45 @@ function splitIntoSectionBlocks(detailsMarkdown: string): string[] {
 }
 
 // A section is a cap-fallback candidate when it has ≤1 slideUrl AND its body
-// text (the caption, minus image lines) references an R2/slide path — the
-// authoring skill's documented fallback form when the full artifact would
-// exceed the 20000-char cap: first-slide image + raw R2 path text + caption.
+// text references SIBLING slide paths (same directory as the one rendered
+// slide) as bare text — the authoring skill's documented fallback form when
+// the full artifact would exceed the 20000-char cap: first-slide image + raw
+// R2 path text + caption. An UNRELATED image URL mentioned in caption prose
+// (different host/path) must NOT trip this — a false "hit the cap" warning
+// misrepresents the batch to the operator making the decision.
 function looksLikeCapFallbackSection(slideUrls: string[], bodyText: string): boolean {
   if (slideUrls.length > 1) return false;
-  // A raw (non-markdown-image) reference to an r2/http path in the body text
-  // is the fallback tell — the full slide set collapsed into path text.
-  return /https?:\/\/\S+\.(?:png|jpe?g|webp|gif)/i.test(bodyText);
+  const bareImageUrls = bodyText.match(/https?:\/\/\S+\.(?:png|jpe?g|webp|gif)/gi) ?? [];
+  if (bareImageUrls.length === 0) return false;
+  if (slideUrls.length === 0) return true; // no rendered slide at all + bare paths = collapsed form
+  const dirPrefix = slideUrls[0].slice(0, slideUrls[0].lastIndexOf("/") + 1);
+  return bareImageUrls.some((u) => u.startsWith(dirPrefix) && !slideUrls.includes(u));
+}
+
+// Count every image-markdown match in a text, independent of section grammar.
+// The reconciliation source of truth: parsed sections must account for all of
+// these, or the difference is surfaced as unattributedImages.
+function countRawImages(text: string): number {
+  IMAGE_RE.lastIndex = 0;
+  let count = 0;
+  while (IMAGE_RE.exec(text) !== null) count++;
+  return count;
+}
+
+// Heading-shaped lines the full grammar rejected — reported by name.
+function findRejectedHeadingLines(detailsMarkdown: string): string[] {
+  return detailsMarkdown
+    .split("\n")
+    .filter((line) => HEADING_LIKE_RE.test(line) && !SECTION_HEADING_RE.test(line))
+    .map((line) => line.trim().slice(0, 120));
 }
 
 export function parseCarouselBatchMarkdown(detailsMarkdown: string): ParsedCarouselBatch {
+  const rawImageCount = countRawImages(detailsMarkdown);
+  const rejectedHeadingLines = findRejectedHeadingLines(detailsMarkdown);
   const blocks = splitIntoSectionBlocks(detailsMarkdown);
   if (blocks.length === 0) {
-    return { sections: [], totalImagesFound: 0, wasCapFallback: false };
+    return { sections: [], totalImagesFound: 0, wasCapFallback: false, unattributedImages: rawImageCount, rejectedHeadingLines };
   }
 
   const sections: CarouselSection[] = [];
@@ -88,16 +153,23 @@ export function parseCarouselBatchMarkdown(detailsMarkdown: string): ParsedCarou
     let m: RegExpExecArray | null;
     IMAGE_RE.lastIndex = 0;
     while ((m = IMAGE_RE.exec(afterHeading)) !== null) {
-      slideUrls.push(m[1]);
+      // Fail closed on a malformed capture: an unparseable URL is skipped
+      // here, so it stays in the raw count and surfaces as unattributed —
+      // never a silently broken embed.
+      try {
+        new URL(m[1]);
+        slideUrls.push(m[1]);
+      } catch {
+        /* counted by countRawImages; flows into unattributedImages */
+      }
     }
 
     // Caption = every non-image line in the section body, joined in document
-    // order. Image lines are stripped wherever they fall — before, between, or
-    // after — so caption text never bleeds image syntax and is never dropped
-    // just because it precedes or is sandwiched between slide images.
+    // order. Only COMPLETE image-tag lines are stripped (IMAGE_LINE_RE) —
+    // prose that merely starts with "![" stays in the caption.
     const caption = afterHeading
       .split("\n")
-      .filter((line) => !/^\s*!\[/.test(line) && line.trim() !== "")
+      .filter((line) => !IMAGE_LINE_RE.test(line) && line.trim() !== "")
       .join("\n")
       .trim();
 
@@ -113,7 +185,12 @@ export function parseCarouselBatchMarkdown(detailsMarkdown: string): ParsedCarou
   // (≤1 slideUrl + path-referencing caption) shape.
   const wasCapFallback = sections.length > 0 && capCandidateCount === sections.length;
 
-  return { sections, totalImagesFound, wasCapFallback };
+  // Reconcile: any raw image the section parse did not attribute is a LOST
+  // slide (image above the first heading, or in a block whose heading the
+  // grammar rejected). Never let that be silent — callers render a warning.
+  const unattributedImages = Math.max(0, rawImageCount - totalImagesFound);
+
+  return { sections, totalImagesFound, wasCapFallback, unattributedImages, rejectedHeadingLines };
 }
 
 /**
