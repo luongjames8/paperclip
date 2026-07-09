@@ -85,21 +85,19 @@ export function parseCarouselBatchMarkdown(detailsMarkdown: string): ParsedCarou
     const afterHeading = block.slice(block.indexOf(headingMatch[0]) + headingMatch[0].length);
 
     const slideUrls: string[] = [];
-    let lastImageEnd = 0;
     let m: RegExpExecArray | null;
     IMAGE_RE.lastIndex = 0;
     while ((m = IMAGE_RE.exec(afterHeading)) !== null) {
       slideUrls.push(m[1]);
-      lastImageEnd = m.index + m[0].length;
     }
 
-    // Caption = text after the LAST image line, trimmed. Strip any residual
-    // image markdown lines defensively (handles captions that precede images
-    // or interleave — never bleed image syntax into the caption text).
-    const afterLastImage = afterHeading.slice(lastImageEnd);
-    const caption = afterLastImage
+    // Caption = every non-image line in the section body, joined in document
+    // order. Image lines are stripped wherever they fall — before, between, or
+    // after — so caption text never bleeds image syntax and is never dropped
+    // just because it precedes or is sandwiched between slide images.
+    const caption = afterHeading
       .split("\n")
-      .filter((line) => !/^\s*!\[/.test(line))
+      .filter((line) => !/^\s*!\[/.test(line) && line.trim() !== "")
       .join("\n")
       .trim();
 

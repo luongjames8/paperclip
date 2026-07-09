@@ -30,6 +30,8 @@ vi.mock("../src/api/paperclip.js", async () => {
 
 const ISSUE_ID = "11111111-1111-1111-1111-111111111111";
 const INTERACTION_ID = "22222222-2222-2222-2222-222222222222";
+const ALICE_DISCORD_ID = "discord-user-alice";
+const MALLORY_DISCORD_ID = "discord-user-mallory";
 
 function makeConfig(): DiscordFleetConfig {
   return {
@@ -45,19 +47,29 @@ function makeConfig(): DiscordFleetConfig {
         paperclipApiKeySecretRef: "my-api-key-ref",
         paperclipApiUrl: "http://paperclip:3100",
         companyPrefix: "tc1",
+        userMappings: [
+          {
+            discordUserId: ALICE_DISCORD_ID,
+            paperclipUserId: "pc-user-alice",
+            role: "operator",
+          },
+        ],
       },
     ],
   };
 }
 
-function makeInteraction(customId: string, opts?: { username?: string; reason?: string }): any {
+function makeInteraction(
+  customId: string,
+  opts?: { username?: string; reason?: string; discordUserId?: string },
+): any {
   const embed = {
     toJSON: () => ({ title: "Decision needed", color: 0x5865f2, description: "some description" }),
   };
   const interaction: any = {
     customId,
     guildId: "g1",
-    user: { id: "discord-user-alice", username: opts?.username ?? "alice" },
+    user: { id: opts?.discordUserId ?? ALICE_DISCORD_ID, username: opts?.username ?? "alice" },
     message: { embeds: [embed] },
     deferUpdate: vi.fn().mockResolvedValue(undefined),
     editReply: vi.fn().mockResolvedValue(undefined),
@@ -198,9 +210,132 @@ describe("handleCarouselConfirmationButton — reject opens a modal", () => {
   });
 });
 
+// ─── Authorization gate: company.userMappings (codex P1, PR #27) ─────────────
+//
+// Any guild member who can see the channel could otherwise click accept/reject
+// and act as the shared board actor. Mirrors approval-button's gate exactly:
+// unmapped Discord user id → ephemeral refusal, zero paperclip API calls.
+
+describe("handleCarouselConfirmationButton — authorization gate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("accept: unmapped user gets an ephemeral refusal and NO paperclip API call", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`carousel-confirm-accept:${ISSUE_ID}:${INTERACTION_ID}`, {
+      discordUserId: MALLORY_DISCORD_ID,
+      username: "mallory",
+    });
+    await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/not authorized/) }),
+    );
+    expect(interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(resolveSecret).not.toHaveBeenCalled();
+    expect(mockAcceptInteraction).not.toHaveBeenCalled();
+    expect(mockRejectInteraction).not.toHaveBeenCalled();
+  });
+
+  it("reject: unmapped user gets an ephemeral refusal before the modal is ever shown", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`carousel-confirm-reject:${ISSUE_ID}:${INTERACTION_ID}`, {
+      discordUserId: MALLORY_DISCORD_ID,
+      username: "mallory",
+    });
+    await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/not authorized/) }),
+    );
+    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(resolveSecret).not.toHaveBeenCalled();
+    expect(mockRejectInteraction).not.toHaveBeenCalled();
+  });
+
+  it("accept: mapped user proceeds normally (resolves company key when no per-user key set)", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`carousel-confirm-accept:${ISSUE_ID}:${INTERACTION_ID}`, {
+      discordUserId: ALICE_DISCORD_ID,
+      username: "alice",
+    });
+    await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
+
+    expect(resolveSecret).toHaveBeenCalledWith("my-api-key-ref");
+    expect(mockAcceptInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID);
+  });
+
+  it("accept: per-user boardApiKeySecretRef is preferred over the company-wide key", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-per-user");
+
+    const config = makeConfig();
+    config.companies[0].userMappings![0].boardApiKeySecretRef = "alice-personal-key-ref";
+
+    const interaction = makeInteraction(`carousel-confirm-accept:${ISSUE_ID}:${INTERACTION_ID}`, {
+      discordUserId: ALICE_DISCORD_ID,
+      username: "alice",
+    });
+    await handleCarouselConfirmationButton(harness.ctx, interaction, config);
+
+    expect(resolveSecret).toHaveBeenCalledWith("alice-personal-key-ref");
+    expect(mockAcceptInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID);
+  });
+});
+
 describe("handleCarouselConfirmationRejectModal", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("unmapped user gets an ephemeral refusal and NO paperclip API call (re-checked on modal submit)", async () => {
+    const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${ISSUE_ID}:${INTERACTION_ID}`, {
+      discordUserId: MALLORY_DISCORD_ID,
+      username: "mallory",
+      reason: "some reason",
+    });
+    await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/not authorized/) }),
+    );
+    expect(interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(resolveSecret).not.toHaveBeenCalled();
+    expect(mockRejectInteraction).not.toHaveBeenCalled();
+  });
+
+  it("mapped user proceeds normally, per-user boardApiKeySecretRef preferred over company key", async () => {
+    const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-per-user");
+
+    const config = makeConfig();
+    config.companies[0].userMappings![0].boardApiKeySecretRef = "alice-personal-key-ref";
+
+    const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${ISSUE_ID}:${INTERACTION_ID}`, {
+      discordUserId: ALICE_DISCORD_ID,
+      username: "alice",
+      reason: "Wrong week's slides",
+    });
+    await handleCarouselConfirmationRejectModal(harness.ctx, interaction, config);
+
+    expect(resolveSecret).toHaveBeenCalledWith("alice-personal-key-ref");
+    expect(mockRejectInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID, "Wrong week's slides");
   });
 
   it("requires a non-empty reason — empty input is rejected before calling the API", async () => {

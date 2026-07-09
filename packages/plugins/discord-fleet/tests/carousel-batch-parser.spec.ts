@@ -97,6 +97,58 @@ describe("parseCarouselBatchMarkdown", () => {
     expect(parsed.sections[0].slideUrls).toHaveLength(5);
     expect(parsed.totalImagesFound).toBe(5);
   });
+
+  // Codex P2 (PR #27): caption text placed before or between image lines used
+  // to be silently dropped (old parser only kept text AFTER the last image).
+
+  it("caption BEFORE the images is preserved (not dropped)", () => {
+    const markdown =
+      `**1. ${SLUGS[0]} (${DAYS[0]})**\n` +
+      `Caption text written before the slides.\n` +
+      `![slide1](https://r2.example.com/${SLUGS[0]}/slide-1.jpg)\n` +
+      `![slide2](https://r2.example.com/${SLUGS[0]}/slide-2.jpg)\n`;
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    expect(parsed.sections).toHaveLength(1);
+    expect(parsed.sections[0].caption).toBe("Caption text written before the slides.");
+    expect(parsed.sections[0].slideUrls).toEqual([
+      `https://r2.example.com/${SLUGS[0]}/slide-1.jpg`,
+      `https://r2.example.com/${SLUGS[0]}/slide-2.jpg`,
+    ]);
+  });
+
+  it("caption BETWEEN image lines is preserved, slide order stays document order", () => {
+    const markdown =
+      `**1. ${SLUGS[0]} (${DAYS[0]})**\n` +
+      `![slide1](https://r2.example.com/${SLUGS[0]}/slide-1.jpg)\n` +
+      `Mid-section note between slides 1 and 2.\n` +
+      `![slide2](https://r2.example.com/${SLUGS[0]}/slide-2.jpg)\n`;
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    expect(parsed.sections).toHaveLength(1);
+    expect(parsed.sections[0].caption).toBe("Mid-section note between slides 1 and 2.");
+    expect(parsed.sections[0].slideUrls).toEqual([
+      `https://r2.example.com/${SLUGS[0]}/slide-1.jpg`,
+      `https://r2.example.com/${SLUGS[0]}/slide-2.jpg`,
+    ]);
+  });
+
+  it("caption split BEFORE and AFTER images — both parts preserved in document order", () => {
+    const markdown =
+      `**1. ${SLUGS[0]} (${DAYS[0]})**\n` +
+      `Intro line before slides.\n` +
+      `![slide1](https://r2.example.com/${SLUGS[0]}/slide-1.jpg)\n` +
+      `![slide2](https://r2.example.com/${SLUGS[0]}/slide-2.jpg)\n` +
+      `Closing line after slides.\n`;
+    const parsed = parseCarouselBatchMarkdown(markdown);
+
+    expect(parsed.sections).toHaveLength(1);
+    expect(parsed.sections[0].caption).toBe("Intro line before slides.\nClosing line after slides.");
+    expect(parsed.sections[0].slideUrls).toEqual([
+      `https://r2.example.com/${SLUGS[0]}/slide-1.jpg`,
+      `https://r2.example.com/${SLUGS[0]}/slide-2.jpg`,
+    ]);
+  });
 });
 
 describe("renderCarouselSlideEmbeds", () => {

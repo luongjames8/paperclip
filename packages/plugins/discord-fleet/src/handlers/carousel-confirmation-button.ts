@@ -1,7 +1,7 @@
 import type { ButtonInteraction, ModalSubmitInteraction } from "discord.js";
 import { ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import type { CompanyConfig, DiscordFleetConfig } from "../config/schema.js";
+import type { CompanyConfig, DiscordFleetConfig, UserMapping } from "../config/schema.js";
 import { PaperclipClient, PaperclipApiError } from "../api/paperclip.js";
 import {
   CAROUSEL_CONFIRM_BUTTON_PREFIX,
@@ -52,6 +52,10 @@ function resolveCompany(config: DiscordFleetConfig, guildId: string | null): Com
   return config.companies.find((c) => c.guildId === guildId);
 }
 
+function resolveUserMapping(company: CompanyConfig, discordUserId: string): UserMapping | undefined {
+  return company.userMappings?.find((m) => m.discordUserId === discordUserId);
+}
+
 async function stripComponentsAndAnnotate(
   interaction: ButtonInteraction | ModalSubmitInteraction,
   label: string,
@@ -75,6 +79,19 @@ export async function handleCarouselConfirmationButton(
   const company = resolveCompany(config, interaction.guildId);
   if (!company) {
     await interaction.reply({ content: "No company configured for this guild.", ephemeral: true });
+    return;
+  }
+
+  // Authorization: the clicker must be in company.userMappings. Discord channel
+  // access alone is too coarse a gate — mirrors approval-button's gate exactly
+  // (a batch accept/reject is a board decision just like an approval decision).
+  const mapping = resolveUserMapping(company, interaction.user.id);
+  if (!mapping) {
+    await interaction.reply({
+      content:
+        "You're not authorized to act on this approval. Ask an operator to add your Discord user ID to the company's userMappings.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -114,7 +131,7 @@ export async function handleCarouselConfirmationButton(
   }
 
   try {
-    const apiKey = await ctx.secrets.resolve(company.paperclipApiKeySecretRef);
+    const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
     const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
     await paperclip.acceptInteraction(parsed.issueId, parsed.interactionId);
   } catch (err) {
@@ -153,6 +170,17 @@ export async function handleCarouselConfirmationRejectModal(
     return;
   }
 
+  // Re-check authorization on submit — the modal is a fresh interaction.
+  const mapping = resolveUserMapping(company, interaction.user.id);
+  if (!mapping) {
+    await interaction.reply({
+      content:
+        "You're not authorized to act on this approval. Ask an operator to add your Discord user ID to the company's userMappings.",
+      ephemeral: true,
+    });
+    return;
+  }
+
   const reason = interaction.fields.getTextInputValue(CAROUSEL_CONFIRM_REJECT_REASON_FIELD).trim();
   if (!reason) {
     await interaction.reply({ content: "A rejection reason is required.", ephemeral: true });
@@ -162,7 +190,7 @@ export async function handleCarouselConfirmationRejectModal(
   await interaction.deferUpdate();
 
   try {
-    const apiKey = await ctx.secrets.resolve(company.paperclipApiKeySecretRef);
+    const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
     const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
     await paperclip.rejectInteraction(parsed.issueId, parsed.interactionId, reason);
   } catch (err) {
