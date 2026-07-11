@@ -101,7 +101,20 @@ export function parseCarouselBatchPayload(raw: unknown): CarouselBatchPayload | 
     if (typeof item.slug !== "string") return null;
     if (item.day !== null && typeof item.day !== "string") return null;
     if (typeof item.caption !== "string") return null;
-    if (!Array.isArray(item.slides) || !item.slides.every((s) => typeof s === "string")) return null;
+    // Slides must be RENDERABLE http(s) URLs, not merely strings (codex
+    // round-8): a single "" or non-URL entry makes Discord reject the whole
+    // embed send at post time — postCarouselSection fails before the
+    // caption/trailer and the sweep retries the same broken structured path
+    // every tick, invisibly and forever. One bad slide makes the payload
+    // malformed AS A WHOLE (never silently drop a slide — "an image is never
+    // silently dropped") so it degrades to the visible fallback paths like
+    // any other contract miss.
+    if (
+      !Array.isArray(item.slides) ||
+      !item.slides.every((s) => typeof s === "string" && /^https?:\/\//.test(s))
+    ) {
+      return null;
+    }
     items.push({ slug: item.slug, day: item.day, caption: item.caption, slides: item.slides as string[] });
   }
   return {

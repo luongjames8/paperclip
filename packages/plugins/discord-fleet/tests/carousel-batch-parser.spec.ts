@@ -234,6 +234,23 @@ describe("parseCarouselBatchPayload", () => {
     expect(parseCarouselBatchPayload({ ...validPayload(), version: "1" })).toBeNull();
   });
 
+  it("non-URL slide entry ('' or plain text) → whole payload null, never a Discord-rejectable embed (codex round-8)", () => {
+    // One bad slide used to wedge the sweep: Discord rejects the embed send,
+    // postCarouselSection fails before caption/trailer, and the SAME broken
+    // structured path retried every tick forever. Malformed-as-a-whole
+    // degrades to the visible fallback paths instead ("an image is never
+    // silently dropped" — filtering just the bad slide would drop it).
+    expect(
+      parseCarouselBatchPayload(validPayload({ items: [{ slug: "a", day: "Sat", caption: "c", slides: ["https://ok.example.com/1.jpg", ""] }] })),
+    ).toBeNull();
+    expect(
+      parseCarouselBatchPayload(validPayload({ items: [{ slug: "a", day: "Sat", caption: "c", slides: ["not a url"] }] })),
+    ).toBeNull();
+    expect(
+      parseCarouselBatchPayload(validPayload({ items: [{ slug: "a", day: "Sat", caption: "c", slides: ["ftp://wrong.scheme/x.jpg"] }] })),
+    ).toBeNull();
+  });
+
   // weekOf/cadence are OPTIONAL passthrough — a contract wobble on metadata
   // must never blind the operator to the batch itself. Valid items always
   // parse as structured regardless of weekOf/cadence shape.

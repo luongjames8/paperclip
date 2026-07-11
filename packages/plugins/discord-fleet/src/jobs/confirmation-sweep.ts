@@ -878,6 +878,31 @@ export async function runConfirmationSweep(
                 ? rawPrompt.trim()
                 : "";
 
+          // CAROUSEL OWNERSHIP IS RULE-SCOPED, STATE IS INTERACTION-SCOPED
+          // (codex rounds 6-8, one class): when a carouselBatch-flagged
+          // sibling rule matches this issue's title, that rule owns this
+          // interaction END-TO-END — its own iteration renders it
+          // (structured, legacy, or unstructured-degrade always posts
+          // SOMETHING for a flagged rule). An UNFLAGGED rule must therefore
+          // not touch it AT ALL — not render the structured card into its
+          // own channel (broad-rule-first ordering would land the carousel
+          // in the wrong channel and the staleness gate would then skip the
+          // flagged rule's render entirely), not retire its anchor, and not
+          // post the generic image-stripped card. This skip sits ABOVE
+          // every detection branch so ownership is decided before any
+          // rendering path can run.
+          const carouselFlaggedElsewhere =
+            !rule.carouselBatch &&
+            rules.some((r) => {
+              if (!r.carouselBatch) return false;
+              try {
+                return new RegExp(r.titleRegex).test(safeStr(issue.title, 512));
+              } catch {
+                return false;
+              }
+            });
+          if (carouselFlaggedElsewhere) continue;
+
           // Carousel-batch detection happens BEFORE the generic 24h `posted`
           // throttle below (codex round-3 P2, PR #27): a carousel interaction
           // migrating from the OLD generic sweep can already carry a `posted`
@@ -990,29 +1015,6 @@ export async function runConfirmationSweep(
           // retired generation — is a hash change that re-posts from
           // scratch, rather than matching the old record as "fully posted"
           // while its anchor sits superseded with no live buttons.
-          // Shape detection is RULE-scoped (rule.carouselBatch) but the
-          // record is INTERACTION-scoped and shared across every rule of
-          // the company. When a carouselBatch-flagged sibling rule matches
-          // this issue's title, the carousel machinery owns this
-          // interaction END-TO-END — that rule's own iteration always
-          // renders it (structured, legacy, or unstructured-degrade posts
-          // SOMETHING for a flagged rule) — so this unflagged rule must
-          // neither retire the anchor the flagged rule legitimately owns
-          // nor fall through to the generic image-stripped card below
-          // (codex round-7: with a broad unflagged rule ordered FIRST, the
-          // generic card would post before the flagged rule's degrade
-          // render every time — exactly the blind/duplicate card the
-          // structured contract exists to kill).
-          const carouselFlaggedElsewhere = rules.some((r) => {
-            if (!r.carouselBatch) return false;
-            try {
-              return new RegExp(r.titleRegex).test(safeStr(issue.title, 512));
-            } catch {
-              return false;
-            }
-          });
-          if (carouselFlaggedElsewhere) continue;
-
           const shapeLostRecord = carouselState[interaction.id];
           if (shapeLostRecord && shapeLostRecord.artifactHash !== "") {
             const staleAnchors = await retireCurrentAnchor(

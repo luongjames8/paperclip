@@ -2258,6 +2258,38 @@ describe("runConfirmationSweep — carousel-shape loss retires the old anchor be
     expect(state["int-1"].anchorMessageId).toBe("degrade-anchor-id");
   });
 
+  it("BROAD-FIRST rule ordering with a STRUCTURED payload: the unflagged rule does not render the carousel into its own channel — the flagged rule's channel gets it (codex round-8)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockResolvedValue("msg-2");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig({
+      c1: [
+        { titleRegex: ".*", channelId: "ch-generic" },
+        { titleRegex: "Carousel", channelId: "ch-flagged", carouselBatch: true },
+      ],
+    });
+    const payload = buildStructuredPayload();
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "prose", carouselBatch: payload } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip);
+
+    // Every carousel message (header/sections/trailer) landed in the flagged
+    // rule's channel; the broad rule posted NOTHING (it would have stamped
+    // the record fully-posted and the flagged rule's render would have been
+    // staleness-gated away — the carousel would never reach its channel).
+    const embedChannels = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1]);
+    const textChannels = (postToChannel as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1]);
+    expect(embedChannels.length).toBeGreaterThan(0);
+    expect([...embedChannels, ...textChannels].every((ch) => ch === "ch-flagged")).toBe(true);
+
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].anchorChannelId).toBe("ch-flagged");
+  });
+
   it("BROAD-FIRST rule ordering: the unflagged rule skips the generic image-stripped card entirely when a carouselBatch rule also matches (codex round-7)", async () => {
     const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
     const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
