@@ -923,9 +923,16 @@ describeEmbeddedPostgres("authorization service", () => {
   // malformed OR well-formed-but-stale/nonexistent run id must not silently
   // resolve to "no run" when the low-trust boundary lives ONLY in the run's
   // contextSnapshot.executionPolicy — that would raise effective trust and
-  // bypass the low-trust boundary. Fails closed (denied) in that narrow
-  // case; an ordinary agent/issue with zero trust config anywhere is
-  // unaffected (never denied for a stray run header).
+  // bypass the low-trust boundary. Fails closed (denied) UNCONDITIONALLY
+  // whenever the header is present but unverifiable and agent/project/issue
+  // policy alone would otherwise resolve `standard` (codex ceiling round: an
+  // earlier version of this guard additionally required SOME trust-related
+  // config to be present anywhere before denying — that left the run-only
+  // trust boundary case, exactly what this guard exists for, unprotected).
+  // The header's PRESENCE is itself a claim of run context; an unverifiable
+  // claim fails closed regardless of what else is configured — including an
+  // ordinary agent/issue with zero trust config anywhere. A visible deny
+  // beats a silent trust elevation; recovery is dropping/fixing the header.
   describe("malformed/stale X-Paperclip-Run-Id on access.decide()", () => {
     async function seedRunOnlyLowTrustFixture(runId: string) {
       const company = await createCompany(db, "RunOnlyTrust");
@@ -1016,7 +1023,16 @@ describeEmbeddedPostgres("authorization service", () => {
       expect(decision.allowed).toBe(true);
     });
 
-    it("an ordinary agent/issue with ZERO trust config anywhere is NOT denied by a stray malformed run header", async () => {
+    // REVERSED (codex ceiling round): this test previously asserted that an
+    // ordinary agent/issue with ZERO trust config anywhere was NOT denied by
+    // a stray malformed run header — that was exactly the
+    // isPlausibleLowTrustCandidate narrowing this fix removes. The header's
+    // presence is itself a claim of run context; an unverifiable claim now
+    // fails closed unconditionally, even with no trust config anywhere else.
+    // A visible deny beats a silent trust elevation; the caller recovers by
+    // dropping or fixing the header (exactly what the live incident agent
+    // did).
+    it("an ordinary agent/issue with ZERO trust config anywhere IS denied by a stray malformed run header (visible deny beats silent trust elevation)", async () => {
       const company = await createCompany(db, "OrdinaryNoTrustConfig");
       const actorAgent = await createAgent(db, company.id);
       const issue = await createIssue(db, company.id, { assigneeAgentId: actorAgent.id });
@@ -1027,7 +1043,10 @@ describeEmbeddedPostgres("authorization service", () => {
         resource: { type: "issue", companyId: company.id, issueId: issue.id },
       });
 
-      expect(decision.allowed).toBe(true);
+      expect(decision.allowed).toBe(false);
+      expect(decision.reason).toBe("deny_policy_restricted");
+      expect(decision.explanation).toMatch(/X-Paperclip-Run-Id/);
+      expect(decision.explanation).toMatch(/not-a-uuid/);
     });
   });
 });

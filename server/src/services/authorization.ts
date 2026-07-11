@@ -18,19 +18,6 @@ import {
   type TrustPresetResolution,
 } from "./trust-preset-resolver.js";
 
-// Cheap, presence-only check (no schema validation) for "does this policy
-// source carry ANY trust-related key at all". Mirrors the same helper in
-// routes/issues.ts (resolveAgentTrustForIssue) — kept local rather than
-// exported/shared since both call sites need it against slightly different
-// input shapes and it is a few lines of pure presence-checking.
-function hasAnyTrustRelatedKey(rawPolicy: unknown): boolean {
-  if (!rawPolicy || typeof rawPolicy !== "object" || Array.isArray(rawPolicy)) return false;
-  const record = rawPolicy as Record<string, unknown>;
-  if ("trustPreset" in record || "reviewPreset" in record) return true;
-  const authorizationPolicy = record.authorizationPolicy;
-  return Boolean(authorizationPolicy && typeof authorizationPolicy === "object" && !Array.isArray(authorizationPolicy));
-}
-
 export type AuthorizationActor =
   {
     type: "board" | "agent" | "none";
@@ -660,32 +647,31 @@ export function authorizationService(db: Db) {
       issue,
       run: resolvedRun,
     });
-    // Fail closed ONLY where an unresolvable run id can actually change the
-    // outcome — same judgment as resolveAgentTrustForIssue in
-    // routes/issues.ts (see that function's comment for the full rationale).
-    // Applies identically whether the header is MALFORMED (not uuid-shaped)
-    // or UNKNOWN (well-formed but no matching heartbeat_runs row for this
-    // company+agent) — neither can be trusted to carry a low-trust boundary,
-    // and both must not 400/deny every ordinary agent request that happens
-    // to carry a stray/stale run header (the ORIGINAL 2026-07-11 incident
-    // this class of fix exists for), so this only denies when BOTH:
-    // (1) agent/project/issue alone already resolve `standard`, and (2) this
-    // agent/project/issue shows SOME trust-related config at all (otherwise
-    // there is nothing here for the run to plausibly have been hiding).
-    if (
-      runUnresolved &&
-      resolution.kind === "standard" &&
-      (hasAnyTrustRelatedKey(input.actorAgent.permissions) ||
-        hasAnyTrustRelatedKey(project?.executionWorkspacePolicy) ||
-        hasAnyTrustRelatedKey(issue?.executionPolicy))
-    ) {
+    // Fail closed UNCONDITIONALLY whenever the run id is unresolvable
+    // (MALFORMED or UNKNOWN) and the agent/project/issue policy alone would
+    // otherwise resolve `standard` — same judgment as resolveAgentTrustForIssue
+    // in routes/issues.ts (see that function's comment for the full
+    // rationale). codex ceiling round: a prior version of this guard
+    // additionally required the agent/project/issue to show SOME
+    // trust-related config before denying — but that leaves exactly the
+    // deployment this guard exists for (low-trust boundary declared ONLY on
+    // the run's contextSnapshot.executionPolicy, nowhere else) unprotected:
+    // agent/project/issue carry zero trust-related keys, the gate was false,
+    // and a garbage/stale header silently resolved `standard`. The header's
+    // PRESENCE is itself a claim of run context; an unverifiable claim must
+    // deny regardless of what else is configured. This can now deny an
+    // ordinary agent that sends a stray non-uuid/stale run header with zero
+    // trust config anywhere — a visible deny (with an actionable message
+    // naming the bad header) beats a silent trust elevation; recovery is
+    // simply not sending a bad header.
+    if (runUnresolved && resolution.kind === "standard") {
       return {
         kind: "denied",
         reason: "invalid_run_id",
         source: "run",
         detail: run === MALFORMED_RUN_ID
-          ? `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.actor.runId}"`
-          : `X-Paperclip-Run-Id header does not match a known run for this agent: "${input.actor.runId}"`,
+          ? `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.actor.runId}". Drop the header or fix its value.`
+          : `X-Paperclip-Run-Id header does not match a known run for this agent: "${input.actor.runId}". Drop the header or fix its value.`,
         sourcePresets: resolution.sourcePresets,
       };
     }

@@ -1092,18 +1092,6 @@ export function issueRoutes(
     return typeof runId === "string" && runId.trim().length > 0 && !isUuidLike(runId);
   }
 
-  // Cheap, presence-only check (no schema validation — that's
-  // resolveCoreTrustPreset's job) for "does this policy source carry ANY
-  // trust-related key at all". Used only to decide whether a malformed run
-  // id is even POTENTIALLY load-bearing for trust — see the call site.
-  function hasAnyTrustRelatedKey(rawPolicy: unknown): boolean {
-    if (!rawPolicy || typeof rawPolicy !== "object" || Array.isArray(rawPolicy)) return false;
-    const record = rawPolicy as Record<string, unknown>;
-    if ("trustPreset" in record || "reviewPreset" in record) return true;
-    const authorizationPolicy = record.authorizationPolicy;
-    return Boolean(authorizationPolicy && typeof authorizationPolicy === "object" && !Array.isArray(authorizationPolicy));
-  }
-
   async function resolveRunIssueWorkspaceInheritanceSource(
     companyId: string,
     actor: ReturnType<typeof getActorInfo>,
@@ -1170,28 +1158,25 @@ export function issueRoutes(
     // garbage in the header RAISES effective trust and bypasses the
     // redaction/control-plane-denial paths below.
     //
-    // Fail closed ONLY where a malformed run id can actually change the
-    // outcome — NOT for every agent that happens to send a stray non-uuid
-    // run id (the ORIGINAL 2026-07-11 incident this whole PR fixes was
-    // exactly that: an ordinary, never-low-trust agent's routine POSTs
-    // 500'd on a malformed header). Two conditions must both hold:
-    //   1. agent/project/issue policy ALONE resolve to `standard` — if they
-    //      already imply low_trust_review/denied, the run source can only
-    //      ADD a boundary or leave the result unchanged (resolveCoreTrustPreset
-    //      ORs sources together, never un-flags one), so a malformed run id
-    //      changes nothing there.
-    //   2. this agent/issue shows SOME trust-related configuration at all
-    //      (a trustPreset/reviewPreset/authorizationPolicy key anywhere on
-    //      the agent's permissions or the issue's executionPolicy, even if
-    //      it doesn't itself resolve to low-trust). An agent/issue with
-    //      ZERO trust-related config anywhere is not an operator-configured
-    //      low-trust candidate; treating its malformed run id as fail-closed
-    //      would 400 the common case this PR must not regress.
-    // Only when BOTH hold is the malformed run id genuinely load-bearing —
-    // the run is the one place left that could carry the low-trust boundary
-    // this agent/issue was set up to have.
+    // Fail closed UNCONDITIONALLY whenever the header is present but
+    // unverifiable (malformed or well-formed-but-unknown) and the
+    // agent/project/issue policy alone would otherwise resolve `standard`.
+    // codex ceiling round: a prior version of this guard additionally
+    // required the agent/issue to show SOME trust-related config
+    // (isPlausibleLowTrustCandidate) before fail-closing — but for a
+    // deployment where the low-trust boundary lives ONLY in
+    // heartbeatRuns.contextSnapshot.executionPolicy (the exact run-only
+    // trust source this guard exists for), agent/project/issue carry no
+    // trust-related keys at all, the plausibility gate was false, and the
+    // 400 was skipped — silently resolving `standard` and bypassing
+    // redaction/control-plane denial. The header's PRESENCE is itself a
+    // claim of run context; an unverifiable claim must fail closed
+    // regardless of what else is configured. This can now 400 an ordinary
+    // agent that sends a stray non-uuid run id with zero trust config
+    // anywhere — that is the intended, and only, cost: a visible 400 (with
+    // an actionable message telling the caller to drop/fix the header) beats
+    // a silent trust elevation. Recovery is simply not sending a bad header.
     const malformedRunId = isPresentButMalformedRunId(input.runId);
-    const hasTrustRelatedConfig = hasAnyTrustRelatedKey(issue?.executionPolicy);
     const [agent, run] = await Promise.all([
       agentsSvc.getById(input.agentId),
       !malformedRunId && isUuidLike(input.runId)
@@ -1238,19 +1223,14 @@ export function issueRoutes(
       issue: resolvedIssue,
       run: runExecutionPolicy ? { companyId, executionPolicy: runExecutionPolicy } : null,
     });
-    const isPlausibleLowTrustCandidate =
-      hasTrustRelatedConfig ||
-      hasAnyTrustRelatedKey(agent.permissions) ||
-      hasAnyTrustRelatedKey(resolvedProject?.executionWorkspacePolicy);
     if (
       (malformedRunId || wellFormedButUnknownRunId) &&
-      resolution.kind === "standard" &&
-      isPlausibleLowTrustCandidate
+      resolution.kind === "standard"
     ) {
       throw badRequest(
         malformedRunId
-          ? `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.runId}"`
-          : `X-Paperclip-Run-Id header does not match a known run for this agent: "${input.runId}"`,
+          ? `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.runId}". Drop the header or fix its value.`
+          : `X-Paperclip-Run-Id header does not match a known run for this agent: "${input.runId}". Drop the header or fix its value.`,
       );
     }
     return resolution;
