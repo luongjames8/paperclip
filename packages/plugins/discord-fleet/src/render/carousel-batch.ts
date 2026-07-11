@@ -7,6 +7,96 @@ import { enforceEmbedLimits, safe } from "./embeds.js";
 // must move together — that migration silently dropping the renderer is
 // exactly the historical failure this file exists to fix (see PR #27 body).
 
+// ─── Structured payload contract (kills the "regex-on-LLM-prose" failure
+// class — 2026-07-11 live incident: the publisher wrote `## akihabara (Sat)`
+// instead of the documented `**1. akihabara (Sat)**`, SECTION_HEADING_RE
+// missed it, and the sweep fell through to the generic path which strips
+// ALL image lines — operator got zero slides, zero buttons) ─────────────────
+//
+// The publisher-side authoring skill (post-to-instagram-carousel/SKILL.md)
+// writes this machine-consumed field ALONGSIDE detailsMarkdown when it opens
+// the request_confirmation interaction. It is NEVER reworded/paraphrased by
+// an LLM — it is built directly from the same structured data the publisher
+// already holds (slugs, planned days, caption text, R2 slide URLs). Detection
+// is `payload.carouselBatch?.version === 1`, checked BEFORE any regex — a
+// contract match never depends on prose shape.
+export interface CarouselBatchItem {
+  slug: string;
+  // Planned weekday label (e.g. "Sat") — null when the item is an unplanned
+  // "stray" (published outside the week's normal cadence).
+  day: string | null;
+  caption: string;
+  // Ordered R2 slide URLs — index 0 renders first.
+  slides: string[];
+}
+
+export interface CarouselBatchCadence {
+  days: string[];
+  held: number;
+  strays: number;
+  // Oldest week-of a held item originated from, when any items are held over
+  // from a prior week's batch. Absent when nothing is held.
+  heldOldestWeek?: string;
+}
+
+export interface CarouselBatchPayload {
+  version: 1;
+  weekOf: string;
+  cadence: CarouselBatchCadence;
+  items: CarouselBatchItem[];
+}
+
+// Runtime shape guard — payload is `Record<string, unknown>` at the API
+// boundary (interaction.payload), so a malformed or absent field must
+// degrade to "not structured" rather than throw deep in the sweep loop.
+export function parseCarouselBatchPayload(raw: unknown): CarouselBatchPayload | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  if (obj.version !== 1) return null;
+  if (typeof obj.weekOf !== "string") return null;
+  const cadenceRaw = obj.cadence;
+  if (!cadenceRaw || typeof cadenceRaw !== "object") return null;
+  const cadenceObj = cadenceRaw as Record<string, unknown>;
+  if (!Array.isArray(cadenceObj.days) || !cadenceObj.days.every((d) => typeof d === "string")) return null;
+  if (typeof cadenceObj.held !== "number" || typeof cadenceObj.strays !== "number") return null;
+  const cadence: CarouselBatchCadence = {
+    days: cadenceObj.days as string[],
+    held: cadenceObj.held,
+    strays: cadenceObj.strays,
+    ...(typeof cadenceObj.heldOldestWeek === "string" ? { heldOldestWeek: cadenceObj.heldOldestWeek } : {}),
+  };
+  if (!Array.isArray(obj.items)) return null;
+  const items: CarouselBatchItem[] = [];
+  for (const rawItem of obj.items) {
+    if (!rawItem || typeof rawItem !== "object") return null;
+    const item = rawItem as Record<string, unknown>;
+    if (typeof item.slug !== "string") return null;
+    if (item.day !== null && typeof item.day !== "string") return null;
+    if (typeof item.caption !== "string") return null;
+    if (!Array.isArray(item.slides) || !item.slides.every((s) => typeof s === "string")) return null;
+    items.push({ slug: item.slug, day: item.day, caption: item.caption, slides: item.slides as string[] });
+  }
+  return { version: 1, weekOf: obj.weekOf, cadence, items };
+}
+
+// Adapts a structured CarouselBatchPayload into the same ParsedCarouselBatch
+// shape the legacy regex parser produces, so the sweep's rendering path
+// (postCarouselSection/renderCarouselSlideEmbeds) is IDENTICAL regardless of
+// which detection path fired. 1-based index assigned in item order (matches
+// the legacy `**N. slug (Day)**` numbering convention).
+export function carouselBatchFromStructuredPayload(payload: CarouselBatchPayload): ParsedCarouselBatch {
+  const sections: CarouselSection[] = payload.items.map((item, i) => ({
+    index: i + 1,
+    slug: item.slug,
+    day: item.day ?? "unplanned",
+    slideUrls: item.slides,
+    caption: item.caption,
+    degraded: false,
+  }));
+  const totalImagesFound = sections.reduce((sum, s) => sum + s.slideUrls.length, 0);
+  return { sections, totalImagesFound, wasCapFallback: false };
+}
+
 // Section heading: **N. slug (Day)** — the documented carousel-batch authoring
 // form. Captures the 1-based index, slug, and day label. Exported so callers
 // (e.g. the confirmation-sweep's shape detection) test against the same
@@ -114,6 +204,38 @@ export function parseCarouselBatchMarkdown(detailsMarkdown: string): ParsedCarou
   const wasCapFallback = sections.length > 0 && capCandidateCount === sections.length;
 
   return { sections, totalImagesFound, wasCapFallback };
+}
+
+// UNSTRUCTURED DEGRADE (kills failure 2's blind spot): a carousel-titled
+// issue whose interaction matches NEITHER the structured payload contract NOR
+// the legacy `**N. slug (Day)**` heading shape — e.g. an LLM-authored `##
+// akihabara (Sat)` heading instead of the documented bold-numbered form
+// (2026-07-11 live incident). Rather than silently falling to the generic
+// path (which calls stripImageLines and would render captions with ZERO
+// slides and ZERO buttons), this renders the WHOLE raw artifact as one
+// synthetic section: every image URL found anywhere in the text becomes a
+// slide (nothing dropped), and the non-image text becomes the caption,
+// prefixed with a loud warning so the contract miss is visible, never blind.
+export function buildUnstructuredDegradeSection(detailsMarkdown: string): CarouselSection {
+  const slideUrls: string[] = [];
+  let m: RegExpExecArray | null;
+  IMAGE_RE.lastIndex = 0;
+  while ((m = IMAGE_RE.exec(detailsMarkdown)) !== null) {
+    slideUrls.push(m[1]);
+  }
+  const caption = detailsMarkdown
+    .split("\n")
+    .filter((line) => !/^\s*!\[/.test(line) && line.trim() !== "")
+    .join("\n")
+    .trim();
+  return {
+    index: 1,
+    slug: "unstructured",
+    day: "unknown",
+    slideUrls,
+    caption: `⚠ unstructured artifact — showing raw content (structured/legacy detection both missed this batch's shape)\n\n${caption}`,
+    degraded: true,
+  };
 }
 
 /**

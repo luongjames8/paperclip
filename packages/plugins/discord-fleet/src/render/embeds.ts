@@ -80,6 +80,48 @@ export function buildCarouselConfirmationActionRow(
   };
 }
 
+// Carousel-batch anchor statuses — the trailer/anchor message is EDITED in
+// place across every one of these, never re-posted (kills the "stacked
+// generations" confusion: 2026-07-11 live incident, partial + full renders of
+// the same week both sitting in the channel with nothing marking which was
+// current).
+export type CarouselAnchorStatus = "awaiting" | "accepted" | "rejected" | "superseded" | "expired";
+
+const CAROUSEL_ANCHOR_STATUS_LINE: Record<CarouselAnchorStatus, string> = {
+  awaiting: "🟡 awaiting decision",
+  accepted: "✅ accepted",
+  rejected: "❌ rejected",
+  superseded: "⏰ superseded — a newer version was posted below",
+  expired: "⏰ expired — no decision was made in time",
+};
+
+// Builds the anchor embed body (status line + optional actor/reason detail).
+// Callers attach the action row (buildCarouselConfirmationActionRow) only
+// while status is "awaiting" — every other status strips components.
+export function buildCarouselAnchorEmbed(opts: {
+  issueUrl: string;
+  status: CarouselAnchorStatus;
+  detail?: string;
+}): APIEmbed {
+  const statusLine = CAROUSEL_ANCHOR_STATUS_LINE[opts.status];
+  const lines = [statusLine, opts.detail ? safe(opts.detail, 1000) : null, `[View full batch in Paperclip](${opts.issueUrl})`].filter(
+    (l): l is string => Boolean(l),
+  );
+  const color =
+    opts.status === "accepted"
+      ? 0x57f287
+      : opts.status === "rejected"
+        ? 0xed4245
+        : opts.status === "awaiting"
+          ? 0x5865f2
+          : 0x99aab5;
+  return enforceEmbedLimits({
+    color,
+    title: "Decision needed",
+    description: lines.join("\n"),
+  });
+}
+
 export function buildApprovalActionRow(opts: {
   approvalId: string;
   issueUrl: string;

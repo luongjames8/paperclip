@@ -1078,7 +1078,14 @@ export function issueRoutes(
     companyId: string,
     actor: ReturnType<typeof getActorInfo>,
   ): Promise<string | null> {
-    if (actor.actorType !== "agent" || !actor.agentId || !actor.runId) return null;
+    // actor.runId comes straight from the caller-supplied X-Paperclip-Run-Id
+    // header (getActorInfo), unvalidated. heartbeatRuns.id is a Postgres uuid
+    // column — eq() against a malformed non-uuid string throws "invalid
+    // input syntax for type uuid", uncaught, turning this whole issue-create
+    // request into a bare 500 (2026-07-11 live incident, same class as the
+    // logActivity runId fix in services/activity-log.ts).
+    if (actor.actorType !== "agent" || !actor.agentId || !isUuidLike(actor.runId)) return null;
+    const runId: string = actor.runId as string;
     const run = await db
       .select({
         agentId: heartbeatRuns.agentId,
@@ -1086,7 +1093,7 @@ export function issueRoutes(
       })
       .from(heartbeatRuns)
       .where(and(
-        eq(heartbeatRuns.id, actor.runId),
+        eq(heartbeatRuns.id, runId),
         eq(heartbeatRuns.companyId, companyId),
       ))
       .then((rows) => rows[0] ?? null);
@@ -1110,9 +1117,14 @@ export function issueRoutes(
     issue?: { companyId: string; projectId?: string | null; executionPolicy?: unknown } | null,
   ): Promise<TrustPresetResolution | null> {
     if (!input.agentId) return null;
+    // input.runId ultimately traces back to the caller-supplied
+    // X-Paperclip-Run-Id header — same unvalidated-uuid hazard as
+    // resolveRunIssueWorkspaceInheritanceSource above; isUuidLike guards the
+    // eq() against heartbeatRuns.id (a uuid column) instead of letting a
+    // malformed header 500 the whole request.
     const [agent, run] = await Promise.all([
       agentsSvc.getById(input.agentId),
-      input.runId
+      isUuidLike(input.runId)
         ? db
             .select({
               companyId: heartbeatRuns.companyId,
@@ -1120,7 +1132,7 @@ export function issueRoutes(
               contextSnapshot: heartbeatRuns.contextSnapshot,
             })
             .from(heartbeatRuns)
-            .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, companyId)))
+            .where(and(eq(heartbeatRuns.id, input.runId as string), eq(heartbeatRuns.companyId, companyId)))
             .then((rows) => rows[0] ?? null)
         : Promise.resolve(null),
     ]);
@@ -5112,8 +5124,14 @@ export function issueRoutes(
       if (transition.decision && decisionId) {
         const decision = transition.decision;
         issue = await db.transaction(async (tx) => {
+          // existing.id (resolved UUID), not the raw path param `id` — `id`
+          // may be a human-readable identifier (svc.getById resolves both
+          // forms above), but svc.update queries eq(issues.id, ...) against
+          // a Postgres uuid column with NO identifier resolution, throwing
+          // an uncaught "invalid input syntax for type uuid" that error-
+          // handler.ts turns into a bare 500 (see comments-route note).
           const updated = await svc.update(
-            id,
+            existing.id,
             {
               ...updateFields,
               actorAgentId: actor.agentId ?? null,
@@ -5139,7 +5157,8 @@ export function issueRoutes(
           return updated;
         });
       } else {
-        issue = await svc.update(id, {
+        // existing.id (resolved UUID) — same identifier-vs-uuid fix as above.
+        issue = await svc.update(existing.id, {
           ...updateFields,
           actorAgentId: actor.agentId ?? null,
           actorUserId: actor.actorType === "user" ? actor.actorId : null,
@@ -5506,7 +5525,8 @@ export function issueRoutes(
     if (commentBody) {
       const commentReferenceSummaryBefore = updateReferenceSummaryAfter
         ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-      comment = await svc.addComment(id, commentBody, {
+      // issue.id (resolved UUID) — same identifier-vs-uuid fix as above.
+      comment = await svc.addComment(issue.id, commentBody, {
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,
@@ -6715,7 +6735,17 @@ export function issueRoutes(
             actor,
           })
         : null;
-      const reopenedIssue = await svc.update(id, { status: "todo" });
+      // Use currentIssue.id (resolved UUID), not the raw path param `id` —
+      // `id` may be a human-readable identifier (svc.getById resolves both
+      // forms), but svc.update queries `eq(issues.id, ...)` against a
+      // Postgres uuid column directly with NO identifier resolution. Passing
+      // an identifier string there throws "invalid input syntax for type
+      // uuid" from the pg driver — an uncaught Error, not an HttpError/
+      // ZodError, so error-handler.ts's catch-all turns it into a bare
+      // HTTP 500 with no diagnostic detail (2026-07-11 live incident: the
+      // openclaw agent's comment POST 500'd twice relaying an operator
+      // instruction).
+      const reopenedIssue = await svc.update(currentIssue.id, { status: "todo" });
       if (!reopenedIssue) {
         res.status(404).json({ error: "Issue not found" });
         return;
@@ -6840,8 +6870,10 @@ export function issueRoutes(
       let txResult: { comment: Awaited<ReturnType<typeof svc.addComment>>; issue: NonNullable<Awaited<ReturnType<typeof svc.update>>> };
       try {
         txResult = await db.transaction(async (tx) => {
+          // currentIssue.id (resolved UUID) — see the identifier-vs-uuid note
+          // on the reopenedIssue call above; same fix applies here.
           const insertedComment = await svc.addComment(
-            id,
+            currentIssue.id,
             req.body.body,
             {
               agentId: actor.agentId ?? undefined,
@@ -6851,7 +6883,7 @@ export function issueRoutes(
             commentOptions,
             tx,
           );
-          const updated = await svc.update(id, updatePatch, tx);
+          const updated = await svc.update(currentIssue.id, updatePatch, tx);
           // Throw (not return null) so drizzle rolls back the inserted comment when the issue
           // has been concurrently deleted between the initial fetch and the in-transaction update.
           if (!updated) throw new AutoApprovalIssueMissingError();
@@ -6911,7 +6943,9 @@ export function issueRoutes(
         requestedByActorId: actor.actorId,
       });
     } else {
-      comment = await svc.addComment(id, req.body.body, {
+      // currentIssue.id (resolved UUID), not the raw path param — same
+      // identifier-vs-uuid fix as above.
+      comment = await svc.addComment(currentIssue.id, req.body.body, {
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,

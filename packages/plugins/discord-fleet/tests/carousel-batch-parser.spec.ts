@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { parseCarouselBatchMarkdown, renderCarouselSlideEmbeds } from "../src/render/carousel-batch.js";
+import {
+  parseCarouselBatchMarkdown,
+  renderCarouselSlideEmbeds,
+  parseCarouselBatchPayload,
+  carouselBatchFromStructuredPayload,
+  buildUnstructuredDegradeSection,
+  type CarouselBatchPayload,
+} from "../src/render/carousel-batch.js";
 
 const SLUGS = [
   "tokyo-by-car-guide",
@@ -166,5 +173,151 @@ describe("renderCarouselSlideEmbeds", () => {
       expect(embed.footer?.text).toContain(parsed.sections[0].slug);
       expect(embed.footer?.text).toContain(parsed.sections[0].day);
     });
+  });
+});
+
+// ─── STRUCTURED PAYLOAD CONTRACT (version 1) ─────────────────────────────────
+
+function validPayload(overrides: Partial<CarouselBatchPayload> = {}): CarouselBatchPayload {
+  return {
+    version: 1,
+    weekOf: "2026-07-13",
+    cadence: { days: ["Sat", "Sun"], held: 0, strays: 0 },
+    items: [
+      { slug: "akihabara", day: "Sat", caption: "Electric town.", slides: ["https://r2.example.com/a1.jpg", "https://r2.example.com/a2.jpg"] },
+      { slug: "shibuya", day: "Sun", caption: "Crossing.", slides: ["https://r2.example.com/s1.jpg"] },
+    ],
+    ...overrides,
+  };
+}
+
+describe("parseCarouselBatchPayload", () => {
+  it("parses a well-formed version-1 payload", () => {
+    const parsed = parseCarouselBatchPayload(validPayload());
+    expect(parsed).not.toBeNull();
+    expect(parsed!.version).toBe(1);
+    expect(parsed!.items).toHaveLength(2);
+  });
+
+  it("accepts an optional heldOldestWeek on cadence", () => {
+    const parsed = parseCarouselBatchPayload(validPayload({ cadence: { days: [], held: 3, strays: 0, heldOldestWeek: "2026-07-06" } }));
+    expect(parsed!.cadence.heldOldestWeek).toBe("2026-07-06");
+  });
+
+  it("accepts a null day on an item (unplanned stray)", () => {
+    const parsed = parseCarouselBatchPayload(validPayload({ items: [{ slug: "extra", day: null, caption: "Stray post.", slides: [] }] }));
+    expect(parsed!.items[0].day).toBeNull();
+  });
+
+  it("accepts an item with ZERO slides", () => {
+    const parsed = parseCarouselBatchPayload(validPayload({ items: [{ slug: "a", day: "Sat", caption: "c", slides: [] }] }));
+    expect(parsed!.items[0].slides).toEqual([]);
+  });
+
+  // ── Malformed-shape guards — every one degrades to null, never throws ──────
+  it("null/undefined → null", () => {
+    expect(parseCarouselBatchPayload(null)).toBeNull();
+    expect(parseCarouselBatchPayload(undefined)).toBeNull();
+  });
+
+  it("non-object (string, number) → null", () => {
+    expect(parseCarouselBatchPayload("not an object")).toBeNull();
+    expect(parseCarouselBatchPayload(42)).toBeNull();
+  });
+
+  it("wrong version → null", () => {
+    expect(parseCarouselBatchPayload({ ...validPayload(), version: 2 })).toBeNull();
+    expect(parseCarouselBatchPayload({ ...validPayload(), version: "1" })).toBeNull();
+  });
+
+  it("missing weekOf → null", () => {
+    const { weekOf, ...rest } = validPayload();
+    expect(parseCarouselBatchPayload(rest)).toBeNull();
+  });
+
+  it("missing/malformed cadence → null", () => {
+    expect(parseCarouselBatchPayload({ ...validPayload(), cadence: undefined })).toBeNull();
+    expect(parseCarouselBatchPayload({ ...validPayload(), cadence: { days: "not-an-array", held: 0, strays: 0 } })).toBeNull();
+    expect(parseCarouselBatchPayload({ ...validPayload(), cadence: { days: [], held: "zero", strays: 0 } })).toBeNull();
+  });
+
+  it("items not an array → null", () => {
+    expect(parseCarouselBatchPayload({ ...validPayload(), items: "not-an-array" })).toBeNull();
+  });
+
+  it("an item missing a required field → null (whole payload rejected, not a partial parse)", () => {
+    expect(parseCarouselBatchPayload({ ...validPayload(), items: [{ slug: "a", day: "Sat", slides: [] }] })).toBeNull(); // missing caption
+    expect(parseCarouselBatchPayload({ ...validPayload(), items: [{ slug: "a", day: "Sat", caption: "c", slides: "not-array" }] })).toBeNull();
+  });
+
+  it("0 items (empty array) is VALID — a batch that held everything over", () => {
+    const parsed = parseCarouselBatchPayload(validPayload({ items: [] }));
+    expect(parsed).not.toBeNull();
+    expect(parsed!.items).toEqual([]);
+  });
+});
+
+describe("carouselBatchFromStructuredPayload", () => {
+  it("maps items to sections 1-based in order, never touching regex/markdown", () => {
+    const result = carouselBatchFromStructuredPayload(validPayload());
+    expect(result.sections).toHaveLength(2);
+    expect(result.sections[0]).toEqual({ index: 1, slug: "akihabara", day: "Sat", slideUrls: ["https://r2.example.com/a1.jpg", "https://r2.example.com/a2.jpg"], caption: "Electric town.", degraded: false });
+    expect(result.sections[1].index).toBe(2);
+    expect(result.totalImagesFound).toBe(3);
+    expect(result.wasCapFallback).toBe(false);
+  });
+
+  it("null day (unplanned stray) renders as day 'unplanned'", () => {
+    const result = carouselBatchFromStructuredPayload(validPayload({ items: [{ slug: "extra", day: null, caption: "c", slides: [] }] }));
+    expect(result.sections[0].day).toBe("unplanned");
+  });
+
+  it("0 items → 0 sections, 0 images — caller decides what to do (postCarouselBatch skips posting)", () => {
+    const result = carouselBatchFromStructuredPayload(validPayload({ items: [] }));
+    expect(result.sections).toEqual([]);
+    expect(result.totalImagesFound).toBe(0);
+  });
+});
+
+// ─── UNSTRUCTURED DEGRADE (contract miss must be visible, never blind) ───────
+
+describe("buildUnstructuredDegradeSection", () => {
+  it("extracts every image URL regardless of heading shape (the live-incident `## slug (Day)` case)", () => {
+    const markdown = "## akihabara (Sat)\n![a](https://r2.example.com/1.jpg)\n![b](https://r2.example.com/2.jpg)\n\nElectric town.";
+    const section = buildUnstructuredDegradeSection(markdown);
+    expect(section.slideUrls).toEqual(["https://r2.example.com/1.jpg", "https://r2.example.com/2.jpg"]);
+  });
+
+  it("caption is prefixed with a loud '⚠ unstructured artifact' warning", () => {
+    const section = buildUnstructuredDegradeSection("Some text.\n![x](https://r2.example.com/1.jpg)");
+    expect(section.caption).toMatch(/^⚠ unstructured artifact/);
+  });
+
+  it("non-image text is preserved in the caption (nothing dropped, only image lines filtered)", () => {
+    const markdown = [
+      "## akihabara (Sat)",
+      "![a](https://r2.example.com/1.jpg)",
+      "",
+      "Electric town vibes.",
+      "",
+      "Key: slug=akihabara weekOf=2026-07-13 plannedDay=Sat",
+      "Cadence: Sat+Sun (2 slots) | Strays: 0 | Held: 0",
+    ].join("\n");
+    const section = buildUnstructuredDegradeSection(markdown);
+    expect(section.caption).toContain("Electric town vibes.");
+    expect(section.caption).toContain("Key: slug=akihabara weekOf=2026-07-13 plannedDay=Sat");
+    expect(section.caption).toContain("Cadence: Sat+Sun (2 slots) | Strays: 0 | Held: 0");
+  });
+
+  it("degraded flag is always true (visually distinguishable from a clean structured/legacy parse)", () => {
+    const section = buildUnstructuredDegradeSection("no images here at all");
+    expect(section.degraded).toBe(true);
+    expect(section.slideUrls).toEqual([]);
+  });
+
+  it("zero images in the artifact still produces a section (caption-only render, never silently dropped)", () => {
+    const section = buildUnstructuredDegradeSection("Just prose, no image markdown.");
+    expect(section.slideUrls).toEqual([]);
+    expect(section.caption).toContain("Just prose, no image markdown.");
   });
 });

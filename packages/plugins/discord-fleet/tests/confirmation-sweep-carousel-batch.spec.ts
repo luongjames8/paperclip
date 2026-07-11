@@ -10,6 +10,7 @@ import manifest from "../src/manifest.js";
 import type { DiscordFleetConfig } from "../src/config/schema.js";
 import type { PaperclipClient, PaperclipIssue, PaperclipInteraction } from "../src/api/paperclip.js";
 import type { Client } from "discord.js";
+import type { CarouselBatchPayload } from "../src/render/carousel-batch.js";
 
 vi.mock("../src/discord/rest.js", () => ({
   postEmbedToChannel: vi.fn().mockResolvedValue("msg-1"),
@@ -662,5 +663,362 @@ describe("runConfirmationSweep — hashChanged re-post attempts to disable the P
     await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
 
     expect(editMessageInChannel).not.toHaveBeenCalled();
+  });
+});
+
+// ─── STRUCTURED PAYLOAD CONTRACT (kills the "regex-on-LLM-prose" failure
+// class — 2026-07-11 live incident: the publisher wrote `## akihabara (Sat)`
+// instead of `**1. akihabara (Sat)**`, SECTION_HEADING_RE missed it, and the
+// sweep fell to the generic image-stripping path) ───────────────────────────
+
+function buildStructuredPayload(overrides: Partial<CarouselBatchPayload> = {}): CarouselBatchPayload {
+  return {
+    version: 1,
+    weekOf: "2026-07-13",
+    cadence: { days: ["Sat", "Sun"], held: 0, strays: 0 },
+    items: [
+      { slug: "akihabara", day: "Sat", caption: "Electric town.", slides: ["https://r2.example.com/akihabara/1.jpg", "https://r2.example.com/akihabara/2.jpg"] },
+      { slug: "shibuya", day: "Sun", caption: "Crossing.", slides: ["https://r2.example.com/shibuya/1.jpg"] },
+    ],
+    ...overrides,
+  };
+}
+
+describe("runConfirmationSweep — STRUCTURED PAYLOAD CONTRACT (version 1)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("payload.carouselBatch.version===1 renders from DATA — never touches detailsMarkdown's regex shape at all", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const payload = buildStructuredPayload();
+    // detailsMarkdown deliberately uses the WRONG (unnumbered `##`) heading
+    // shape that broke detection live — proves detection never depends on it
+    // when the structured field is present.
+    const interaction = makeInteraction({
+      payload: {
+        detailsMarkdown: "## akihabara (Sat)\n![x](https://r2.example.com/akihabara/1.jpg)\n\nElectric town.",
+        carouselBatch: payload,
+      },
+    });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(postEmbedsToChannel).toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+    const textCalls = (postToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const header = textCalls.find(([, , msg]) => (msg as string).includes("Carousel batch awaiting confirmation"))?.[2] as string;
+    expect(header).toContain("2 carousel");
+    expect(header).toContain("3 image"); // 2 + 1 slides across the two items
+    // Every slide URL from BOTH items rendered as an embed (nothing dropped).
+    const embedCalls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const slideEmbedCalls = embedCalls.filter(([, , , components]) => components === undefined);
+    const allImageUrls = slideEmbedCalls.flatMap(([, , embeds]) => (embeds as any[]).map((e) => e.image?.url));
+    expect(allImageUrls).toEqual(
+      expect.arrayContaining(["https://r2.example.com/akihabara/1.jpg", "https://r2.example.com/akihabara/2.jpg", "https://r2.example.com/shibuya/1.jpg"]),
+    );
+  });
+
+  it("structured payload takes priority over a legacy-shaped detailsMarkdown (both present) — structured wins", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    // Legacy-shaped markdown would parse to a DIFFERENT single-item batch —
+    // if structured detection didn't take priority, this test would see 1
+    // section (from markdown) instead of 2 (from the structured payload).
+    const legacyMarkdown = buildBatch([4]);
+    const payload = buildStructuredPayload();
+    const interaction = makeInteraction({ payload: { detailsMarkdown: legacyMarkdown, carouselBatch: payload } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const embedCalls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const slideEmbedCalls = embedCalls.filter(([, , , components]) => components === undefined);
+    const allImageUrls = slideEmbedCalls.flatMap(([, , embeds]) => (embeds as any[]).map((e) => e.image?.url));
+    // Structured payload's 3 slides, not legacy's 4.
+    expect(allImageUrls).toHaveLength(3);
+  });
+
+  it("trailer buttons carry the structured-payload's hash — accept/reject action row present exactly once", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "irrelevant", carouselBatch: buildStructuredPayload() } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const calls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const trailerCalls = calls.filter(([, , , components]) => components !== undefined);
+    expect(trailerCalls).toHaveLength(1);
+    const row = trailerCalls[0][3][0];
+    const customIds = row.components.map((c: any) => c.custom_id);
+    expect(customIds.some((id: string) => id.startsWith("car-ok:"))).toBe(true);
+    expect(customIds.some((id: string) => id.startsWith("car-no:"))).toBe(true);
+  });
+
+  it("anchor embed shows the 🟡 awaiting-decision status line (shared buildCarouselAnchorEmbed contract)", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "irrelevant", carouselBatch: buildStructuredPayload() } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const calls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const trailerCall = calls.find(([, , , components]) => components !== undefined);
+    const anchorEmbed = trailerCall![2][0];
+    expect(anchorEmbed.description).toMatch(/🟡 awaiting decision/);
+  });
+
+  it("0-item structured payload (batch held everything over) → skips posting entirely, no header/trailer, interaction stays pending", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const payload = buildStructuredPayload({ items: [], cadence: { days: [], held: 2, strays: 0, heldOldestWeek: "2026-07-06" } });
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "irrelevant", carouselBatch: payload } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].totalSections).toBe(0);
+    expect(finalState["int-1"].headerPosted).toBe(false);
+  });
+
+  it("malformed carouselBatch (wrong version, missing fields) degrades to null — falls through to legacy/generic detection, never throws", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const interaction = makeInteraction({
+      payload: { detailsMarkdown: "Please review.", carouselBatch: { version: 2, items: "not-an-array" } },
+    });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+
+    await expect(runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip)).resolves.not.toThrow();
+    // Falls through to the generic path (detailsMarkdown has no carousel shape).
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── UNSTRUCTURED DEGRADE (kills failure 2's blind spot): neither the
+// structured contract NOR the legacy heading regex matched, but the issue
+// TITLE is carousel-shaped → render with images intact + a loud warning,
+// NEVER the generic stripImageLines path ───────────────────────────────────
+
+function makeCarouselTitledIssue(overrides: Partial<PaperclipIssue> = {}): PaperclipIssue {
+  return makeIssue({ title: "Publisher (Carousel) — wk-2026-07-13", ...overrides });
+}
+
+const CAROUSEL_TITLE_CONFIG = makeConfig({ c1: [{ titleRegex: "Publisher \\(Carousel\\)", channelId: "ch-carousel" }] });
+
+describe("runConfirmationSweep — unstructured-degrade (carousel-titled issue, unparseable shape)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("LLM wrote `## slug (Day)` instead of `**N. slug (Day)**` — degrades to images-intact render with a loud warning, NEVER stripImageLines", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const brokenMarkdown = [
+      "## akihabara (Sat)",
+      "![slide-01](https://pub-example.r2.dev/akihabara/1.jpg)",
+      "![slide-02](https://pub-example.r2.dev/akihabara/2.jpg)",
+      "",
+      "Electric town vibes.",
+      "",
+      "Key: slug=akihabara weekOf=2026-07-13 plannedDay=Sat",
+      "Cadence: Sat+Sun (2 slots) | Strays: 0 | Held: 0",
+    ].join("\n");
+    const interaction = makeInteraction({ payload: { detailsMarkdown: brokenMarkdown } });
+    const paperclip = makePaperclip([makeCarouselTitledIssue()], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CAROUSEL_TITLE_CONFIG, async () => paperclip);
+
+    // NEVER the generic (image-stripping) path.
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+    // Both slide images rendered as embeds — nothing dropped.
+    expect(postEmbedsToChannel).toHaveBeenCalled();
+    const embedCalls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const slideEmbedCalls = embedCalls.filter(([, , , components]) => components === undefined);
+    const allImageUrls = slideEmbedCalls.flatMap(([, , embeds]) => (embeds as any[]).map((e) => e.image?.url));
+    expect(allImageUrls).toEqual(
+      expect.arrayContaining(["https://pub-example.r2.dev/akihabara/1.jpg", "https://pub-example.r2.dev/akihabara/2.jpg"]),
+    );
+    // Loud warning present in the caption text.
+    const textCalls = (postToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const captionCall = textCalls.find(([, , msg]) => (msg as string).includes("unstructured artifact"));
+    expect(captionCall).toBeDefined();
+    expect(captionCall![2] as string).toMatch(/⚠ unstructured artifact/);
+    // Non-image text (key/cadence lines, caption) preserved, not dropped.
+    expect(captionCall![2] as string).toContain("Electric town vibes.");
+  });
+
+  it("still posts a trailer with accept/reject buttons — a contract miss doesn't remove the operator's ability to decide", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const brokenMarkdown = "## akihabara (Sat)\n![x](https://r2.example.com/1.jpg)\n\nCaption.";
+    const interaction = makeInteraction({ payload: { detailsMarkdown: brokenMarkdown } });
+    const paperclip = makePaperclip([makeCarouselTitledIssue()], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CAROUSEL_TITLE_CONFIG, async () => paperclip);
+
+    const calls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const trailerCalls = calls.filter(([, , , components]) => components !== undefined);
+    expect(trailerCalls).toHaveLength(1);
+    const row = trailerCalls[0][3][0];
+    const customIds = row.components.map((c: any) => c.custom_id);
+    expect(customIds.some((id: string) => id.startsWith("car-ok:"))).toBe(true);
+    expect(customIds.some((id: string) => id.startsWith("car-no:"))).toBe(true);
+  });
+
+  it("a NON-carousel-titled issue with the same broken markdown shape falls to the generic (image-stripping) path unchanged — degrade is scoped to carousel-titled issues only", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedToChannel, postEmbedsToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const brokenMarkdown = "## akihabara (Sat)\n![x](https://r2.example.com/1.jpg)\n\nCaption.";
+    const nonCarouselConfig = makeConfig({ c1: [{ titleRegex: ".*", channelId: "ch-generic" }] });
+    const interaction = makeInteraction({ payload: { detailsMarkdown: brokenMarkdown } });
+    const paperclip = makePaperclip([makeIssue({ title: "Some other confirmation" })], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), nonCarouselConfig, async () => paperclip);
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+  });
+
+  it("idempotent resume: a partial degrade-render failure persists progress and resumes next sweep (reuses postCarouselBatch's existing resume machinery)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("simulated Discord outage"));
+
+    const harness = createTestHarness({ manifest });
+    const brokenMarkdown = "## akihabara (Sat)\n![x](https://r2.example.com/1.jpg)\n\nCaption.";
+    const interaction = makeInteraction({ payload: { detailsMarkdown: brokenMarkdown } });
+    const paperclip = makePaperclip([makeCarouselTitledIssue()], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CAROUSEL_TITLE_CONFIG, async () => paperclip);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    // Header posted, section embed failed — sectionsPosted stays 0, trailer not posted.
+    expect(finalState["int-1"].headerPosted).toBe(true);
+    expect(finalState["int-1"].sectionsPosted).toBe(0);
+    expect(finalState["int-1"].trailerPosted).toBe(false);
+  });
+});
+
+// ─── ANCHOR STATUS TRANSITIONS (kills "stacked generations" — 2026-07-11 live
+// incident: partial + full renders of the same week both sitting in the
+// channel with nothing marking which was current) ───────────────────────────
+
+describe("runConfirmationSweep — anchor status transitions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("superseded edit uses the SHARED anchor embed contract (buildCarouselAnchorEmbed) — same shape as accepted/rejected", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    const newMarkdown = buildBatch([3, 3, 3]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(oldMarkdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "old-anchor-id",
+          anchorMessageId: "old-anchor-id",
+          lastRenderedStatus: "awaiting",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: newMarkdown } })]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, , messageId, opts] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(messageId).toBe("old-anchor-id");
+    expect(opts.embeds[0].description).toMatch(/⏰ superseded/);
+    expect(opts.components).toEqual([]);
+  });
+
+  it("falls back to trailerMessageId when anchorMessageId is absent (pre-migration record)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    const newMarkdown = buildBatch([3, 3, 3]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(oldMarkdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "legacy-trailer-id",
+          // no anchorMessageId — pre-migration record
+        },
+      },
+    );
+
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: newMarkdown } })]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, , messageId] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(messageId).toBe("legacy-trailer-id");
+  });
+
+  it("new trailer post sets BOTH trailerMessageId and anchorMessageId to the same value, and lastRenderedStatus to 'awaiting'", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].anchorMessageId).toBeDefined();
+    expect(finalState["int-1"].anchorMessageId).toBe(finalState["int-1"].trailerMessageId);
+    expect(finalState["int-1"].lastRenderedStatus).toBe("awaiting");
   });
 });

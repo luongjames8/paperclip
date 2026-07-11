@@ -76,12 +76,23 @@ function makeConfig(): DiscordFleetConfig {
   };
 }
 
+const ANCHOR_ISSUE_URL = "http://paperclip:3100/tc1/issues/ISS-1";
+
+// Real discord.js Embed instances expose `.description` as a direct getter
+// (no .toJSON() call needed to read it) — the anchor-resolution code
+// (renderAnchorResolved in the handler) reads interaction.message.embeds[0]
+// directly, so the mock must shape its embed the same way.
 function makeInteraction(
   customId: string,
   opts?: { username?: string; reason?: string; discordUserId?: string },
 ): any {
   const embed = {
-    toJSON: () => ({ title: "Decision needed", color: 0x5865f2, description: "some description" }),
+    title: "Decision needed",
+    color: 0x5865f2,
+    description: `🟡 awaiting decision\n[View full batch in Paperclip](${ANCHOR_ISSUE_URL})`,
+    toJSON() {
+      return { title: this.title, color: this.color, description: this.description };
+    },
   };
   const interaction: any = {
     customId,
@@ -190,7 +201,7 @@ describe("handleCarouselConfirmationButton — accept happy path (matching hash 
     mockListIssueInteractions.mockResolvedValue(currentInteractionRow());
   });
 
-  it("calls acceptInteraction with issueId + interactionId, then edits the trailer + strips components", async () => {
+  it("calls acceptInteraction with issueId + interactionId, then edits the ANCHOR (accepted status) + strips components", async () => {
     const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
     vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
@@ -203,7 +214,39 @@ describe("handleCarouselConfirmationButton — accept happy path (matching hash 
     expect(interaction.editReply).toHaveBeenCalledTimes(1);
     const call = interaction.editReply.mock.calls[0][0];
     expect(call.components).toEqual([]);
-    expect(call.embeds[0].footer.text).toMatch(/Accepted by alice/);
+    expect(call.embeds[0].description).toMatch(/✅ accepted/);
+    expect(call.embeds[0].description).toMatch(/Accepted by alice/);
+  });
+
+  // ─── ACK-FIRST ordering (kills failure 1, 2026-07-11 live incident) ───────
+  //
+  // deferUpdate must be the FIRST call this handler makes — strictly before
+  // any paperclip I/O (secrets.resolve, listIssueInteractions). A slow
+  // network call ahead of the ack is exactly what blew the 3s window and
+  // produced a swallowed DiscordAPIError 10062 with zero operator-visible
+  // outcome.
+  it("deferUpdate fires BEFORE any paperclip I/O (secrets.resolve / listIssueInteractions)", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    const callOrder: string[] = [];
+    vi.spyOn(harness.ctx.secrets, "resolve").mockImplementation(async () => {
+      callOrder.push("secrets.resolve");
+      return "tok-abc";
+    });
+    mockListIssueInteractions.mockImplementation(async () => {
+      callOrder.push("listIssueInteractions");
+      return currentInteractionRow();
+    });
+
+    const interaction = makeInteraction(`car-ok:${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    interaction.deferUpdate = vi.fn().mockImplementation(async () => {
+      callOrder.push("deferUpdate");
+    });
+    await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
+
+    expect(callOrder[0]).toBe("deferUpdate");
+    expect(callOrder.indexOf("deferUpdate")).toBeLessThan(callOrder.indexOf("secrets.resolve"));
+    expect(callOrder.indexOf("deferUpdate")).toBeLessThan(callOrder.indexOf("listIssueInteractions"));
   });
 
   it("409 (already resolved) surfaces as an ephemeral followUp error, not a crash", async () => {
@@ -264,13 +307,23 @@ describe("handleCarouselConfirmationButton — reject opens a modal (matching ha
 // A previous trailer left live after a hashChanged re-post must refuse
 // accept/reject clicks — its customId's hash8 no longer matches the
 // interaction's CURRENT detailsMarkdown.
+//
+// ACK-FIRST NOTE (2026-07-11 rewrite): for ACCEPT, deferUpdate is now the
+// unconditional first response, so a stale refusal now arrives via
+// followUp (not reply) — the interaction is already acked by the time the
+// version check runs. For REJECT, showModal is now the unconditional first
+// response (validation moved to modal-submit entirely), so a stale hash8 on
+// the BUTTON click no longer prevents the modal from opening — the refusal
+// now happens when the (fresh) modal-submit interaction is validated. See
+// the "handleCarouselConfirmationRejectModal — stale version-token guard on
+// submit" describe block below for that path.
 
 describe("handleCarouselConfirmationButton — stale version-token guard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("accept: hash8 mismatch (stale trailer) → ephemeral stale refusal, ZERO paperclip mutation calls", async () => {
+  it("accept: hash8 mismatch (stale trailer) → ack (deferUpdate) THEN ephemeral stale followUp, ZERO paperclip mutation calls", async () => {
     mockListIssueInteractions.mockResolvedValue(currentInteractionRow());
     const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
@@ -279,15 +332,15 @@ describe("handleCarouselConfirmationButton — stale version-token guard", () =>
     const interaction = makeInteraction(`car-ok:${STALE_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
     await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
 
-    expect(interaction.reply).toHaveBeenCalledWith(
+    expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
+    expect(interaction.followUp).toHaveBeenCalledWith(
       expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/stale/i) }),
     );
-    expect(interaction.deferUpdate).not.toHaveBeenCalled();
     expect(mockAcceptInteraction).not.toHaveBeenCalled();
     expect(mockRejectInteraction).not.toHaveBeenCalled();
   });
 
-  it("reject: hash8 mismatch → ephemeral stale refusal BEFORE the modal is shown", async () => {
+  it("reject: hash8 mismatch on the BUTTON click still opens the modal (validation deferred to modal submit) — zero paperclip mutation calls from the button click itself", async () => {
     mockListIssueInteractions.mockResolvedValue(currentInteractionRow());
     const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
@@ -296,11 +349,13 @@ describe("handleCarouselConfirmationButton — stale version-token guard", () =>
     const interaction = makeInteraction(`car-no:${STALE_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
     await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
 
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/stale/i) }),
-    );
-    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(interaction.showModal).toHaveBeenCalledTimes(1);
+    expect(interaction.reply).not.toHaveBeenCalled();
+    expect(interaction.followUp).not.toHaveBeenCalled();
     expect(mockRejectInteraction).not.toHaveBeenCalled();
+    // isCurrentVersion (the paperclip fetch) is NEVER invoked from the button
+    // click anymore — it only runs after the modal-submit interaction acks.
+    expect(mockListIssueInteractions).not.toHaveBeenCalled();
   });
 
   it("matching hash8 proceeds normally (control case — proves the guard discriminates, not blanket-refuses)", async () => {
@@ -314,9 +369,10 @@ describe("handleCarouselConfirmationButton — stale version-token guard", () =>
 
     expect(mockAcceptInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID);
     expect(interaction.reply).not.toHaveBeenCalled();
+    expect(interaction.followUp).not.toHaveBeenCalled();
   });
 
-  it("LEGACY (pre-versioning, no hash token) customId → stale refusal, zero paperclip mutation calls", async () => {
+  it("LEGACY (pre-versioning, no hash token) accept customId → ack THEN ephemeral stale followUp, zero paperclip mutation calls", async () => {
     mockListIssueInteractions.mockResolvedValue(currentInteractionRow());
     const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
@@ -325,10 +381,10 @@ describe("handleCarouselConfirmationButton — stale version-token guard", () =>
     const interaction = makeInteraction(`carousel-confirm-accept:${ISSUE_ID}:${INTERACTION_ID}`);
     await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
 
-    expect(interaction.reply).toHaveBeenCalledWith(
+    expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
+    expect(interaction.followUp).toHaveBeenCalledWith(
       expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/stale/i) }),
     );
-    expect(interaction.deferUpdate).not.toHaveBeenCalled();
     expect(mockAcceptInteraction).not.toHaveBeenCalled();
   });
 
@@ -341,7 +397,8 @@ describe("handleCarouselConfirmationButton — stale version-token guard", () =>
     const interaction = makeInteraction(`car-ok:${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
     await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
 
-    expect(interaction.reply).toHaveBeenCalledWith(
+    expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
+    expect(interaction.followUp).toHaveBeenCalledWith(
       expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/stale/i) }),
     );
     expect(mockAcceptInteraction).not.toHaveBeenCalled();
@@ -353,6 +410,10 @@ describe("handleCarouselConfirmationButton — stale version-token guard", () =>
 // Any guild member who can see the channel could otherwise click accept/reject
 // and act as the shared board actor. Mirrors approval-button's gate exactly:
 // unmapped Discord user id → ephemeral refusal, zero paperclip API calls.
+//
+// ACK-FIRST NOTE: accept's refusal is now a followUp (post-ack); reject's
+// mapping check moved entirely to modal-submit (see the reject-modal
+// describe block), so an unmapped user's BUTTON click still opens the modal.
 
 describe("handleCarouselConfirmationButton — authorization gate", () => {
   beforeEach(() => {
@@ -360,7 +421,7 @@ describe("handleCarouselConfirmationButton — authorization gate", () => {
     mockListIssueInteractions.mockResolvedValue(currentInteractionRow());
   });
 
-  it("accept: unmapped user gets an ephemeral refusal and NO paperclip API call", async () => {
+  it("accept: unmapped user gets an ack (deferUpdate) THEN an ephemeral followUp refusal, NO paperclip API call", async () => {
     const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
     const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
@@ -371,16 +432,16 @@ describe("handleCarouselConfirmationButton — authorization gate", () => {
     });
     await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
 
-    expect(interaction.reply).toHaveBeenCalledWith(
+    expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
+    expect(interaction.followUp).toHaveBeenCalledWith(
       expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/not authorized/) }),
     );
-    expect(interaction.deferUpdate).not.toHaveBeenCalled();
     expect(resolveSecret).not.toHaveBeenCalled();
     expect(mockAcceptInteraction).not.toHaveBeenCalled();
     expect(mockRejectInteraction).not.toHaveBeenCalled();
   });
 
-  it("reject: unmapped user gets an ephemeral refusal before the modal is ever shown", async () => {
+  it("reject: unmapped user's BUTTON click still opens the modal (auth check deferred to modal submit) — zero paperclip API calls from the click itself", async () => {
     const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
     const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
@@ -391,10 +452,9 @@ describe("handleCarouselConfirmationButton — authorization gate", () => {
     });
     await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
 
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/not authorized/) }),
-    );
-    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(interaction.showModal).toHaveBeenCalledTimes(1);
+    expect(interaction.reply).not.toHaveBeenCalled();
+    expect(interaction.followUp).not.toHaveBeenCalled();
     expect(resolveSecret).not.toHaveBeenCalled();
     expect(mockRejectInteraction).not.toHaveBeenCalled();
   });
@@ -439,7 +499,7 @@ describe("handleCarouselConfirmationRejectModal", () => {
     mockListIssueInteractions.mockResolvedValue(currentInteractionRow());
   });
 
-  it("unmapped user gets an ephemeral refusal and NO paperclip API call (re-checked on modal submit)", async () => {
+  it("unmapped user gets an ack (deferUpdate) THEN an ephemeral followUp refusal, NO paperclip API call (re-checked on modal submit)", async () => {
     const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
     const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
@@ -451,12 +511,35 @@ describe("handleCarouselConfirmationRejectModal", () => {
     });
     await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
 
-    expect(interaction.reply).toHaveBeenCalledWith(
+    expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
+    expect(interaction.followUp).toHaveBeenCalledWith(
       expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/not authorized/) }),
     );
-    expect(interaction.deferUpdate).not.toHaveBeenCalled();
     expect(resolveSecret).not.toHaveBeenCalled();
     expect(mockRejectInteraction).not.toHaveBeenCalled();
+  });
+
+  // ─── ACK-FIRST ordering on modal submit ───────────────────────────────────
+  it("deferUpdate fires BEFORE any paperclip I/O on modal submit too (fresh token, own ack)", async () => {
+    const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    const callOrder: string[] = [];
+    vi.spyOn(harness.ctx.secrets, "resolve").mockImplementation(async () => {
+      callOrder.push("secrets.resolve");
+      return "tok-abc";
+    });
+    mockListIssueInteractions.mockImplementation(async () => {
+      callOrder.push("listIssueInteractions");
+      return currentInteractionRow();
+    });
+
+    const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`, { reason: "some reason" });
+    interaction.deferUpdate = vi.fn().mockImplementation(async () => {
+      callOrder.push("deferUpdate");
+    });
+    await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
+
+    expect(callOrder[0]).toBe("deferUpdate");
   });
 
   it("mapped user proceeds normally, per-user boardApiKeySecretRef preferred over company key", async () => {
@@ -486,10 +569,10 @@ describe("handleCarouselConfirmationRejectModal", () => {
     await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
 
     expect(mockRejectInteraction).not.toHaveBeenCalled();
-    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/reason is required/) }));
+    expect(interaction.followUp).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/reason is required/) }));
   });
 
-  it("calls rejectInteraction with the typed reason, then edits the trailer + strips components", async () => {
+  it("calls rejectInteraction with the typed reason, then edits the ANCHOR (rejected status) + strips components", async () => {
     const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
     vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
@@ -501,7 +584,8 @@ describe("handleCarouselConfirmationRejectModal", () => {
     expect(interaction.editReply).toHaveBeenCalledTimes(1);
     const call = interaction.editReply.mock.calls[0][0];
     expect(call.components).toEqual([]);
-    expect(call.embeds[0].footer.text).toMatch(/Rejected by bob/);
+    expect(call.embeds[0].description).toMatch(/❌ rejected/);
+    expect(call.embeds[0].description).toMatch(/Rejected by bob/);
   });
 
   it("409/422 from rejectInteraction surfaces as an ephemeral followUp error, not swallowed", async () => {
@@ -520,7 +604,7 @@ describe("handleCarouselConfirmationRejectModal", () => {
   });
 
   // ─── Version-token stale-trailer guard on modal submit ────────────────────
-  it("hash8 mismatch on submit → ephemeral stale refusal, ZERO paperclip mutation calls", async () => {
+  it("hash8 mismatch on submit → ack (deferUpdate) THEN ephemeral stale followUp, ZERO paperclip mutation calls", async () => {
     const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
     vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
@@ -528,14 +612,14 @@ describe("handleCarouselConfirmationRejectModal", () => {
     const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${STALE_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`, { reason: "some reason" });
     await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
 
-    expect(interaction.reply).toHaveBeenCalledWith(
+    expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
+    expect(interaction.followUp).toHaveBeenCalledWith(
       expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/stale/i) }),
     );
-    expect(interaction.deferUpdate).not.toHaveBeenCalled();
     expect(mockRejectInteraction).not.toHaveBeenCalled();
   });
 
-  it("LEGACY (no hash token) reject-modal customId → stale refusal, zero paperclip mutation calls", async () => {
+  it("LEGACY (no hash token) reject-modal customId → ack THEN stale followUp refusal, zero paperclip mutation calls", async () => {
     const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
     const harness = createTestHarness({ manifest });
     vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
@@ -543,9 +627,150 @@ describe("handleCarouselConfirmationRejectModal", () => {
     const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY}${ISSUE_ID}:${INTERACTION_ID}`, { reason: "some reason" });
     await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
 
-    expect(interaction.reply).toHaveBeenCalledWith(
+    expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
+    expect(interaction.followUp).toHaveBeenCalledWith(
       expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/stale/i) }),
     );
     expect(mockRejectInteraction).not.toHaveBeenCalled();
+  });
+});
+
+// ─── 10062 (interaction expired) at the ack call itself ─────────────────────
+//
+// Discord's 3s window can still expire even with ack-first (e.g. gateway
+// starvation) — the handler must return gracefully, not throw and hit the
+// dispatcher's swallow-and-log path.
+
+describe("handleCarouselConfirmationButton — 10062 at the ack call", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("reject: showModal throwing 10062 is caught and returns gracefully (no unhandled throw)", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+
+    const interaction = makeInteraction(`car-no:${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    const expiredErr: any = new Error("Unknown interaction");
+    expiredErr.code = 10062;
+    interaction.showModal = vi.fn().mockRejectedValue(expiredErr);
+
+    await expect(handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
+    expect(mockRejectInteraction).not.toHaveBeenCalled();
+  });
+
+  it("accept: deferUpdate throwing 10062 is caught and returns gracefully (no unhandled throw)", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+
+    const interaction = makeInteraction(`car-ok:${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    const expiredErr: any = new Error("Unknown interaction");
+    expiredErr.code = 10062;
+    interaction.deferUpdate = vi.fn().mockRejectedValue(expiredErr);
+
+    await expect(handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
+    expect(mockAcceptInteraction).not.toHaveBeenCalled();
+  });
+
+  it("a non-10062 error from deferUpdate still throws (not silently swallowed at the ack layer — the OUTER dispatcher logs it)", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+
+    const interaction = makeInteraction(`car-ok:${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    interaction.deferUpdate = vi.fn().mockRejectedValue(new Error("network blip"));
+
+    await expect(handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig())).rejects.toThrow("network blip");
+  });
+});
+
+// ─── Unexpected error AFTER ack → visible followUp, never silently swallowed ─
+//
+// Kills the "button handler threw, swallowed to keep worker alive" failure
+// mode (2026-07-11 live incident, failure 1): once the interaction is acked,
+// this handler's own try/catch must ALWAYS attempt a followUp before letting
+// anything reach the top-level dispatcher's console.error-only swallow.
+
+describe("handleCarouselConfirmationButton — unexpected error after ack surfaces visibly", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockListIssueInteractions.mockResolvedValue(currentInteractionRow());
+  });
+
+  it("accept: an unexpected throw after ack (e.g. secrets.resolve blows up) still produces a visible ephemeral followUp", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockRejectedValue(new Error("secrets store unreachable"));
+
+    const interaction = makeInteraction(`car-ok:${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    await expect(handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
+
+    expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/went wrong/i) }),
+    );
+  });
+
+  it("accept: even if the followUp itself fails, the handler resolves without throwing (last line of defense is the outer dispatcher's log)", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockRejectedValue(new Error("secrets store unreachable"));
+
+    const interaction = makeInteraction(`car-ok:${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    interaction.followUp = vi.fn().mockRejectedValue(new Error("15-minute window expired"));
+
+    await expect(handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
+  });
+
+  it("reject modal submit: an unexpected throw after ack still produces a visible ephemeral followUp", async () => {
+    const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockRejectedValue(new Error("secrets store unreachable"));
+
+    const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`, { reason: "some reason" });
+    await expect(handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
+
+    expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/went wrong/i) }),
+    );
+  });
+});
+
+// ─── Anchor edit-not-repost invariant ────────────────────────────────────────
+//
+// The button handler must NEVER post a new message for a decision outcome —
+// only edit the anchor (interaction.editReply). Guards against a regression
+// that reintroduces "stacked generations" via the button-handler side.
+
+describe("handleCarouselConfirmationButton / RejectModal — anchor edit-not-repost invariant", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockListIssueInteractions.mockResolvedValue(currentInteractionRow());
+  });
+
+  it("accept: only editReply is used to render the outcome — no reply/followUp on the happy path", async () => {
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`car-ok:${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.editReply).toHaveBeenCalledTimes(1);
+    expect(interaction.reply).not.toHaveBeenCalled();
+    expect(interaction.followUp).not.toHaveBeenCalled();
+  });
+
+  it("reject modal submit: only editReply is used to render the outcome on the happy path", async () => {
+    const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`, { reason: "some reason" });
+    await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.editReply).toHaveBeenCalledTimes(1);
+    expect(interaction.reply).not.toHaveBeenCalled();
+    expect(interaction.followUp).not.toHaveBeenCalled();
   });
 });

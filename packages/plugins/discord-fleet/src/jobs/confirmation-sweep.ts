@@ -4,13 +4,22 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { DiscordFleetConfig } from "../config/schema.js";
 import type { PaperclipClient, PaperclipIssue, PaperclipInteraction } from "../api/paperclip.js";
 import { postEmbedToChannel, postEmbedsToChannel, postToChannel, editMessageInChannel } from "../discord/rest.js";
-import { enforceEmbedLimits, buildCarouselConfirmationActionRow, CAROUSEL_HASH_TOKEN_LEN } from "../render/embeds.js";
+import {
+  enforceEmbedLimits,
+  buildCarouselConfirmationActionRow,
+  buildCarouselAnchorEmbed,
+  CAROUSEL_HASH_TOKEN_LEN,
+} from "../render/embeds.js";
 import { chunkEmbedsForDiscord } from "../render/issue-docs.js";
 import {
   parseCarouselBatchMarkdown,
+  parseCarouselBatchPayload,
+  carouselBatchFromStructuredPayload,
+  buildUnstructuredDegradeSection,
   renderCarouselSlideEmbeds,
   SECTION_HEADING_RE,
   type CarouselSection,
+  type ParsedCarouselBatch,
 } from "../render/carousel-batch.js";
 import { stripSecrets } from "../render/secrets.js";
 import { truncate } from "../render/plain.js";
@@ -45,6 +54,23 @@ export interface CarouselBatchSweepRecord {
   // re-post best-effort-disable this (now stale) trailer's buttons. Absent on
   // records created before this field existed (older re-post can't be found).
   trailerMessageId?: string;
+  // ANCHOR (kills "stacked generations" — 2026-07-11 live incident): the SAME
+  // message id as trailerMessageId once the anchor rewrite lands, tracked
+  // under its own name because it is now a distinct concept — "the one
+  // message the sweep/button-handler EDIT for every state change" — not just
+  // "the message with buttons on it". New field; absent on records from
+  // before this migration (falls back to trailerMessageId — see
+  // resolveAnchorMessageId).
+  anchorMessageId?: string;
+  // Last status rendered onto the anchor by SWEEP-driven edits only
+  // ("awaiting" | "superseded"). Terminal states ("accepted"/"rejected") are
+  // rendered directly by the button handler on ITS OWN interaction.message
+  // reference and never routed back through this record — by the time the
+  // sweep would see the interaction again, its server-side status is no
+  // longer "pending" and the sweep loop has already stopped considering it
+  // (see runConfirmationSweep's pendingConfirmations filter). Absent on
+  // records from before this field existed.
+  lastRenderedStatus?: "awaiting" | "superseded";
 }
 type CarouselBatchSweepState = Record<string, CarouselBatchSweepRecord>;
 
@@ -60,6 +86,17 @@ export function sha256(text: string): string {
 // generic single-embed path (unchanged) runs.
 function looksLikeCarouselBatch(detailsMarkdown: string): boolean {
   return SECTION_HEADING_RE.test(detailsMarkdown);
+}
+
+// A carousel-titled issue is one whose request_confirmation is gating an
+// Instagram-carousel publish decision, independent of whether its
+// detailsMarkdown happens to parse. Used ONLY to decide whether an
+// unstructured/unparseable artifact should still degrade to an
+// images-included render (never the image-stripping generic path) — see
+// looksLikeCarouselTitle below the generic path.
+const CAROUSEL_TITLE_RE = /Publisher \(Carousel\)\s*—/;
+function looksLikeCarouselTitle(title: string): boolean {
+  return CAROUSEL_TITLE_RE.test(title);
 }
 
 // Extract the first image URL from markdown text (first `![...](url)` match).
@@ -93,15 +130,25 @@ function chunkBySection(text: string): string[] {
   return chunks;
 }
 
+// Discriminates which detection path produced a ParsedCarouselBatch, purely
+// for header wording (the structured path never hits the 20000-char cap the
+// legacy markdown path can, so its header never shows the cap-fallback line).
+export type CarouselBatchSource = "structured" | "legacy" | "unstructured-degrade";
+
 /**
  * Post one carousel-batch pending interaction: header → per-section (slide
- * embeds + caption) → trailer (decision buttons). Resumes from
+ * embeds + caption) → trailer/anchor (decision buttons). Resumes from
  * `record.sectionsPosted` on a prior partial failure; re-posts everything
  * when the artifact hash changed (the same interactionId got a new
- * detailsMarkdown, e.g. after a revision cycle).
+ * detailsMarkdown/structured payload, e.g. after a revision cycle).
  *
- * Returns true if the interaction is now fully posted (state should be kept),
- * matching the caller's persistence pattern.
+ * `artifactHashSource` (used only for the resume/re-post hash — never
+ * re-parsed on the fast paths) and `getParsed` (LAZY — structured-payload
+ * detection and legacy-markdown parsing are both deferred behind this
+ * closure, invoked only when there's actual section work to do) are supplied
+ * by the caller. Both detection paths funnel into the same ParsedCarouselBatch
+ * shape (see carouselBatchFromStructuredPayload in ./render/carousel-batch.ts)
+ * so this function never needs to know which path produced it.
  */
 async function postCarouselBatch(
   ctx: PluginContext,
@@ -110,17 +157,19 @@ async function postCarouselBatch(
   company: DiscordFleetConfig["companies"][number],
   issue: PaperclipIssue,
   interaction: PaperclipInteraction,
-  detailsMarkdown: string,
+  artifactHashSource: string,
+  getParsed: () => ParsedCarouselBatch,
+  source: CarouselBatchSource,
   state: CarouselBatchSweepState,
   now: number,
 ): Promise<void> {
   const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
-  const artifactHash = sha256(detailsMarkdown);
+  const artifactHash = sha256(artifactHashSource);
   const existing = state[interaction.id];
 
   // Fully posted AND hash unchanged: nothing to do. Checked before parsing —
   // this is the common steady-state tick (no section work left), so it must
-  // not pay for parseCarouselBatchMarkdown just to find that out.
+  // not pay for getParsed() just to find that out.
   if (
     existing &&
     existing.artifactHash === artifactHash &&
@@ -132,8 +181,8 @@ async function postCarouselBatch(
   }
 
   // Trailer-only resume: header + all sections already posted under the same
-  // hash, only the trailer is missing. The trailer needs only ids/counts
-  // already in the record — post it without re-parsing the markdown.
+  // hash, only the trailer/anchor is missing. Needs only ids/counts already
+  // in the record — post it without ever calling getParsed().
   if (
     existing &&
     existing.artifactHash === artifactHash &&
@@ -145,8 +194,33 @@ async function postCarouselBatch(
     return;
   }
 
-  const parsed = parseCarouselBatchMarkdown(detailsMarkdown);
+  const parsed = getParsed();
   const totalSections = parsed.sections.length;
+
+  // 0 items: a structured payload can legitimately parse with an empty
+  // `items` array (e.g. a batch that held everything over). Nothing to
+  // render — posting an empty header + a trailer with buttons that accept/
+  // reject NOTHING would be actively misleading. Log once per hash change
+  // and skip; the interaction stays pending until the publisher revises it
+  // with real items (or an operator resolves it directly in Paperclip).
+  if (totalSections === 0) {
+    if (!existing || existing.artifactHash !== artifactHash) {
+      ctx.logger.warn("confirmation-sweep: carousel-batch parsed with ZERO items — skipping post, interaction stays pending", {
+        companyId: company.companyId,
+        interactionId: interaction.id,
+        source,
+      });
+      state[interaction.id] = {
+        postedAt: new Date(now).toISOString(),
+        sectionsPosted: 0,
+        totalSections: 0,
+        artifactHash,
+        headerPosted: false,
+        trailerPosted: false,
+      };
+    }
+    return;
+  }
 
   // Hash changed from a previously (partially or fully) posted record: full
   // re-post — reset the resume record to start from zero.
@@ -156,30 +230,26 @@ async function postCarouselBatch(
       ? { postedAt: new Date(now).toISOString(), sectionsPosted: 0, totalSections, artifactHash, headerPosted: false, trailerPosted: false }
       : { ...existing, totalSections };
 
-  // Best-effort disable of the PREVIOUS trailer (FIX (b), PR #27 codex round 3):
-  // its buttons carry the OLD hash8 and would otherwise sit live forever,
-  // confusing operators into thinking they can still act on it. This is
-  // belt-and-suspenders only — the customId version-token check at click time
-  // (FIX (a)) is what actually prevents a stale accept/reject from taking
-  // effect, so a failure here (message deleted, permissions, API hiccup) is
-  // logged and swallowed, never fatal to the re-post.
-  if (hashChanged && existing?.trailerMessageId) {
+  // ANCHOR — mark the PREVIOUS generation superseded (kills "stacked
+  // generations": 2026-07-11 live incident, partial + full renders of the
+  // same week both sitting in the channel with nothing marking which was
+  // current). This EDITS the old anchor in place rather than leaving it live
+  // — belt-and-suspenders only: the customId version-token check at click
+  // time (FIX (a), PR #27) is what actually prevents a stale accept/reject
+  // from taking effect, so a failure here is logged and swallowed, never
+  // fatal to the re-post.
+  const previousAnchorId = existing ? resolveAnchorMessageId(existing) : undefined;
+  if (hashChanged && previousAnchorId) {
     try {
-      await editMessageInChannel(client, channelId, existing.trailerMessageId, {
-        embeds: [
-          enforceEmbedLimits({
-            color: 0x99aab5,
-            title: "⚠️ Superseded by a newer version below",
-            description: "This batch was revised — use the newest decision card for this issue.",
-          }),
-        ],
+      await editMessageInChannel(client, channelId, previousAnchorId, {
+        embeds: [buildCarouselAnchorEmbed({ issueUrl, status: "superseded" })],
         components: [],
       });
     } catch (err) {
-      ctx.logger.warn("confirmation-sweep: best-effort disable of superseded trailer failed — proceeding (version-token guard still applies)", {
+      ctx.logger.warn("confirmation-sweep: best-effort disable of superseded anchor failed — proceeding (version-token guard still applies)", {
         companyId: company.companyId,
         interactionId: interaction.id,
-        trailerMessageId: existing.trailerMessageId,
+        anchorMessageId: previousAnchorId,
         error: String(err),
       });
     }
@@ -192,7 +262,7 @@ async function postCarouselBatch(
       `${totalSections} carousel(s) · ${totalImages} image(s) total`,
       `[View in Paperclip](${issueUrl})`,
     ];
-    if (parsed.wasCapFallback) {
+    if (source === "legacy" && parsed.wasCapFallback) {
       headerLines.push(
         `⚠️ artifact hit the 20000-char cap — showing FIRST SLIDE ONLY per carousel; full sets in paperclip: ${issueUrl}`,
       );
@@ -237,14 +307,23 @@ async function postCarouselBatch(
     interactionId: interaction.id,
     channelId,
     totalSections,
+    source,
   });
 }
 
-// Post the trailer message (decision embed + accept/reject buttons) for an
-// already-fully-sectioned carousel-batch interaction and persist the updated
-// record. Needs only ids/counts already on `record` — never the parsed
-// markdown. Returns true on success (state persisted), false on failure
-// (caller stops; next sweep retries).
+// A record created before the anchor rewrite carries only trailerMessageId.
+// anchorMessageId (once populated) is authoritative going forward — both are
+// kept in sync by postCarouselTrailer so old and new code paths never diverge
+// on which message id is "the" anchor.
+function resolveAnchorMessageId(record: CarouselBatchSweepRecord): string | undefined {
+  return record.anchorMessageId ?? record.trailerMessageId;
+}
+
+// Post the trailer/anchor message (decision embed + accept/reject buttons)
+// for an already-fully-sectioned carousel-batch interaction and persist the
+// updated record. Needs only ids/counts already on `record` — never the
+// parsed artifact. Returns true on success (state persisted), false on
+// failure (caller stops; next sweep retries).
 async function postCarouselTrailer(
   ctx: PluginContext,
   client: Client,
@@ -262,16 +341,17 @@ async function postCarouselTrailer(
     const messageId = await postEmbedsToChannel(
       client,
       channelId,
-      [
-        enforceEmbedLimits({
-          color: 0x5865f2,
-          title: "Decision needed",
-          description: `[View full batch in Paperclip](${issueUrl})`,
-        }),
-      ],
+      [buildCarouselAnchorEmbed({ issueUrl, status: "awaiting" })],
       [buildCarouselConfirmationActionRow(issue.id, interaction.id, hash8)],
     );
-    state[interaction.id] = { ...record, trailerPosted: true, postedAt: new Date(now).toISOString(), trailerMessageId: messageId };
+    state[interaction.id] = {
+      ...record,
+      trailerPosted: true,
+      postedAt: new Date(now).toISOString(),
+      trailerMessageId: messageId,
+      anchorMessageId: messageId,
+      lastRenderedStatus: "awaiting",
+    };
     return true;
   } catch (err) {
     ctx.logger.warn("confirmation-sweep: carousel-batch trailer post failed — will retry next sweep", {
@@ -336,6 +416,37 @@ async function postCarouselSection(
   }
 
   return true;
+}
+
+// UNSTRUCTURED DEGRADE entry point (kills failure 2's blind spot — see
+// buildUnstructuredDegradeSection doc in ./render/carousel-batch.ts): a
+// carousel-titled issue whose interaction matched NEITHER the structured
+// payload contract NOR the legacy heading regex. Renders as a single
+// synthetic section carrying every image found in the raw text plus a loud
+// warning caption — reuses postCarouselBatch's full resume/hash/anchor
+// machinery (same idempotency guarantees as the other two paths) rather than
+// duplicating it.
+async function postUnstructuredCarouselDegrade(
+  ctx: PluginContext,
+  client: Client,
+  channelId: string,
+  company: DiscordFleetConfig["companies"][number],
+  issue: PaperclipIssue,
+  interaction: PaperclipInteraction,
+  detailsMarkdown: string,
+  state: CarouselBatchSweepState,
+  now: number,
+): Promise<void> {
+  await postCarouselBatch(
+    ctx, client, channelId, company, issue, interaction,
+    detailsMarkdown,
+    () => {
+      const section = buildUnstructuredDegradeSection(detailsMarkdown);
+      return { sections: [section], totalImagesFound: section.slideUrls.length, wasCapFallback: false };
+    },
+    "unstructured-degrade",
+    state, now,
+  );
 }
 
 /**
@@ -428,25 +539,63 @@ export async function runConfirmationSweep(
                 ? rawPrompt.trim()
                 : "";
 
-          // Carousel-batch shape detection happens BEFORE the generic 24h
-          // `posted` throttle below (codex round-3 P2, PR #27): a carousel
-          // interaction migrating from the OLD generic sweep can already carry
-          // a `posted` marker from when it was rendered as a 1-of-N generic
-          // card. Consulting that marker here would `continue` past the new
+          // Carousel-batch detection happens BEFORE the generic 24h `posted`
+          // throttle below (codex round-3 P2, PR #27): a carousel interaction
+          // migrating from the OLD generic sweep can already carry a `posted`
+          // marker from when it was rendered as a 1-of-N generic card.
+          // Consulting that marker here would `continue` past the new
           // renderer for up to 24h — exactly the deploy-day case this PR
           // exists to fix. Once an interaction is carousel-shaped, it is
           // governed ONLY by carouselState (postCarouselBatch's own resume/
           // hash idempotency) — the generic `posted` marker for it is ignored
           // permanently, not just this tick.
           //
-          // A carouselState record already existing for this interaction means
-          // it was already identified as carousel-batch on a prior sweep — skip
-          // the shape regex entirely and go straight to the known path (avoids
-          // re-running SECTION_HEADING_RE over the whole markdown every tick
-          // once shape is settled).
+          // Detection order (STRUCTURED PAYLOAD CONTRACT — kills the
+          // "regex-on-LLM-prose" failure class, 2026-07-11 live incident: the
+          // publisher wrote `## akihabara (Sat)` instead of the documented
+          // `**1. akihabara (Sat)**`; SECTION_HEADING_RE missed it and the
+          // sweep fell to the generic path, which strips ALL image lines —
+          // zero slides, zero buttons):
+          //   1. payload.carouselBatch?.version === 1 → render from DATA,
+          //      never touches detailsMarkdown/regex at all.
+          //   2. legacy SECTION_HEADING_RE match on detailsMarkdown (old
+          //      cards, or a carouselState record already proving this
+          //      interaction was identified as carousel-batch on a prior
+          //      sweep — skips re-running the regex once shape is settled).
+          //   3. neither matched, but the issue TITLE is carousel-shaped
+          //      (`Publisher (Carousel) — ...`) → unstructured-degrade: a
+          //      contract miss must be VISIBLE, never blind. Renders with
+          //      images intact (never stripImageLines for a carousel-titled
+          //      issue) plus a loud "⚠ unstructured artifact" warning line.
+          const structuredPayload = parseCarouselBatchPayload(interaction.payload?.carouselBatch);
           const knownCarousel = Boolean(carouselState[interaction.id]);
-          if (detailsMarkdown && (knownCarousel || looksLikeCarouselBatch(detailsMarkdown))) {
-            await postCarouselBatch(ctx, client, rule.channelId, company, issue, interaction, detailsMarkdown, carouselState, now);
+          const legacyMatches = detailsMarkdown && (knownCarousel || looksLikeCarouselBatch(detailsMarkdown));
+
+          if (structuredPayload) {
+            const hashSource = JSON.stringify(structuredPayload);
+            await postCarouselBatch(
+              ctx, client, rule.channelId, company, issue, interaction,
+              hashSource,
+              () => carouselBatchFromStructuredPayload(structuredPayload),
+              "structured",
+              carouselState, now,
+            );
+            continue;
+          }
+
+          if (legacyMatches) {
+            await postCarouselBatch(
+              ctx, client, rule.channelId, company, issue, interaction,
+              detailsMarkdown,
+              () => parseCarouselBatchMarkdown(detailsMarkdown),
+              "legacy",
+              carouselState, now,
+            );
+            continue;
+          }
+
+          if (looksLikeCarouselTitle(safeStr(issue.title, 512))) {
+            await postUnstructuredCarouselDegrade(ctx, client, rule.channelId, company, issue, interaction, detailsMarkdown, carouselState, now);
             continue;
           }
 

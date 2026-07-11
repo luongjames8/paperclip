@@ -5307,6 +5307,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function clearDetachedRunWarning(runId: string) {
+    // runId is exposed as the public reportRunActivity(actor.runId) entry
+    // point, fed straight from the caller-supplied X-Paperclip-Run-Id header
+    // with no upstream validation. heartbeatRuns.id is a Postgres uuid
+    // column — eq() against a malformed value throws, uncaught, at whatever
+    // called this (existing callers happen to .catch() it today, but that's
+    // an accident of call-site discipline, not a guarantee — see the
+    // logActivity runId fix in services/activity-log.ts for the same class).
+    if (!isUuidLike(runId)) return null;
     const updated = await db
       .update(heartbeatRuns)
       .set({
