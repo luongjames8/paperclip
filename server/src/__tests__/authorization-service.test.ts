@@ -6,6 +6,7 @@ import {
   companies,
   companyMemberships,
   createDb,
+  heartbeatRuns,
   instanceUserRoles,
   issueComments,
   issues,
@@ -176,6 +177,7 @@ describeEmbeddedPostgres("authorization service", () => {
     await db.delete(companyMemberships);
     await db.delete(instanceUserRoles);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(projects);
     await db.delete(companies);
@@ -1519,6 +1521,138 @@ describeEmbeddedPostgres("authorization service", () => {
     })).resolves.toMatchObject({
       allowed: false,
       reason: "deny_scope",
+  // ─── Malformed/stale X-Paperclip-Run-Id on access.decide() (codex round 4)
+  // ───────────────────────────────────────────────────────────────────────
+  //
+  // access.decide()'s resolveActorTrust runs on every agent decision. Same
+  // live-incident class as resolveAgentTrustForIssue in routes/issues.ts: a
+  // malformed OR well-formed-but-stale/nonexistent run id must not silently
+  // resolve to "no run" when the low-trust boundary lives ONLY in the run's
+  // contextSnapshot.executionPolicy — that would raise effective trust and
+  // bypass the low-trust boundary. Fails closed (denied) UNCONDITIONALLY
+  // whenever the header is present but unverifiable and agent/project/issue
+  // policy alone would otherwise resolve `standard` (codex ceiling round: an
+  // earlier version of this guard additionally required SOME trust-related
+  // config to be present anywhere before denying — that left the run-only
+  // trust boundary case, exactly what this guard exists for, unprotected).
+  // The header's PRESENCE is itself a claim of run context; an unverifiable
+  // claim fails closed regardless of what else is configured — including an
+  // ordinary agent/issue with zero trust config anywhere. A visible deny
+  // beats a silent trust elevation; recovery is dropping/fixing the header.
+  describe("malformed/stale X-Paperclip-Run-Id on access.decide()", () => {
+    async function seedRunOnlyLowTrustFixture(runId: string) {
+      const company = await createCompany(db, "RunOnlyTrust");
+      const [agent] = await db.insert(agents).values({
+        companyId: company.id,
+        name: `Run-context-only Reviewer ${randomUUID()}`,
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {},
+        // Marker only (parses fine, does NOT itself imply low_trust_review) —
+        // the actual boundary lives ONLY on the run's contextSnapshot below.
+        permissions: { authorizationPolicy: {} },
+      }).returning();
+      const issue = await createIssue(db, company.id, { assigneeAgentId: agent!.id });
+      const executionPolicy = {
+        authorizationPolicy: {
+          trustBoundary: {
+            mode: LOW_TRUST_REVIEW_PRESET,
+            companyId: company.id,
+            rootIssueId: issue.id,
+          },
+        },
+      };
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId: company.id,
+        agentId: agent!.id,
+        status: "running",
+        contextSnapshot: { issueId: issue.id, executionPolicy },
+      });
+      return { company, agent: agent!, issue };
+    }
+
+    it("a malformed run id header fails closed (denied), never a silent standard-trust resolution", async () => {
+      const fixture = await seedRunOnlyLowTrustFixture(randomUUID());
+
+      const decision = await authorizationService(db).decide({
+        actor: { type: "agent", agentId: fixture.agent.id, companyId: fixture.company.id, runId: "not-a-uuid", source: "agent_jwt" },
+        action: "issue:read",
+        resource: { type: "issue", companyId: fixture.company.id, issueId: fixture.issue.id },
+      });
+
+      expect(decision.allowed).toBe(false);
+      expect(decision.reason).toBe("deny_policy_restricted");
+      expect(decision.explanation).toMatch(/X-Paperclip-Run-Id/);
+    });
+
+    it("a well-formed but STALE (nonexistent) run id header ALSO fails closed (denied)", async () => {
+      const fixture = await seedRunOnlyLowTrustFixture(randomUUID());
+      const staleRunId = randomUUID(); // well-formed uuid, never inserted into heartbeat_runs
+
+      const decision = await authorizationService(db).decide({
+        actor: { type: "agent", agentId: fixture.agent.id, companyId: fixture.company.id, runId: staleRunId, source: "agent_jwt" },
+        action: "issue:read",
+        resource: { type: "issue", companyId: fixture.company.id, issueId: fixture.issue.id },
+      });
+
+      expect(decision.allowed).toBe(false);
+      expect(decision.reason).toBe("deny_policy_restricted");
+      expect(decision.explanation).toMatch(/X-Paperclip-Run-Id/);
+      expect(decision.explanation).toMatch(new RegExp(staleRunId));
+    });
+
+    it("the SAME actor with the real run id attached resolves low-trust and is NOT bypassed", async () => {
+      const runId = randomUUID();
+      const fixture = await seedRunOnlyLowTrustFixture(runId);
+
+      const decision = await authorizationService(db).decide({
+        actor: { type: "agent", agentId: fixture.agent.id, companyId: fixture.company.id, runId, source: "agent_jwt" },
+        action: "issue:read",
+        resource: { type: "issue", companyId: fixture.company.id, issueId: fixture.issue.id },
+      });
+
+      expect(decision.allowed).toBe(true);
+      expect(decision.reason).toBe("allow_low_trust_boundary");
+    });
+
+    it("an ABSENT run id header (legitimate no-run caller) is unaffected — still allowed, no deny", async () => {
+      const fixture = await seedRunOnlyLowTrustFixture(randomUUID());
+
+      const decision = await authorizationService(db).decide({
+        actor: { type: "agent", agentId: fixture.agent.id, companyId: fixture.company.id, source: "agent_jwt" },
+        action: "issue:read",
+        resource: { type: "issue", companyId: fixture.company.id, issueId: fixture.issue.id },
+      });
+
+      expect(decision.allowed).toBe(true);
+    });
+
+    // REVERSED (codex ceiling round): this test previously asserted that an
+    // ordinary agent/issue with ZERO trust config anywhere was NOT denied by
+    // a stray malformed run header — that was exactly the
+    // isPlausibleLowTrustCandidate narrowing this fix removes. The header's
+    // presence is itself a claim of run context; an unverifiable claim now
+    // fails closed unconditionally, even with no trust config anywhere else.
+    // A visible deny beats a silent trust elevation; the caller recovers by
+    // dropping or fixing the header (exactly what the live incident agent
+    // did).
+    it("an ordinary agent/issue with ZERO trust config anywhere IS denied by a stray malformed run header (visible deny beats silent trust elevation)", async () => {
+      const company = await createCompany(db, "OrdinaryNoTrustConfig");
+      const actorAgent = await createAgent(db, company.id);
+      const issue = await createIssue(db, company.id, { assigneeAgentId: actorAgent.id });
+
+      const decision = await authorizationService(db).decide({
+        actor: { type: "agent", agentId: actorAgent.id, companyId: company.id, runId: "not-a-uuid", source: "agent_jwt" },
+        action: "issue:read",
+        resource: { type: "issue", companyId: company.id, issueId: issue.id },
+      });
+
+      expect(decision.allowed).toBe(false);
+      expect(decision.reason).toBe("deny_policy_restricted");
+      expect(decision.explanation).toMatch(/X-Paperclip-Run-Id/);
+      expect(decision.explanation).toMatch(/not-a-uuid/);
     });
   });
 });

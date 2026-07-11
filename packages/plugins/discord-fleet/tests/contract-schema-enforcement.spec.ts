@@ -260,3 +260,46 @@ describe("validateConfig — rejects path-unsafe companyPrefix values (P1-2)", (
     expect(() => validateConfig(makeFullConfig("my_prefix"))).not.toThrow();
   });
 });
+
+// ── manifest JSON Schema — confirmationSweep.carouselBatch (codex round 3 P2) ─
+
+describe("manifest JSON Schema — confirmationSweep rule exposes carouselBatch", () => {
+  it("confirmationSweep rule items schema has a carouselBatch boolean property", () => {
+    /**
+     * Layer: contract
+     * Assertion type: semantic invariant — the TS config type (ConfirmationSweepRule.carouselBatch,
+     * src/config/schema.ts) must have a matching manifest JSON Schema property, or schema-driven
+     * config UIs can't discover/set it.
+     * Call site pinned: src/manifest.ts (confirmationSweep.additionalProperties.items.properties)
+     * Mutation result: remove carouselBatch from manifest properties → test RED
+     */
+    expect(manifest.instanceConfigSchema, "manifest must define instanceConfigSchema").toBeDefined();
+    const schema = manifest.instanceConfigSchema!;
+    const confirmationSweepSchema = (schema.properties as Record<string, unknown>)
+      ?.confirmationSweep as {
+      additionalProperties?: { items?: { properties?: Record<string, { type?: string; default?: unknown }> } };
+    };
+
+    const carouselBatchSchema = confirmationSweepSchema?.additionalProperties?.items?.properties?.carouselBatch;
+    expect(
+      carouselBatchSchema,
+      "confirmationSweep rule items.properties.carouselBatch must be defined in manifest",
+    ).toBeDefined();
+    expect(carouselBatchSchema?.type).toBe("boolean");
+    expect(carouselBatchSchema?.default).toBe(false);
+  });
+
+  it("confirmationSweep rule items schema still requires only titleRegex and channelId — carouselBatch stays optional", () => {
+    /**
+     * Layer: contract
+     * Assertion type: positive guard — carouselBatch must not become a required field
+     * Call site pinned: src/manifest.ts (confirmationSweep.additionalProperties.items.required)
+     * Mutation result: adding carouselBatch to required[] → test RED (back-compat break for existing configs)
+     */
+    const schema = manifest.instanceConfigSchema!;
+    const confirmationSweepSchema = (schema.properties as Record<string, unknown>)
+      ?.confirmationSweep as { additionalProperties?: { items?: { required?: string[] } } };
+
+    expect(confirmationSweepSchema?.additionalProperties?.items?.required).toEqual(["titleRegex", "channelId"]);
+  });
+});

@@ -50,12 +50,19 @@ export const CAROUSEL_HASH_TOKEN_LEN = 8;
 // reject prefix 7 + hash8 8 + 1 + 36 + 1 + 36 = 89).
 const MAX_CUSTOM_ID_LEN = 100;
 
+// Single source for the accept-button customId — the confirmation-sweep's
+// adopt-don't-duplicate probe matches messages by this EXACT string, so it
+// must never be re-derived by a second interpolation that could drift.
+export function carouselConfirmAcceptCustomId(issueId: string, interactionId: string, hash8: string): string {
+  return `${CAROUSEL_CONFIRM_BUTTON_PREFIX.accept}${hash8}:${issueId}:${interactionId}`;
+}
+
 export function buildCarouselConfirmationActionRow(
   issueId: string,
   interactionId: string,
   hash8: string,
 ): APIActionRowComponent<APIComponentInMessageActionRow> {
-  const acceptId = `${CAROUSEL_CONFIRM_BUTTON_PREFIX.accept}${hash8}:${issueId}:${interactionId}`;
+  const acceptId = carouselConfirmAcceptCustomId(issueId, interactionId, hash8);
   const rejectId = `${CAROUSEL_CONFIRM_BUTTON_PREFIX.reject}${hash8}:${issueId}:${interactionId}`;
   if (acceptId.length > MAX_CUSTOM_ID_LEN || rejectId.length > MAX_CUSTOM_ID_LEN) {
     throw new Error(
@@ -78,6 +85,63 @@ export function buildCarouselConfirmationActionRow(
     type: ComponentType.ActionRow,
     components: [accept, reject],
   };
+}
+
+// Carousel-batch anchor statuses — the trailer/anchor message is EDITED in
+// place across every one of these, never re-posted (kills the "stacked
+// generations" confusion: 2026-07-11 live incident, partial + full renders of
+// the same week both sitting in the channel with nothing marking which was
+// current).
+export type CarouselAnchorStatus = "awaiting" | "accepted" | "rejected" | "cancelled" | "superseded" | "expired";
+
+const CAROUSEL_ANCHOR_STATUS_LINE: Record<CarouselAnchorStatus, string> = {
+  awaiting: "🟡 awaiting decision",
+  accepted: "✅ accepted",
+  rejected: "❌ rejected",
+  cancelled: "🚫 cancelled",
+  superseded: "⏰ superseded — a newer version was posted below",
+  expired: "⏰ expired — no decision was made in time",
+};
+
+// Anchor embed title is a function of status — the operator scanning a
+// channel full of carousel-batch cards must be able to tell decided from
+// pending from expired WITHOUT opening each one (a hardcoded "Decision
+// needed" title regardless of status was itself a contract wobble: an
+// accepted/rejected/expired card kept showing "Decision needed" forever).
+const CAROUSEL_ANCHOR_TITLE: Record<CarouselAnchorStatus, string> = {
+  awaiting: "Decision needed",
+  accepted: "Decision: accepted",
+  rejected: "Decision: rejected",
+  cancelled: "Cancelled",
+  superseded: "Superseded",
+  expired: "Expired — no decision in time",
+};
+
+// Builds the anchor embed body (status line + optional actor/reason detail).
+// Callers attach the action row (buildCarouselConfirmationActionRow) only
+// while status is "awaiting" — every other status strips components.
+export function buildCarouselAnchorEmbed(opts: {
+  issueUrl: string;
+  status: CarouselAnchorStatus;
+  detail?: string;
+}): APIEmbed {
+  const statusLine = CAROUSEL_ANCHOR_STATUS_LINE[opts.status];
+  const lines = [statusLine, opts.detail ? safe(opts.detail, 1000) : null, `[View full batch in Paperclip](${opts.issueUrl})`].filter(
+    (l): l is string => Boolean(l),
+  );
+  const color =
+    opts.status === "accepted"
+      ? 0x57f287
+      : opts.status === "rejected"
+        ? 0xed4245
+        : opts.status === "awaiting"
+          ? 0x5865f2
+          : 0x99aab5;
+  return enforceEmbedLimits({
+    color,
+    title: CAROUSEL_ANCHOR_TITLE[opts.status],
+    description: lines.join("\n"),
+  });
 }
 
 export function buildApprovalActionRow(opts: {

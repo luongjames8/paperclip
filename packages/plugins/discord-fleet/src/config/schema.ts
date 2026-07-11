@@ -58,6 +58,15 @@ export interface ConfirmationSweepRule {
   titleRegex: string;
   // Discord channel ID to post the confirmation card into.
   channelId: string;
+  // Marks this rule as gating a carousel-batch publish decision. Used ONLY to
+  // decide whether an interaction that matches NEITHER the structured payload
+  // contract NOR the legacy section-heading shape should still degrade to an
+  // images-included render (unstructured-degrade) instead of falling through
+  // to the generic image-stripping path. Default false (current/back-compat
+  // behavior: a matching rule alone does NOT imply carousel-batch shape — the
+  // operator's titleRegex may be much broader, e.g. matching every
+  // confirmation, so it cannot double as this discriminator on its own).
+  carouselBatch?: boolean;
 }
 
 export interface DiscordFleetConfig {

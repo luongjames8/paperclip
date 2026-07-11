@@ -280,12 +280,22 @@ function createRunContextDb(
     if (keys.includes("entityId")) return [];
     if (keys.includes("contextSnapshot")) return runRows;
     if (keys.includes("agentCompanyId")) return runRows;
+    // { id: heartbeatRuns.id }-only selection — resolveVerifiedRunId's
+    // single indexed existence check (run-id-trust.ts). This mock always
+    // has exactly one seeded run (runRows[0]), so a bare `id`-only lookup
+    // resolves it as existing — matches every test in this file expecting
+    // its seeded runId to verify and pass through.
+    if (keys.length === 1 && keys[0] === "id") return [{ id: firstRun.id ?? runId }];
     return [{ id: runAgentId, companyId: runAgentCompanyId, permissions: {}, role: "engineer", reportsTo: null }];
   };
   const buildQuery = (selection: Record<string, unknown>) => {
+    const rows = rowsForSelection(selection);
     const whereResult = {
       orderBy: vi.fn(async () => []),
-      then: async (resolve: (rows: unknown[]) => unknown) => resolve(rowsForSelection(selection)),
+      limit: vi.fn(() => ({
+        then: async (resolve: (rows: unknown[]) => unknown) => resolve(rows),
+      })),
+      then: async (resolve: (rows: unknown[]) => unknown) => resolve(rows),
     };
     const query = {
       innerJoin: vi.fn(() => query),

@@ -900,21 +900,23 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
       });
       expectNoCanary(higherTrustContext.body, fixture.canaries.raw);
 
+      // REVERSED (codex ceiling round): this previously asserted 200 with
+      // redaction still holding — that relied on authorization.ts's
+      // isPlausibleLowTrustCandidate narrowing (the standard agent and
+      // reviewRoot issue here carry no trust-related config of their own),
+      // which this fix removes. The bogus run id header is now denied
+      // UNCONDITIONALLY at the access.decide() gate (resolveActorTrust),
+      // before the route ever reaches shouldRedactLowTrustForHeartbeatContext
+      // — a visible 403 beats a silent trust elevation, and there is no
+      // redaction to prove because the request never gets that far.
       const bogusRunStandardApp = createApp(db, {
         ...agentActor(fixture, fixture.agents.standard.id),
         runId: randomUUID(),
       });
       const bogusRunContext = await request(bogusRunStandardApp)
         .get(`/api/issues/${fixture.issues.reviewRoot.id}/heartbeat-context`);
-      expect(bogusRunContext.status, JSON.stringify(bogusRunContext.body)).toBe(200);
-      expect(bogusRunContext.body.continuationSummary).toMatchObject({
-        body: LOW_TRUST_QUARANTINED_BODY,
-        sourceTrust: {
-          preset: LOW_TRUST_REVIEW_PRESET,
-          disposition: "quarantined",
-        },
-      });
-      expectNoCanary(bogusRunContext.body, fixture.canaries.raw);
+      expect(bogusRunContext.status, JSON.stringify(bogusRunContext.body)).toBe(403);
+      expect(bogusRunContext.body.error).toBe("Issue is outside this actor's authorization boundary");
 
       await db.update(agents).set({
         status: "idle",
@@ -1133,5 +1135,310 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
       .from(issueWorkProducts)
       .where(eq(issueWorkProducts.externalId, rawProduct!.id));
     expect(productsForSource).toHaveLength(1);
+  });
+});
+
+// ─── Malformed X-Paperclip-Run-Id fails closed on trust resolution
+// (codex round 3 P1, server/src/routes/issues.ts:1127) ───────────────────────
+//
+// A prior fix (this same PR) changed a malformed X-Paperclip-Run-Id header
+// from "uncaught throw → 500" to "isUuidLike guard → null + warn". That
+// blanket treatment is correct for pure telemetry (logActivity,
+// clearDetachedRunWarning) but wrong for TRUST resolution: for an agent whose
+// low-trust boundary is declared ONLY in the heartbeat run's
+// contextSnapshot.executionPolicy — not on the agent's own permissions, not
+// on the project, not on the issue — dropping a malformed run id to null
+// makes resolveCoreTrustPreset evaluate just agent/project/issue policy and
+// resolve `standard`. Sending garbage in the header would silently upgrade
+// the actor's effective trust and bypass redaction/control-plane denial.
+// resolveAgentTrustForIssue must fail closed with 400 instead.
+describeEmbeddedPostgres("malformed X-Paperclip-Run-Id fails closed on trust resolution", () => {
+  let db!: Db;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-run-id-trust-fail-closed-");
+    db = createDb(tempDb.connectionString);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+    await deleteHeartbeatRunsAfterActivityLogDrains(db);
+    await db.delete(issues);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  // The agent has NO low-trust preset of its own, the issue has NO
+  // executionPolicy of its own — the ONLY place the low-trust boundary is
+  // declared is the run's contextSnapshot.executionPolicy. This is exactly
+  // the "boundary lives only in the run" scenario the finding describes.
+  async function seedRunOnlyLowTrustFixture(runId: string) {
+    const [company] = await db.insert(companies).values({
+      name: `Run-only low trust ${runId.slice(0, 8)}`,
+      issuePrefix: `RO${runId.replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+    }).returning();
+    const [agent] = await db.insert(agents).values({
+      companyId: company!.id,
+      name: "Run-context-only Reviewer",
+      role: "engineer",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      // Empty authorizationPolicy: a MARKER that this agent is
+      // operator-configured for trust-boundary gating (parses fine — every
+      // field is optional — and does NOT itself imply low_trust_review), but
+      // the actual boundary lives ONLY on the run's contextSnapshot below.
+      // This is what makes resolveAgentTrustForIssue's malformed-run-id
+      // fail-closed path load-bearing here, without it firing for every
+      // ordinary agent with zero trust config anywhere (ordinary agents
+      // must not 400 on a stray non-uuid run header).
+      permissions: { authorizationPolicy: {} },
+    }).returning();
+    const [issue] = await db.insert(issues).values({
+      companyId: company!.id,
+      title: "Run-context-only boundary issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agent!.id,
+    }).returning();
+    const executionPolicy = {
+      authorizationPolicy: {
+        trustBoundary: {
+          mode: LOW_TRUST_REVIEW_PRESET,
+          companyId: company!.id,
+          rootIssueId: issue!.id,
+        },
+      },
+    };
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: company!.id,
+      agentId: agent!.id,
+      status: "running",
+      contextSnapshot: { issueId: issue!.id, executionPolicy },
+    });
+    return { company: company!, agent: agent!, issue: issue! };
+  }
+
+  it("a PRESENT-but-malformed run id header on the low-trust control-plane gate responds 400, never a silent standard-trust resolution", async () => {
+    // Uses POST /companies/:companyId/issues WITHOUT parentId — the control-
+    // plane gate (assertLowTrustControlPlaneDenied -> resolveAgentTrustForIssue)
+    // is the FIRST trust-resolution call in this route handler, so this
+    // exercises resolveAgentTrustForIssue's own fail-closed 400 and
+    // short-circuits before the route's later access.decide() call (a
+    // separate, independently-fixed fail-closed path in authorization.ts,
+    // which denies the same malformed header with 403 if ever reached on its
+    // own — not exercised by this specific request since the 400 fires
+    // first).
+    const runId = randomUUID();
+    const fixture = await seedRunOnlyLowTrustFixture(runId);
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: "not-a-uuid",
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${fixture.company.id}/issues`)
+      .send({ title: "New issue via malformed run id" });
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error).toMatch(/X-Paperclip-Run-Id/);
+    expect(res.body.error).toMatch(/not-a-uuid/);
+  });
+
+  // codex round 4: a WELL-FORMED but STALE/nonexistent run id (never inserted
+  // into heartbeat_runs) passes isUuidLike and must fail closed identically to
+  // a malformed one — a fabricated-but-well-formed run id must not be able to
+  // bypass the run-carried low-trust boundary any more than garbage can.
+  it("a WELL-FORMED but STALE (nonexistent) run id header on the low-trust control-plane gate ALSO responds 400, never a silent standard-trust resolution", async () => {
+    const runId = randomUUID();
+    const fixture = await seedRunOnlyLowTrustFixture(runId);
+    const staleRunId = randomUUID(); // well-formed uuid, never inserted into heartbeat_runs
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: staleRunId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${fixture.company.id}/issues`)
+      .send({ title: "New issue via stale run id" });
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error).toMatch(/X-Paperclip-Run-Id/);
+    expect(res.body.error).toMatch(new RegExp(staleRunId));
+  });
+
+  it("the SAME actor with the real run id attached resolves low-trust and is NOT bypassed", async () => {
+    const runId = randomUUID();
+    const fixture = await seedRunOnlyLowTrustFixture(runId);
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app).get(`/api/issues/${fixture.issue.id}/heartbeat-context`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  });
+
+  it("an ABSENT run id header (legitimate no-run caller) is unaffected — still 200, no 400", async () => {
+    const fixture = await seedRunOnlyLowTrustFixture(randomUUID());
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: undefined,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app).get(`/api/issues/${fixture.issue.id}/heartbeat-context`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  });
+});
+
+// ─── Malformed/stale X-Paperclip-Run-Id no longer 500s the comment route
+// (codex round 4, P1: server/src/routes/issues.ts addComment ->
+// issue_comments.created_by_run_id is a foreign key into heartbeat_runs; the
+// operator's original live 500 on 2026-07-11) ───────────────────────────────
+//
+// Neither a malformed (non-uuid) header NOR a well-formed-but-stale/
+// nonexistent uuid header may crash the comment POST (500) — that class of
+// bug is fixed regardless of trust resolution. BUT the comment route first
+// runs assertAgentIssueMutationAllowed -> decideIssueAccess -> access.decide()
+// (services/authorization.ts's resolveActorTrust), which is a TRUST gate, not
+// telemetry. codex ceiling round: authorization.ts's fail-closed guard now
+// denies UNCONDITIONALLY whenever the run header is unresolvable and
+// agent/project/issue policy alone resolves `standard` — including for this
+// ORDINARY agent/issue with zero trust-related config anywhere. So the
+// malformed/stale cases below now correctly 403 at the authorization gate,
+// before the addComment/created_by_run_id telemetry path is ever reached;
+// only the REAL-run-id case still reaches addComment to exercise the
+// telemetry (createdByRunId) behavior this block's title describes.
+describeEmbeddedPostgres("malformed/stale X-Paperclip-Run-Id no longer 500s the comment route", () => {
+  let db!: Db;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-run-id-comment-route-");
+    db = createDb(tempDb.connectionString);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+    await deleteHeartbeatRunsAfterActivityLogDrains(db);
+    await db.delete(issueComments);
+    await db.delete(issues);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedOrdinaryFixture() {
+    const [company] = await db.insert(companies).values({
+      name: "Ordinary comment-route company",
+      issuePrefix: `OR${randomUUID().replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+    }).returning();
+    const [agent] = await db.insert(agents).values({
+      companyId: company!.id,
+      name: "Ordinary Agent",
+      role: "engineer",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    }).returning();
+    // status: "todo" (NOT "in_progress") — assertAgentIssueMutationAllowed
+    // requires a valid checkout runId matching issue.checkoutRunId only when
+    // status === "in_progress" (a separate, pre-existing gate unrelated to
+    // run-id verification). "todo" short-circuits that gate so these tests
+    // exercise ONLY the run-id-verification path the comment route's
+    // addComment call goes through.
+    const [issue] = await db.insert(issues).values({
+      companyId: company!.id,
+      title: "Ordinary issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agent!.id,
+    }).returning();
+    return { company: company!, agent: agent!, issue: issue! };
+  }
+
+  // REVERSED (codex ceiling round): this test previously asserted a 201 with
+  // a null created_by_run_id — that relied on authorization.ts's
+  // isPlausibleLowTrustCandidate narrowing, which this fix removes. The
+  // header's presence is itself a claim of run context; an unverifiable
+  // claim now fails the authorization gate unconditionally, even for an
+  // ordinary agent/issue with zero trust config anywhere. A visible 403
+  // beats a silent trust elevation; the caller recovers by dropping or
+  // fixing the header (never a 500 either way — that regression stays fixed).
+  it("malformed X-Paperclip-Run-Id header -> comment POST is denied (403) at the authorization gate, never a 500 and never a silent 201", async () => {
+    const fixture = await seedOrdinaryFixture();
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: "not-a-uuid",
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/issues/${fixture.issue.id}/comments`)
+      .send({ body: "comment via malformed run id header" });
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+  });
+
+  it("well-formed but STALE (nonexistent) X-Paperclip-Run-Id header -> comment POST is ALSO denied (403) at the authorization gate, never a 500 and never a silent 201", async () => {
+    const fixture = await seedOrdinaryFixture();
+    const staleRunId = randomUUID(); // well-formed uuid, never inserted into heartbeat_runs
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: staleRunId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/issues/${fixture.issue.id}/comments`)
+      .send({ body: "comment via stale run id header" });
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+  });
+
+  it("a REAL, existing run id header -> comment POST persists the actual created_by_run_id (verification doesn't drop a valid run)", async () => {
+    const fixture = await seedOrdinaryFixture();
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId: fixture.company.id,
+      agentId: fixture.agent.id,
+      status: "running",
+    }).returning();
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: run!.id,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/issues/${fixture.issue.id}/comments`)
+      .send({ body: "comment via real run id header" });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.createdByRunId).toBe(run!.id);
   });
 });
