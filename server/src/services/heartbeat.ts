@@ -5314,6 +5314,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // called this (existing callers happen to .catch() it today, but that's
     // an accident of call-site discipline, not a guarantee — see the
     // logActivity runId fix in services/activity-log.ts for the same class).
+    // Judgment: null (not fail-closed) is correct here. This function only
+    // clears a "detached process" liveness warning flag on the run row — it
+    // never reads or decides trust/permissions, so dropping a malformed
+    // runId can only mean the warning stays set (a bookkeeping/telemetry
+    // miss, already best-effort .catch()'d at both call sites in
+    // routes/issues.ts), never a permission escalation. Same class as the
+    // logActivity guard, not the resolveAgentTrustForIssue guard.
     if (!isUuidLike(runId)) return null;
     const updated = await db
       .update(heartbeatRuns)

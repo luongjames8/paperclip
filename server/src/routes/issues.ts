@@ -90,7 +90,7 @@ import {
   workProductService,
 } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
-import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
+import { badRequest, conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
@@ -1074,17 +1074,57 @@ export function issueRoutes(
       input.executionWorkspaceSettings !== undefined;
   }
 
+  // The X-Paperclip-Run-Id header is a bare, unvalidated caller-supplied
+  // string (getActorInfo → actor.runId). heartbeatRuns.id is a Postgres uuid
+  // column, so a malformed value throws "invalid input syntax for type uuid"
+  // if passed straight to eq() (2026-07-11 live incident). isUuidLike alone
+  // can't tell "header omitted" (legitimate no-run caller — undefined/empty)
+  // from "header present but garbage" (a caller bug or hostile input) — both
+  // produce `false`. That distinction matters: callers that only use the run
+  // for telemetry/bookkeeping can safely treat "can't resolve a run" as
+  // null+warn either way, but callers that use the run to LOCATE a low-trust
+  // boundary must not silently treat a malformed header the same as "no run
+  // context", because dropping to null there can make resolveCoreTrustPreset
+  // evaluate fewer policy sources and resolve a MORE permissive preset than
+  // the true one — see resolveAgentTrustForIssue below.
+  function isPresentButMalformedRunId(runId: string | null | undefined): boolean {
+    return typeof runId === "string" && runId.trim().length > 0 && !isUuidLike(runId);
+  }
+
+  // Cheap, presence-only check (no schema validation — that's
+  // resolveCoreTrustPreset's job) for "does this policy source carry ANY
+  // trust-related key at all". Used only to decide whether a malformed run
+  // id is even POTENTIALLY load-bearing for trust — see the call site.
+  function hasAnyTrustRelatedKey(rawPolicy: unknown): boolean {
+    if (!rawPolicy || typeof rawPolicy !== "object" || Array.isArray(rawPolicy)) return false;
+    const record = rawPolicy as Record<string, unknown>;
+    if ("trustPreset" in record || "reviewPreset" in record) return true;
+    const authorizationPolicy = record.authorizationPolicy;
+    return Boolean(authorizationPolicy && typeof authorizationPolicy === "object" && !Array.isArray(authorizationPolicy));
+  }
+
   async function resolveRunIssueWorkspaceInheritanceSource(
     companyId: string,
     actor: ReturnType<typeof getActorInfo>,
   ): Promise<string | null> {
-    // actor.runId comes straight from the caller-supplied X-Paperclip-Run-Id
-    // header (getActorInfo), unvalidated. heartbeatRuns.id is a Postgres uuid
-    // column — eq() against a malformed non-uuid string throws "invalid
-    // input syntax for type uuid", uncaught, turning this whole issue-create
-    // request into a bare 500 (2026-07-11 live incident, same class as the
-    // logActivity runId fix in services/activity-log.ts).
-    if (actor.actorType !== "agent" || !actor.agentId || !isUuidLike(actor.runId)) return null;
+    // Judgment: null+warn (not fail-closed) is correct here. A malformed
+    // run-id only means "don't inherit this run's workspace" — the caller
+    // falls back to explicit/default workspace selection for the new issue,
+    // which is the narrower path, not a wider one. It cannot hand a
+    // low-trust agent a LESS isolated workspace than it would otherwise get:
+    // the separate assertLowTrustControlPlaneDenied(...) gate on the issue
+    // POST route runs first and (after the fail-closed fix below) already
+    // rejects a low-trust agent's malformed run header with 400 before this
+    // function is ever reached.
+    if (actor.actorType !== "agent" || !actor.agentId || !isUuidLike(actor.runId)) {
+      if (isPresentButMalformedRunId(actor.runId)) {
+        logger.warn(
+          { runId: actor.runId, agentId: actor.agentId },
+          "resolveRunIssueWorkspaceInheritanceSource: runId is not a valid uuid — skipping workspace inheritance instead of crashing the request",
+        );
+      }
+      return null;
+    }
     const runId: string = actor.runId as string;
     const run = await db
       .select({
@@ -1118,13 +1158,42 @@ export function issueRoutes(
   ): Promise<TrustPresetResolution | null> {
     if (!input.agentId) return null;
     // input.runId ultimately traces back to the caller-supplied
-    // X-Paperclip-Run-Id header — same unvalidated-uuid hazard as
-    // resolveRunIssueWorkspaceInheritanceSource above; isUuidLike guards the
-    // eq() against heartbeatRuns.id (a uuid column) instead of letting a
-    // malformed header 500 the whole request.
+    // X-Paperclip-Run-Id header. Judgment: this path (and every caller of
+    // resolveAgentTrustForIssue — actorIsLowTrustReview,
+    // shouldRedactLowTrustForHeartbeatContext) resolves TRUST, not telemetry.
+    // For an agent whose low-trust boundary is only declared in the run's
+    // contextSnapshot.executionPolicy (not on the agent/project/issue
+    // policy), silently treating a malformed header the same as "no run"
+    // makes resolveCoreTrustPreset skip the run policy source entirely and
+    // can resolve `standard` instead of `low_trust_review` — i.e. sending
+    // garbage in the header RAISES effective trust and bypasses the
+    // redaction/control-plane-denial paths below.
+    //
+    // Fail closed ONLY where a malformed run id can actually change the
+    // outcome — NOT for every agent that happens to send a stray non-uuid
+    // run id (the ORIGINAL 2026-07-11 incident this whole PR fixes was
+    // exactly that: an ordinary, never-low-trust agent's routine POSTs
+    // 500'd on a malformed header). Two conditions must both hold:
+    //   1. agent/project/issue policy ALONE resolve to `standard` — if they
+    //      already imply low_trust_review/denied, the run source can only
+    //      ADD a boundary or leave the result unchanged (resolveCoreTrustPreset
+    //      ORs sources together, never un-flags one), so a malformed run id
+    //      changes nothing there.
+    //   2. this agent/issue shows SOME trust-related configuration at all
+    //      (a trustPreset/reviewPreset/authorizationPolicy key anywhere on
+    //      the agent's permissions or the issue's executionPolicy, even if
+    //      it doesn't itself resolve to low-trust). An agent/issue with
+    //      ZERO trust-related config anywhere is not an operator-configured
+    //      low-trust candidate; treating its malformed run id as fail-closed
+    //      would 400 the common case this PR must not regress.
+    // Only when BOTH hold is the malformed run id genuinely load-bearing —
+    // the run is the one place left that could carry the low-trust boundary
+    // this agent/issue was set up to have.
+    const malformedRunId = isPresentButMalformedRunId(input.runId);
+    const hasTrustRelatedConfig = hasAnyTrustRelatedKey(issue?.executionPolicy);
     const [agent, run] = await Promise.all([
       agentsSvc.getById(input.agentId),
-      isUuidLike(input.runId)
+      !malformedRunId && isUuidLike(input.runId)
         ? db
             .select({
               companyId: heartbeatRuns.companyId,
@@ -1146,18 +1215,30 @@ export function issueRoutes(
     const project = issue?.projectId
       ? await projectsSvc.getById(issue.projectId)
       : null;
-    return resolveCoreTrustPreset({
+    const resolvedProject = project?.companyId === companyId ? project : null;
+    const resolvedIssue = issue
+      ? {
+          companyId: issue.companyId,
+          executionPolicy: issue.executionPolicy,
+        }
+      : null;
+    const resolution = resolveCoreTrustPreset({
       companyId,
       agent,
-      project: project?.companyId === companyId ? project : null,
-      issue: issue
-        ? {
-            companyId: issue.companyId,
-            executionPolicy: issue.executionPolicy,
-          }
-        : null,
+      project: resolvedProject,
+      issue: resolvedIssue,
       run: runExecutionPolicy ? { companyId, executionPolicy: runExecutionPolicy } : null,
     });
+    const isPlausibleLowTrustCandidate =
+      hasTrustRelatedConfig ||
+      hasAnyTrustRelatedKey(agent.permissions) ||
+      hasAnyTrustRelatedKey(resolvedProject?.executionWorkspacePolicy);
+    if (malformedRunId && resolution.kind === "standard" && isPlausibleLowTrustCandidate) {
+      throw badRequest(
+        `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.runId}"`,
+      );
+    }
+    return resolution;
   }
 
   async function actorIsLowTrustReview(

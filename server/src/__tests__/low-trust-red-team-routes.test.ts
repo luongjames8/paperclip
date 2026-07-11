@@ -1089,3 +1089,148 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
     expect(productsForSource).toHaveLength(1);
   });
 });
+
+// ─── Malformed X-Paperclip-Run-Id fails closed on trust resolution
+// (codex round 3 P1, server/src/routes/issues.ts:1127) ───────────────────────
+//
+// A prior fix (this same PR) changed a malformed X-Paperclip-Run-Id header
+// from "uncaught throw → 500" to "isUuidLike guard → null + warn". That
+// blanket treatment is correct for pure telemetry (logActivity,
+// clearDetachedRunWarning) but wrong for TRUST resolution: for an agent whose
+// low-trust boundary is declared ONLY in the heartbeat run's
+// contextSnapshot.executionPolicy — not on the agent's own permissions, not
+// on the project, not on the issue — dropping a malformed run id to null
+// makes resolveCoreTrustPreset evaluate just agent/project/issue policy and
+// resolve `standard`. Sending garbage in the header would silently upgrade
+// the actor's effective trust and bypass redaction/control-plane denial.
+// resolveAgentTrustForIssue must fail closed with 400 instead.
+describeEmbeddedPostgres("malformed X-Paperclip-Run-Id fails closed on trust resolution", () => {
+  let db!: Db;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-run-id-trust-fail-closed-");
+    db = createDb(tempDb.connectionString);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+    await deleteHeartbeatRunsAfterActivityLogDrains(db);
+    await db.delete(issues);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  // The agent has NO low-trust preset of its own, the issue has NO
+  // executionPolicy of its own — the ONLY place the low-trust boundary is
+  // declared is the run's contextSnapshot.executionPolicy. This is exactly
+  // the "boundary lives only in the run" scenario the finding describes.
+  async function seedRunOnlyLowTrustFixture(runId: string) {
+    const [company] = await db.insert(companies).values({
+      name: `Run-only low trust ${runId.slice(0, 8)}`,
+      issuePrefix: `RO${runId.replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+    }).returning();
+    const [agent] = await db.insert(agents).values({
+      companyId: company!.id,
+      name: "Run-context-only Reviewer",
+      role: "engineer",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      // Empty authorizationPolicy: a MARKER that this agent is
+      // operator-configured for trust-boundary gating (parses fine — every
+      // field is optional — and does NOT itself imply low_trust_review), but
+      // the actual boundary lives ONLY on the run's contextSnapshot below.
+      // This is what makes resolveAgentTrustForIssue's malformed-run-id
+      // fail-closed path load-bearing here, without it firing for every
+      // ordinary agent with zero trust config anywhere (ordinary agents
+      // must not 400 on a stray non-uuid run header).
+      permissions: { authorizationPolicy: {} },
+    }).returning();
+    const [issue] = await db.insert(issues).values({
+      companyId: company!.id,
+      title: "Run-context-only boundary issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agent!.id,
+    }).returning();
+    const executionPolicy = {
+      authorizationPolicy: {
+        trustBoundary: {
+          mode: LOW_TRUST_REVIEW_PRESET,
+          companyId: company!.id,
+          rootIssueId: issue!.id,
+        },
+      },
+    };
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: company!.id,
+      agentId: agent!.id,
+      status: "running",
+      contextSnapshot: { issueId: issue!.id, executionPolicy },
+    });
+    return { company: company!, agent: agent!, issue: issue! };
+  }
+
+  it("a PRESENT-but-malformed run id header on the low-trust control-plane gate responds 400, never a silent standard-trust resolution", async () => {
+    // Uses POST /companies/:companyId/issues WITHOUT parentId — the control-
+    // plane gate (assertLowTrustControlPlaneDenied -> resolveAgentTrustForIssue)
+    // is the FIRST trust-resolution call in this route handler, so this
+    // exercises resolveAgentTrustForIssue's own fail-closed 400 and
+    // short-circuits before the route's later access.decide() call (a
+    // separate, independently-fixed fail-closed path in authorization.ts,
+    // which denies the same malformed header with 403 if ever reached on its
+    // own — not exercised by this specific request since the 400 fires
+    // first).
+    const runId = randomUUID();
+    const fixture = await seedRunOnlyLowTrustFixture(runId);
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: "not-a-uuid",
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${fixture.company.id}/issues`)
+      .send({ title: "New issue via malformed run id" });
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error).toMatch(/X-Paperclip-Run-Id/);
+    expect(res.body.error).toMatch(/not-a-uuid/);
+  });
+
+  it("the SAME actor with the real run id attached resolves low-trust and is NOT bypassed", async () => {
+    const runId = randomUUID();
+    const fixture = await seedRunOnlyLowTrustFixture(runId);
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app).get(`/api/issues/${fixture.issue.id}/heartbeat-context`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  });
+
+  it("an ABSENT run id header (legitimate no-run caller) is unaffected — still 200, no 400", async () => {
+    const fixture = await seedRunOnlyLowTrustFixture(randomUUID());
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: undefined,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app).get(`/api/issues/${fixture.issue.id}/heartbeat-context`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  });
+});

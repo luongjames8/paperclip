@@ -687,8 +687,19 @@ export async function runConfirmationSweep(
           }
 
           const structuredPayload = parseCarouselBatchPayload(interaction.payload?.carouselBatch);
-          const knownCarousel = Boolean(carouselState[interaction.id]);
-          const legacyMatches = detailsMarkdown && (knownCarousel || looksLikeCarouselBatch(detailsMarkdown));
+          // Legacy-shape match is decided ONLY by the CURRENT detailsMarkdown
+          // (codex P2): a knownCarousel interactionId used to also
+          // short-circuit straight to the legacy parser, but a revision can
+          // remove the structured payload and rewrite detailsMarkdown to
+          // something that no longer matches SECTION_HEADING_RE. Forcing the
+          // legacy parser in that case makes parseCarouselBatchMarkdown
+          // return zero sections, and postCarouselBatch skips posting on
+          // zero sections — the operator sees nothing, and (for a
+          // carouselBatch-flagged rule) the unstructured-degrade path below
+          // never runs. Re-checking the shape every tick is cheap (a single
+          // regex .test() on a string already in memory), so there's no
+          // reason to special-case "known" interactions here.
+          const legacyMatches = detailsMarkdown && looksLikeCarouselBatch(detailsMarkdown);
 
           if (structuredPayload) {
             // SINGLE HASH SOURCE (codex P1, PR #27 round 4): carouselArtifactHash

@@ -1036,6 +1036,66 @@ describe("runConfirmationSweep — unstructured-degrade (carousel-titled issue, 
     expect(finalState["int-1"].sectionsPosted).toBe(0);
     expect(finalState["int-1"].trailerPosted).toBe(false);
   });
+
+  it("previously-structured card revised to garbage markdown + no structured payload → degrade render posted, old anchor superseded (codex P2, confirmation-sweep.ts:691)", async () => {
+    // Regression for: knownCarousel forced the legacy parser even when the
+    // CURRENT detailsMarkdown no longer matches SECTION_HEADING_RE. Before
+    // the fix, this revision would parse zero legacy sections, postCarouselBatch
+    // would skip posting, and the operator would see nothing — the
+    // unstructured-degrade path below was never reached despite
+    // rule.carouselBatch being true.
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel, postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+
+    // Prior generation: a fully-posted STRUCTURED carousel (knownCarousel === true).
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(oldMarkdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "old-anchor-id",
+          anchorMessageId: "old-anchor-id",
+          lastRenderedStatus: "awaiting",
+        },
+      },
+    );
+
+    // Revision REMOVES the structured payload entirely and rewrites
+    // detailsMarkdown to a shape that no longer matches SECTION_HEADING_RE.
+    const brokenMarkdown = "## akihabara (Sat)\n![x](https://r2.example.com/1.jpg)\n\nCaption.";
+    const interaction = makeInteraction({ payload: { detailsMarkdown: brokenMarkdown } });
+    const paperclip = makePaperclip([makeCarouselTitledIssue()], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CAROUSEL_TITLE_CONFIG, async () => paperclip);
+
+    // The old anchor is superseded, not left dangling with live buttons.
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, messageId, opts] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("ch-carousel");
+    expect(messageId).toBe("old-anchor-id");
+    expect(opts.embeds[0].description).toMatch(/⏰ superseded/);
+
+    // The degrade render actually posts — images intact, loud warning present —
+    // instead of silently skipping (the zero-legacy-sections bug this test guards).
+    expect(postEmbedsToChannel).toHaveBeenCalled();
+    const textCalls = (postToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    const captionCall = textCalls.find(([, , msg]) => (msg as string).includes("unstructured artifact"));
+    expect(captionCall).toBeDefined();
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].headerPosted).toBe(true);
+    expect(finalState["int-1"].totalSections).toBe(1);
+  });
 });
 
 // ─── ANCHOR STATUS TRANSITIONS (kills "stacked generations" — 2026-07-11 live

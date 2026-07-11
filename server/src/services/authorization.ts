@@ -10,13 +10,26 @@ import {
   projects,
 } from "@paperclipai/db";
 import type { PermissionKey, PrincipalType } from "@paperclipai/shared";
-import { LOW_TRUST_REVIEW_PRESET, type LowTrustBoundary } from "@paperclipai/shared";
+import { LOW_TRUST_REVIEW_PRESET, isUuidLike, type LowTrustBoundary } from "@paperclipai/shared";
 import {
   LOW_TRUST_ISSUE_ANCESTRY_MAX_DEPTH,
   isIssueWithinLowTrustBoundary,
   resolveCoreTrustPreset,
   type TrustPresetResolution,
 } from "./trust-preset-resolver.js";
+
+// Cheap, presence-only check (no schema validation) for "does this policy
+// source carry ANY trust-related key at all". Mirrors the same helper in
+// routes/issues.ts (resolveAgentTrustForIssue) — kept local rather than
+// exported/shared since both call sites need it against slightly different
+// input shapes and it is a few lines of pure presence-checking.
+function hasAnyTrustRelatedKey(rawPolicy: unknown): boolean {
+  if (!rawPolicy || typeof rawPolicy !== "object" || Array.isArray(rawPolicy)) return false;
+  const record = rawPolicy as Record<string, unknown>;
+  if ("trustPreset" in record || "reviewPreset" in record) return true;
+  const authorizationPolicy = record.authorizationPolicy;
+  return Boolean(authorizationPolicy && typeof authorizationPolicy === "object" && !Array.isArray(authorizationPolicy));
+}
 
 export type AuthorizationActor =
   {
@@ -552,8 +565,24 @@ export function authorizationService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
-  async function loadRunPolicy(runId: string | null | undefined, companyId: string, agentId: string) {
+  // A distinct sentinel (not null) for "the caller supplied a run id but it
+  // isn't a valid uuid" — this is a DIFFERENT outcome from "no run supplied"
+  // (see resolveActorTrust below). heartbeatRuns.id is a Postgres uuid
+  // column; the same live-incident class as resolveAgentTrustForIssue in
+  // routes/issues.ts (2026-07-11 malformed X-Paperclip-Run-Id header) applies
+  // here — eq() against a malformed string throws "invalid input syntax for
+  // type uuid", uncaught, turning ANY agent request through access.decide()
+  // (used by virtually every authorization check in the server) into a bare
+  // 500.
+  const MALFORMED_RUN_ID = Symbol("malformed_run_id");
+
+  async function loadRunPolicy(
+    runId: string | null | undefined,
+    companyId: string,
+    agentId: string,
+  ): Promise<{ companyId: string; executionPolicy: Record<string, unknown> } | null | typeof MALFORMED_RUN_ID> {
     if (!runId) return null;
+    if (!isUuidLike(runId)) return MALFORMED_RUN_ID;
     const row = await db
       .select({
         id: heartbeatRuns.id,
@@ -609,13 +638,39 @@ export function authorizationService(db: Db) {
   }): Promise<TrustPresetResolution> {
     const { issue, project } = await loadResourceContext(input.resource);
     const run = await loadRunPolicy(input.actor.runId, input.companyId, input.actorAgent.id);
-    return resolveCoreTrustPreset({
+    const resolvedRun = run === MALFORMED_RUN_ID ? null : run;
+    const resolution = resolveCoreTrustPreset({
       companyId: input.companyId,
       agent: input.actorAgent,
       project,
       issue,
-      run,
+      run: resolvedRun,
     });
+    // Fail closed ONLY where a malformed run id can actually change the
+    // outcome — same judgment as resolveAgentTrustForIssue in
+    // routes/issues.ts (see that function's comment for the full rationale).
+    // A malformed run id must not 400/deny every ordinary agent request that
+    // happens to carry a stray non-uuid run header (the ORIGINAL 2026-07-11
+    // incident this class of fix exists for), so this only denies when BOTH:
+    // (1) agent/project/issue alone already resolve `standard`, and (2) this
+    // agent/project/issue shows SOME trust-related config at all (otherwise
+    // there is nothing here for the run to plausibly have been hiding).
+    if (
+      run === MALFORMED_RUN_ID &&
+      resolution.kind === "standard" &&
+      (hasAnyTrustRelatedKey(input.actorAgent.permissions) ||
+        hasAnyTrustRelatedKey(project?.executionWorkspacePolicy) ||
+        hasAnyTrustRelatedKey(issue?.executionPolicy))
+    ) {
+      return {
+        kind: "denied",
+        reason: "invalid_run_id",
+        source: "run",
+        detail: `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.actor.runId}"`,
+        sourcePresets: resolution.sourcePresets,
+      };
+    }
+    return resolution;
   }
 
   async function issueIdIsDescendantOf(issueId: string, rootIssueId: string, companyId: string) {
