@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { Client } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { DiscordFleetConfig } from "../config/schema.js";
@@ -15,9 +14,11 @@ import {
   parseCarouselBatchMarkdown,
   parseCarouselBatchPayload,
   carouselBatchFromStructuredPayload,
+  carouselArtifactHash,
   buildUnstructuredDegradeSection,
   renderCarouselSlideEmbeds,
   SECTION_HEADING_RE,
+  sha256,
   type CarouselSection,
   type ParsedCarouselBatch,
 } from "../render/carousel-batch.js";
@@ -85,12 +86,6 @@ export interface CarouselBatchSweepRecord {
 }
 type CarouselBatchSweepState = Record<string, CarouselBatchSweepRecord>;
 
-// Exported so the carousel-confirmation button handler can recompute the same
-// hash at click time (customId version-token verification — PR #27 codex round 3).
-export function sha256(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
-}
-
 // A carousel-batch artifact is detected purely by shape: detailsMarkdown
 // contains at least one `**N. slug (Day)**` section heading. When it does,
 // the sweep takes the carousel-batch path below; otherwise the existing
@@ -142,8 +137,9 @@ export type CarouselBatchSource = "structured" | "legacy" | "unstructured-degrad
  * when the artifact hash changed (the same interactionId got a new
  * detailsMarkdown/structured payload, e.g. after a revision cycle).
  *
- * `artifactHashSource` (used only for the resume/re-post hash — never
- * re-parsed on the fast paths) and `getParsed` (LAZY — structured-payload
+ * `artifactHash` (the FINAL hash — already computed by the caller via the
+ * single-source-of-truth carouselArtifactHash, or sha256 of the legacy
+ * markdown; never re-hashed here) and `getParsed` (LAZY — structured-payload
  * detection and legacy-markdown parsing are both deferred behind this
  * closure, invoked only when there's actual section work to do) are supplied
  * by the caller. Both detection paths funnel into the same ParsedCarouselBatch
@@ -157,14 +153,13 @@ async function postCarouselBatch(
   company: DiscordFleetConfig["companies"][number],
   issue: PaperclipIssue,
   interaction: PaperclipInteraction,
-  artifactHashSource: string,
+  artifactHash: string,
   getParsed: () => ParsedCarouselBatch,
   source: CarouselBatchSource,
   state: CarouselBatchSweepState,
   now: number,
 ): Promise<void> {
   const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
-  const artifactHash = sha256(artifactHashSource);
   const existing = state[interaction.id];
 
   // Fully posted AND hash unchanged: nothing to do. Checked before parsing —
@@ -502,7 +497,7 @@ async function postUnstructuredCarouselDegrade(
 ): Promise<void> {
   await postCarouselBatch(
     ctx, client, channelId, company, issue, interaction,
-    detailsMarkdown,
+    sha256(detailsMarkdown),
     () => {
       const section = buildUnstructuredDegradeSection(detailsMarkdown);
       return { sections: [section], totalImagesFound: section.slideUrls.length, wasCapFallback: false };
@@ -664,10 +659,13 @@ export async function runConfirmationSweep(
           const legacyMatches = detailsMarkdown && (knownCarousel || looksLikeCarouselBatch(detailsMarkdown));
 
           if (structuredPayload) {
-            const hashSource = JSON.stringify(structuredPayload);
+            // SINGLE HASH SOURCE (codex P1, PR #27 round 4): carouselArtifactHash
+            // is the SAME function the button/modal handlers call at click time
+            // (isCurrentVersion) — the sweep and the click-guard now compute
+            // the customId version token identically, so they can never drift.
             await postCarouselBatch(
               ctx, client, rule.channelId, company, issue, interaction,
-              hashSource,
+              carouselArtifactHash(interaction),
               () => carouselBatchFromStructuredPayload(structuredPayload),
               "structured",
               carouselState, now,
@@ -678,7 +676,7 @@ export async function runConfirmationSweep(
           if (legacyMatches) {
             await postCarouselBatch(
               ctx, client, rule.channelId, company, issue, interaction,
-              detailsMarkdown,
+              sha256(detailsMarkdown),
               () => parseCarouselBatchMarkdown(detailsMarkdown),
               "legacy",
               carouselState, now,

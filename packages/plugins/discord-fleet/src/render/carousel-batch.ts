@@ -1,11 +1,17 @@
 import type { APIEmbed } from "discord.js";
+import { createHash } from "node:crypto";
 import { enforceEmbedLimits, safe } from "./embeds.js";
+import type { PaperclipInteraction } from "../api/paperclip.js";
 
 // NOTE: renderSlidesDoc in ./issue-docs.ts renders the SAME artifact kind
 // (carousel slides) for the request_board_approval flow from a JSON slides
 // doc. If the carousel gate ever migrates entity types again, both surfaces
 // must move together — that migration silently dropping the renderer is
 // exactly the historical failure this file exists to fix (see PR #27 body).
+
+export function sha256(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
 
 // ─── Structured payload contract (kills the "regex-on-LLM-prose" failure
 // class — 2026-07-11 live incident: the publisher wrote `## akihabara (Sat)`
@@ -104,6 +110,44 @@ export function parseCarouselBatchPayload(raw: unknown): CarouselBatchPayload | 
     ...(cadence !== undefined ? { cadence } : {}),
     items,
   };
+}
+
+// SINGLE SOURCE OF TRUTH for the customId version token (kills codex P1: the
+// sweep used to hash JSON.stringify(structuredPayload) while the button/modal
+// handlers' isCurrentVersion recomputed from detailsMarkdown/prompt only —
+// for every structured card the two hashes could never match, so every
+// Accept and every Reject-modal-submit was refused as stale). Both the
+// sweep's render/versioning site AND the click-time validators now call this
+// SAME function on the SAME fetched interaction:
+//   - structured payload present (parseCarouselBatchPayload succeeds) → hash
+//     of the canonical parsed-and-reserialized form (never the raw payload
+//     object — reserializing through the parser normalizes field presence/
+//     order the same way on both call sites).
+//   - otherwise → the existing detailsMarkdown/prompt hash (legacy cards
+//     unchanged).
+//
+// DETERMINISM NOTE: JSON.stringify key order is normally not guaranteed
+// stable across arbitrary objects, but that's not a hazard here — both call
+// sites invoke this SAME function on the SAME fetched interaction (the sweep
+// hashes the interaction it just listed; the click-guard re-fetches and
+// hashes that), so the stringify always runs over an object built the same
+// way (parseCarouselBatchPayload's own construction order), never two
+// independently-constructed objects being compared for equality.
+export function carouselArtifactHash(interaction: PaperclipInteraction): string {
+  const structuredPayload = parseCarouselBatchPayload(interaction.payload?.carouselBatch);
+  if (structuredPayload) {
+    return sha256(JSON.stringify(structuredPayload));
+  }
+
+  const rawDetails = interaction.payload?.detailsMarkdown;
+  const rawPrompt = interaction.payload?.prompt;
+  const detailsMarkdown =
+    typeof rawDetails === "string" && rawDetails.trim()
+      ? rawDetails.trim()
+      : typeof rawPrompt === "string" && rawPrompt.trim()
+        ? rawPrompt.trim()
+        : "";
+  return sha256(detailsMarkdown);
 }
 
 // Adapts a structured CarouselBatchPayload into the same ParsedCarouselBatch

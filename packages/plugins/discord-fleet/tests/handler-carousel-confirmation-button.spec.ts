@@ -20,6 +20,7 @@ import {
   CAROUSEL_HASH_TOKEN_LEN,
 } from "../src/render/embeds.js";
 import { PaperclipApiError } from "../src/api/paperclip.js";
+import { carouselArtifactHash, type CarouselBatchPayload } from "../src/render/carousel-batch.js";
 
 function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
@@ -402,6 +403,133 @@ describe("handleCarouselConfirmationButton — stale version-token guard", () =>
       expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/stale/i) }),
     );
     expect(mockAcceptInteraction).not.toHaveBeenCalled();
+  });
+});
+
+// ─── SINGLE HASH SOURCE for structured cards (codex P1, PR #27 round 4) ─────
+//
+// Before this fix: the sweep versioned a structured card's customId with
+// sha256(JSON.stringify(structuredPayload)), but isCurrentVersion recomputed
+// its expected token from detailsMarkdown/prompt ONLY — the two hashes could
+// never match for a structured card, so every Accept/Reject-modal-submit was
+// refused as stale. carouselArtifactHash is now the ONE function both sites
+// call on the same fetched interaction.
+
+const STRUCTURED_PAYLOAD: CarouselBatchPayload = {
+  version: 1,
+  weekOf: "2026-07-13",
+  items: [
+    { slug: "akihabara", day: "Sat", caption: "Electric town.", slides: ["https://r2.example.com/akihabara/1.jpg"] },
+  ],
+};
+
+// The exact codex scenario: a structured card whose detailsMarkdown is
+// garbage/unrelated prose (never touched by carouselArtifactHash once a
+// structured payload is present).
+const GARBAGE_DETAILS_MARKDOWN = "this is not carousel-shaped markdown at all, just prose";
+
+function structuredInteractionRow(payload: CarouselBatchPayload = STRUCTURED_PAYLOAD, detailsMarkdown = GARBAGE_DETAILS_MARKDOWN) {
+  return [
+    {
+      id: INTERACTION_ID,
+      kind: "request_confirmation",
+      status: "pending",
+      payload: { detailsMarkdown, carouselBatch: payload },
+    },
+  ];
+}
+
+describe("handleCarouselConfirmationButton — structured-card hash matches the sweep's SAME helper (codex P1 round 4)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("(a) round-trip: the hash8 the sweep would embed in the customId (via carouselArtifactHash) === isCurrentVersion's expected hash, for the SAME mocked interaction", async () => {
+    const row = structuredInteractionRow();
+    mockListIssueInteractions.mockResolvedValue(row);
+
+    // Simulates the sweep's render/versioning site: hash the interaction it
+    // just fetched, exactly as confirmation-sweep.ts now does.
+    const sweepSideHash8 = carouselArtifactHash(row[0] as any).slice(0, CAROUSEL_HASH_TOKEN_LEN);
+
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`car-ok:${sweepSideHash8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
+
+    // The click-guard's re-derived hash (via the SAME carouselArtifactHash
+    // helper, inside isCurrentVersion) matches the sweep-side hash — the
+    // click proceeds to the real accept call instead of being refused stale.
+    expect(mockAcceptInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID);
+    expect(interaction.followUp).not.toHaveBeenCalled();
+  });
+
+  it("(c) structured card whose detailsMarkdown is garbage/unrelated prose still validates — carouselArtifactHash never touches detailsMarkdown once carouselBatch parses", async () => {
+    const row = structuredInteractionRow(STRUCTURED_PAYLOAD, "###!!! not markdown at all $$$ 12345 garbage");
+    mockListIssueInteractions.mockResolvedValue(row);
+    const hash8 = carouselArtifactHash(row[0] as any).slice(0, CAROUSEL_HASH_TOKEN_LEN);
+
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`car-ok:${hash8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
+
+    expect(mockAcceptInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID);
+    expect(interaction.followUp).not.toHaveBeenCalled();
+  });
+
+  it("a hash8 computed the OLD (buggy) way — sha256(JSON.stringify(payload)).slice — no longer matches carouselArtifactHash's own internal hashing path (proves the fix actually changed behavior, not just added a helper)", async () => {
+    // This mirrors the OLD isCurrentVersion: hashing detailsMarkdown only,
+    // ignoring the structured payload entirely — the exact stale computation
+    // that caused every structured-card click to be refused.
+    const oldBuggyHash8 = sha256(GARBAGE_DETAILS_MARKDOWN).slice(0, CAROUSEL_HASH_TOKEN_LEN);
+    mockListIssueInteractions.mockResolvedValue(structuredInteractionRow());
+
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`car-ok:${oldBuggyHash8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
+
+    expect(mockAcceptInteraction).not.toHaveBeenCalled();
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ ephemeral: true, content: expect.stringMatching(/stale/i) }),
+    );
+  });
+
+  it("reject-modal-submit path: structured card's hash8 (from carouselArtifactHash) validates on submit too", async () => {
+    const row = structuredInteractionRow();
+    mockListIssueInteractions.mockResolvedValue(row);
+    const hash8 = carouselArtifactHash(row[0] as any).slice(0, CAROUSEL_HASH_TOKEN_LEN);
+
+    const { handleCarouselConfirmationRejectModal } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${hash8}:${ISSUE_ID}:${INTERACTION_ID}`, { reason: "Wrong slides" });
+    await handleCarouselConfirmationRejectModal(harness.ctx, interaction, makeConfig());
+
+    expect(mockRejectInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID, "Wrong slides");
+    expect(interaction.followUp).not.toHaveBeenCalled();
+  });
+
+  it("(b) legacy markdown card (no carouselBatch payload) — unchanged behavior: hash8 still derives from detailsMarkdown", async () => {
+    mockListIssueInteractions.mockResolvedValue(currentInteractionRow());
+
+    const { handleCarouselConfirmationButton } = await import("../src/handlers/carousel-confirmation-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+
+    const interaction = makeInteraction(`car-ok:${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`);
+    await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
+
+    expect(mockAcceptInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID);
+    expect(interaction.followUp).not.toHaveBeenCalled();
   });
 });
 

@@ -1,12 +1,16 @@
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import {
   parseCarouselBatchMarkdown,
   renderCarouselSlideEmbeds,
   parseCarouselBatchPayload,
   carouselBatchFromStructuredPayload,
   buildUnstructuredDegradeSection,
+  carouselArtifactHash,
+  sha256,
   type CarouselBatchPayload,
 } from "../src/render/carousel-batch.js";
+import type { PaperclipInteraction } from "../src/api/paperclip.js";
 
 const SLUGS = [
   "tokyo-by-car-guide",
@@ -349,5 +353,95 @@ describe("buildUnstructuredDegradeSection", () => {
     const section = buildUnstructuredDegradeSection("Just prose, no image markdown.");
     expect(section.slideUrls).toEqual([]);
     expect(section.caption).toContain("Just prose, no image markdown.");
+  });
+});
+
+// ─── carouselArtifactHash — SINGLE SOURCE OF TRUTH (codex P1, PR #27 round 4) ─
+//
+// This is the ONE function the sweep's render/versioning site AND the button/
+// modal-submit click-guard (isCurrentVersion) both call on the same fetched
+// interaction — a structured card's customId hash and its click-time
+// validation hash can never drift again because they run the exact same code.
+
+function nodeSha256(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function makeInteraction(overrides: Partial<PaperclipInteraction> = {}): PaperclipInteraction {
+  return {
+    id: "int-1",
+    kind: "request_confirmation",
+    status: "pending",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    payload: {},
+    ...overrides,
+  };
+}
+
+describe("carouselArtifactHash", () => {
+  it("sha256 helper matches node:crypto directly (sanity check on the re-exported helper)", () => {
+    expect(sha256("hello world")).toBe(nodeSha256("hello world"));
+  });
+
+  it("(a) structured payload present → hashes sha256(JSON.stringify(parsed payload)) — matches what a caller re-deriving via parseCarouselBatchPayload would produce", () => {
+    const payload: CarouselBatchPayload = {
+      version: 1,
+      weekOf: "2026-07-13",
+      items: [{ slug: "akihabara", day: "Sat", caption: "Electric town.", slides: ["https://r2.example.com/1.jpg"] }],
+    };
+    const interaction = makeInteraction({
+      payload: { detailsMarkdown: "irrelevant prose, never consulted", carouselBatch: payload },
+    });
+
+    const expected = nodeSha256(JSON.stringify(parseCarouselBatchPayload(payload)));
+    expect(carouselArtifactHash(interaction)).toBe(expected);
+  });
+
+  it("(c) garbage/unparseable detailsMarkdown alongside a valid structured payload still hashes from the STRUCTURED payload — never touches detailsMarkdown (the exact codex P1 scenario)", () => {
+    const payload: CarouselBatchPayload = {
+      version: 1,
+      items: [{ slug: "a", day: "Mon", caption: "c", slides: [] }],
+    };
+    const garbageMarkdown = "###!!! $$$ not carousel-shaped at all 12345";
+    const interactionWithGarbage = makeInteraction({ payload: { detailsMarkdown: garbageMarkdown, carouselBatch: payload } });
+    const interactionWithCleanMarkdown = makeInteraction({ payload: { detailsMarkdown: "**1. a (Mon)**\n\nc", carouselBatch: payload } });
+
+    // Same structured payload, DIFFERENT detailsMarkdown → identical hash,
+    // proving detailsMarkdown is never consulted once carouselBatch parses.
+    expect(carouselArtifactHash(interactionWithGarbage)).toBe(carouselArtifactHash(interactionWithCleanMarkdown));
+  });
+
+  it("(b) no structured payload (legacy markdown card) → falls back to hashing detailsMarkdown, unchanged from the pre-fix behavior", () => {
+    const details = "**1. tokyo-tour (Mon)**\n![slide1](https://r2.example.com/1.jpg)\n\nCaption.";
+    const interaction = makeInteraction({ payload: { detailsMarkdown: details } });
+    expect(carouselArtifactHash(interaction)).toBe(nodeSha256(details));
+  });
+
+  it("no structured payload, detailsMarkdown absent → falls back to payload.prompt", () => {
+    const interaction = makeInteraction({ payload: { prompt: "Please confirm this batch." } });
+    expect(carouselArtifactHash(interaction)).toBe(nodeSha256("Please confirm this batch."));
+  });
+
+  it("malformed carouselBatch (fails parseCarouselBatchPayload) degrades to the legacy detailsMarkdown hash, never throws", () => {
+    const details = "**1. a (Mon)**\n\ncaption";
+    const interaction = makeInteraction({ payload: { detailsMarkdown: details, carouselBatch: { version: 2, items: "nope" } } });
+    expect(carouselArtifactHash(interaction)).toBe(nodeSha256(details));
+  });
+
+  it("two DIFFERENT interaction objects carrying the SAME structured payload hash identically — the round-trip guarantee the sweep and click-guard rely on", () => {
+    const payload: CarouselBatchPayload = {
+      version: 1,
+      weekOf: "2026-07-13",
+      cadence: { days: ["Sat"], held: 0, strays: 0 },
+      items: [{ slug: "akihabara", day: "Sat", caption: "Electric town.", slides: ["https://r2.example.com/1.jpg", "https://r2.example.com/2.jpg"] }],
+    };
+    // Simulates: sweep sees this interaction on tick N (via listIssueInteractions
+    // in the sweep loop); the click-guard re-fetches it later at click time
+    // (a fresh object from a fresh API call) — same shape, different object identity.
+    const sweepSideInteraction = makeInteraction({ payload: { detailsMarkdown: "whatever", carouselBatch: JSON.parse(JSON.stringify(payload)) } });
+    const clickGuardSideInteraction = makeInteraction({ payload: { detailsMarkdown: "whatever", carouselBatch: JSON.parse(JSON.stringify(payload)) } });
+
+    expect(carouselArtifactHash(sweepSideInteraction)).toBe(carouselArtifactHash(clickGuardSideInteraction));
   });
 });

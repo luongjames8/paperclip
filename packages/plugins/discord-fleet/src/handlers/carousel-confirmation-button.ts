@@ -12,7 +12,7 @@ import {
   CAROUSEL_HASH_TOKEN_LEN,
   buildCarouselAnchorEmbed,
 } from "../render/embeds.js";
-import { sha256 } from "../jobs/confirmation-sweep.js";
+import { carouselArtifactHash } from "../render/carousel-batch.js";
 
 export type CarouselConfirmAction = "accept" | "reject";
 
@@ -84,12 +84,17 @@ export function parseCarouselConfirmRejectModalCustomId(customId: string): Parse
   return null;
 }
 
-// Re-fetches the interaction and recomputes its detailsMarkdown hash8 to
-// compare against the customId's version token (FIX (a), PR #27 codex round
-// 3). Returns true when the click is safe to act on: the token is present AND
-// matches the CURRENT artifact hash. Any other outcome (no token — legacy
-// customId; interaction not found/gone; hash mismatch — a newer version was
-// posted) returns false and the caller must refuse with NO further API call.
+// Re-fetches the interaction and recomputes its CURRENT artifact hash8 via
+// carouselArtifactHash — the SAME single-source-of-truth helper the sweep
+// uses to version the customId in the first place (kills codex P1: the sweep
+// used to hash JSON.stringify(structuredPayload) for structured cards while
+// this function only ever hashed detailsMarkdown/prompt, so the two hashes
+// could never match and every structured-card Accept/Reject was refused as
+// stale). Returns true when the click is safe to act on: the token is
+// present AND matches the CURRENT artifact hash. Any other outcome (no
+// token — legacy customId; interaction not found/gone; hash mismatch — a
+// newer version was posted) returns false and the caller must refuse with NO
+// further API call.
 //
 // ACK-FIRST (2026-07-11 live incident, failure 1): this function performs a
 // paperclip API fetch (listIssueInteractions) — real network I/O. Discord
@@ -116,15 +121,7 @@ async function isCurrentVersion(
   }
   const current = interactions.find((i) => i.id === interactionId);
   if (!current) return false;
-  const rawDetails = current.payload?.detailsMarkdown;
-  const rawPrompt = current.payload?.prompt;
-  const detailsMarkdown =
-    typeof rawDetails === "string" && rawDetails.trim()
-      ? rawDetails.trim()
-      : typeof rawPrompt === "string" && rawPrompt.trim()
-        ? rawPrompt.trim()
-        : "";
-  return sha256(detailsMarkdown).slice(0, CAROUSEL_HASH_TOKEN_LEN) === hash8;
+  return carouselArtifactHash(current).slice(0, CAROUSEL_HASH_TOKEN_LEN) === hash8;
 }
 
 const STALE_TRAILER_MESSAGE =
