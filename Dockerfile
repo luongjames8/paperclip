@@ -75,7 +75,7 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 WORKDIR /app
 COPY --chown=node:node --from=build /app /app
-ARG PAPERCLIPAI_CLI_VERSION=2026.529.0
+ARG PAPERCLIPAI_CLI_VERSION=2026.707.0
 RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest paperclipai@${PAPERCLIPAI_CLI_VERSION} \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
