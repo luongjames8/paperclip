@@ -67,6 +67,16 @@ export interface CarouselBatchPayload {
 // dropped-if-not — a contract wobble on metadata must never blind the
 // operator to the batch itself (the whole reason this structured path
 // exists).
+function isRenderableSlideUrl(s: unknown): boolean {
+  if (typeof s !== "string") return false;
+  try {
+    const u = new URL(s);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export function parseCarouselBatchPayload(raw: unknown): CarouselBatchPayload | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
@@ -102,17 +112,16 @@ export function parseCarouselBatchPayload(raw: unknown): CarouselBatchPayload | 
     if (item.day !== null && typeof item.day !== "string") return null;
     if (typeof item.caption !== "string") return null;
     // Slides must be RENDERABLE http(s) URLs, not merely strings (codex
-    // round-8): a single "" or non-URL entry makes Discord reject the whole
-    // embed send at post time — postCarouselSection fails before the
-    // caption/trailer and the sweep retries the same broken structured path
-    // every tick, invisibly and forever. One bad slide makes the payload
-    // malformed AS A WHOLE (never silently drop a slide — "an image is never
-    // silently dropped") so it degrades to the visible fallback paths like
-    // any other contract miss.
-    if (
-      !Array.isArray(item.slides) ||
-      !item.slides.every((s) => typeof s === "string" && /^https?:\/\//.test(s))
-    ) {
+    // rounds 8+10): a single "" / non-URL / unparseable entry (a prefix
+    // regex still passed "https://exa mple.com" and "http://[") makes
+    // Discord reject the whole embed send at post time —
+    // postCarouselSection fails before the caption/trailer and the sweep
+    // retries the same broken structured path every tick, invisibly and
+    // forever. PARSE, don't pattern-match (new URL + scheme check). One bad
+    // slide makes the payload malformed AS A WHOLE (never silently drop a
+    // slide — "an image is never silently dropped") so it degrades to the
+    // visible fallback paths like any other contract miss.
+    if (!Array.isArray(item.slides) || !item.slides.every(isRenderableSlideUrl)) {
       return null;
     }
     items.push({ slug: item.slug, day: item.day, caption: item.caption, slides: item.slides as string[] });

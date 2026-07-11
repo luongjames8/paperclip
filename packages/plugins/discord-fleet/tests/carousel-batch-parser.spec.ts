@@ -249,6 +249,14 @@ describe("parseCarouselBatchPayload", () => {
     expect(
       parseCarouselBatchPayload(validPayload({ items: [{ slug: "a", day: "Sat", caption: "c", slides: ["ftp://wrong.scheme/x.jpg"] }] })),
     ).toBeNull();
+    // Prefix-passing but UNPARSEABLE URLs (codex round-10) — new URL()
+    // rejects what a /^https?:\/\// regex accepts; Discord would reject both.
+    expect(
+      parseCarouselBatchPayload(validPayload({ items: [{ slug: "a", day: "Sat", caption: "c", slides: ["https://exa mple.com/1.png"] }] })),
+    ).toBeNull();
+    expect(
+      parseCarouselBatchPayload(validPayload({ items: [{ slug: "a", day: "Sat", caption: "c", slides: ["http://["] }] })),
+    ).toBeNull();
   });
 
   // weekOf/cadence are OPTIONAL passthrough — a contract wobble on metadata
