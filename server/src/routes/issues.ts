@@ -90,7 +90,7 @@ import {
   workProductService,
 } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
-import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
+import { badRequest, conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
@@ -137,6 +137,7 @@ import {
   resolveCoreTrustPreset,
   type TrustPresetResolution,
 } from "../services/trust-preset-resolver.js";
+import { resolveVerifiedRunId } from "../services/run-id-trust.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -1074,11 +1075,46 @@ export function issueRoutes(
       input.executionWorkspaceSettings !== undefined;
   }
 
+  // The X-Paperclip-Run-Id header is a bare, unvalidated caller-supplied
+  // string (getActorInfo → actor.runId). heartbeatRuns.id is a Postgres uuid
+  // column, so a malformed value throws "invalid input syntax for type uuid"
+  // if passed straight to eq() (2026-07-11 live incident). isUuidLike alone
+  // can't tell "header omitted" (legitimate no-run caller — undefined/empty)
+  // from "header present but garbage" (a caller bug or hostile input) — both
+  // produce `false`. That distinction matters: callers that only use the run
+  // for telemetry/bookkeeping can safely treat "can't resolve a run" as
+  // null+warn either way, but callers that use the run to LOCATE a low-trust
+  // boundary must not silently treat a malformed header the same as "no run
+  // context", because dropping to null there can make resolveCoreTrustPreset
+  // evaluate fewer policy sources and resolve a MORE permissive preset than
+  // the true one — see resolveAgentTrustForIssue below.
+  function isPresentButMalformedRunId(runId: string | null | undefined): boolean {
+    return typeof runId === "string" && runId.trim().length > 0 && !isUuidLike(runId);
+  }
+
   async function resolveRunIssueWorkspaceInheritanceSource(
     companyId: string,
     actor: ReturnType<typeof getActorInfo>,
   ): Promise<string | null> {
-    if (actor.actorType !== "agent" || !actor.agentId || !actor.runId) return null;
+    // Judgment: null+warn (not fail-closed) is correct here. A malformed
+    // run-id only means "don't inherit this run's workspace" — the caller
+    // falls back to explicit/default workspace selection for the new issue,
+    // which is the narrower path, not a wider one. It cannot hand a
+    // low-trust agent a LESS isolated workspace than it would otherwise get:
+    // the separate assertLowTrustControlPlaneDenied(...) gate on the issue
+    // POST route runs first and (after the fail-closed fix below) already
+    // rejects a low-trust agent's malformed run header with 400 before this
+    // function is ever reached.
+    if (actor.actorType !== "agent" || !actor.agentId || !isUuidLike(actor.runId)) {
+      if (isPresentButMalformedRunId(actor.runId)) {
+        logger.warn(
+          { runId: actor.runId, agentId: actor.agentId },
+          "resolveRunIssueWorkspaceInheritanceSource: runId is not a valid uuid — skipping workspace inheritance instead of crashing the request",
+        );
+      }
+      return null;
+    }
+    const runId: string = actor.runId as string;
     const run = await db
       .select({
         agentId: heartbeatRuns.agentId,
@@ -1086,7 +1122,7 @@ export function issueRoutes(
       })
       .from(heartbeatRuns)
       .where(and(
-        eq(heartbeatRuns.id, actor.runId),
+        eq(heartbeatRuns.id, runId),
         eq(heartbeatRuns.companyId, companyId),
       ))
       .then((rows) => rows[0] ?? null);
@@ -1110,9 +1146,40 @@ export function issueRoutes(
     issue?: { companyId: string; projectId?: string | null; executionPolicy?: unknown } | null,
   ): Promise<TrustPresetResolution | null> {
     if (!input.agentId) return null;
+    // input.runId ultimately traces back to the caller-supplied
+    // X-Paperclip-Run-Id header. Judgment: this path (and every caller of
+    // resolveAgentTrustForIssue — actorIsLowTrustReview,
+    // shouldRedactLowTrustForHeartbeatContext) resolves TRUST, not telemetry.
+    // For an agent whose low-trust boundary is only declared in the run's
+    // contextSnapshot.executionPolicy (not on the agent/project/issue
+    // policy), silently treating a malformed header the same as "no run"
+    // makes resolveCoreTrustPreset skip the run policy source entirely and
+    // can resolve `standard` instead of `low_trust_review` — i.e. sending
+    // garbage in the header RAISES effective trust and bypasses the
+    // redaction/control-plane-denial paths below.
+    //
+    // Fail closed UNCONDITIONALLY whenever the header is present but
+    // unverifiable (malformed or well-formed-but-unknown) and the
+    // agent/project/issue policy alone would otherwise resolve `standard`.
+    // codex ceiling round: a prior version of this guard additionally
+    // required the agent/issue to show SOME trust-related config
+    // (isPlausibleLowTrustCandidate) before fail-closing — but for a
+    // deployment where the low-trust boundary lives ONLY in
+    // heartbeatRuns.contextSnapshot.executionPolicy (the exact run-only
+    // trust source this guard exists for), agent/project/issue carry no
+    // trust-related keys at all, the plausibility gate was false, and the
+    // 400 was skipped — silently resolving `standard` and bypassing
+    // redaction/control-plane denial. The header's PRESENCE is itself a
+    // claim of run context; an unverifiable claim must fail closed
+    // regardless of what else is configured. This can now 400 an ordinary
+    // agent that sends a stray non-uuid run id with zero trust config
+    // anywhere — that is the intended, and only, cost: a visible 400 (with
+    // an actionable message telling the caller to drop/fix the header) beats
+    // a silent trust elevation. Recovery is simply not sending a bad header.
+    const malformedRunId = isPresentButMalformedRunId(input.runId);
     const [agent, run] = await Promise.all([
       agentsSvc.getById(input.agentId),
-      input.runId
+      !malformedRunId && isUuidLike(input.runId)
         ? db
             .select({
               companyId: heartbeatRuns.companyId,
@@ -1120,11 +1187,19 @@ export function issueRoutes(
               contextSnapshot: heartbeatRuns.contextSnapshot,
             })
             .from(heartbeatRuns)
-            .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, companyId)))
+            .where(and(eq(heartbeatRuns.id, input.runId as string), eq(heartbeatRuns.companyId, companyId)))
             .then((rows) => rows[0] ?? null)
         : Promise.resolve(null),
     ]);
     if (!agent || agent.companyId !== companyId) return null;
+    // A well-formed uuid that isn't malformed but ALSO doesn't resolve to a
+    // real run (wrong company, wrong agent, or simply doesn't exist —
+    // pruned/fabricated) is the SAME class of "the run cannot be trusted to
+    // carry a low-trust boundary" as a malformed header. Distinguish it from
+    // "no run supplied at all" (input.runId falsy) so the fail-closed check
+    // below applies identically to both malformed and stale-valid-shaped ids.
+    const runIdSupplied = !malformedRunId && isUuidLike(input.runId);
+    const wellFormedButUnknownRunId = runIdSupplied && (!run || run.agentId !== input.agentId);
     const runContext = run?.agentId === agent.id && run.contextSnapshot && typeof run.contextSnapshot === "object"
       ? run.contextSnapshot as Record<string, unknown>
       : null;
@@ -1134,18 +1209,31 @@ export function issueRoutes(
     const project = issue?.projectId
       ? await projectsSvc.getById(issue.projectId)
       : null;
-    return resolveCoreTrustPreset({
+    const resolvedProject = project?.companyId === companyId ? project : null;
+    const resolvedIssue = issue
+      ? {
+          companyId: issue.companyId,
+          executionPolicy: issue.executionPolicy,
+        }
+      : null;
+    const resolution = resolveCoreTrustPreset({
       companyId,
       agent,
-      project: project?.companyId === companyId ? project : null,
-      issue: issue
-        ? {
-            companyId: issue.companyId,
-            executionPolicy: issue.executionPolicy,
-          }
-        : null,
+      project: resolvedProject,
+      issue: resolvedIssue,
       run: runExecutionPolicy ? { companyId, executionPolicy: runExecutionPolicy } : null,
     });
+    if (
+      (malformedRunId || wellFormedButUnknownRunId) &&
+      resolution.kind === "standard"
+    ) {
+      throw badRequest(
+        malformedRunId
+          ? `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.runId}". Drop the header or fix its value.`
+          : `X-Paperclip-Run-Id header does not match a known run for this agent: "${input.runId}". Drop the header or fix its value.`,
+      );
+    }
+    return resolution;
   }
 
   async function actorIsLowTrustReview(
@@ -3413,7 +3501,7 @@ export function issueRoutes(
       baseRevisionId: req.body.baseRevisionId ?? null,
       createdByAgentId: actor.agentId ?? null,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-      createdByRunId: actor.runId ?? null,
+      createdByRunId: await resolveVerifiedRunId(db, actor.runId),
       sourceTrust,
       lockedDocumentStrategy: req.actor.type === "agent" ? "create_new_document" : "conflict",
     });
@@ -3903,6 +3991,7 @@ export function issueRoutes(
       promotedAt,
     });
     const product = await db.transaction(async (tx) => {
+      const verifiedRunId = await resolveVerifiedRunId(tx, actor.runId);
       const markPromoted = { sourceTrust: promotionTrust, updatedAt: promotedAt };
       const updatedSource = await (async () => {
         if (req.body.sourceArtifactKind === "issue") {
@@ -3970,7 +4059,7 @@ export function issueRoutes(
             },
           },
           sourceTrust: promotionTrust,
-          createdByRunId: actor.runId ?? null,
+          createdByRunId: verifiedRunId,
         })
         .returning()
         .then((rows) => rows[0] ?? null);
@@ -5112,8 +5201,14 @@ export function issueRoutes(
       if (transition.decision && decisionId) {
         const decision = transition.decision;
         issue = await db.transaction(async (tx) => {
+          // existing.id (resolved UUID), not the raw path param `id` — `id`
+          // may be a human-readable identifier (svc.getById resolves both
+          // forms above), but svc.update queries eq(issues.id, ...) against
+          // a Postgres uuid column with NO identifier resolution, throwing
+          // an uncaught "invalid input syntax for type uuid" that error-
+          // handler.ts turns into a bare 500 (see comments-route note).
           const updated = await svc.update(
-            id,
+            existing.id,
             {
               ...updateFields,
               actorAgentId: actor.agentId ?? null,
@@ -5133,13 +5228,14 @@ export function issueRoutes(
             actorUserId: actor.actorType === "user" ? actor.actorId : null,
             outcome: decision.outcome,
             body: decision.body,
-            createdByRunId: actor.runId ?? null,
+            createdByRunId: await resolveVerifiedRunId(tx, actor.runId),
           });
 
           return updated;
         });
       } else {
-        issue = await svc.update(id, {
+        // existing.id (resolved UUID) — same identifier-vs-uuid fix as above.
+        issue = await svc.update(existing.id, {
           ...updateFields,
           actorAgentId: actor.agentId ?? null,
           actorUserId: actor.actorType === "user" ? actor.actorId : null,
@@ -5506,7 +5602,8 @@ export function issueRoutes(
     if (commentBody) {
       const commentReferenceSummaryBefore = updateReferenceSummaryAfter
         ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-      comment = await svc.addComment(id, commentBody, {
+      // issue.id (resolved UUID) — same identifier-vs-uuid fix as above.
+      comment = await svc.addComment(issue.id, commentBody, {
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,
@@ -6532,7 +6629,9 @@ export function issueRoutes(
         deletedByType: actor.actorType,
         deletedByAgentId: actor.actorType === "agent" ? actor.agentId : null,
         deletedByUserId: actor.actorType === "user" ? actor.actorId : null,
-        deletedByRunId: actor.runId,
+        // The comment's OWN persisted (verified) value, not the raw
+        // actor.runId — see services/issues.ts tombstoneComment.
+        deletedByRunId: deleted.deletedByRunId,
         deletedAt: deleted.deletedAt,
         deletedAnnotationCommentIds: annotationCleanup.deletedCommentIds,
         resolvedAnnotationThreadIds: annotationCleanup.resolvedThreadIds,
@@ -6715,7 +6814,17 @@ export function issueRoutes(
             actor,
           })
         : null;
-      const reopenedIssue = await svc.update(id, { status: "todo" });
+      // Use currentIssue.id (resolved UUID), not the raw path param `id` —
+      // `id` may be a human-readable identifier (svc.getById resolves both
+      // forms), but svc.update queries `eq(issues.id, ...)` against a
+      // Postgres uuid column directly with NO identifier resolution. Passing
+      // an identifier string there throws "invalid input syntax for type
+      // uuid" from the pg driver — an uncaught Error, not an HttpError/
+      // ZodError, so error-handler.ts's catch-all turns it into a bare
+      // HTTP 500 with no diagnostic detail (2026-07-11 live incident: the
+      // openclaw agent's comment POST 500'd twice relaying an operator
+      // instruction).
+      const reopenedIssue = await svc.update(currentIssue.id, { status: "todo" });
       if (!reopenedIssue) {
         res.status(404).json({ error: "Issue not found" });
         return;
@@ -6840,18 +6949,25 @@ export function issueRoutes(
       let txResult: { comment: Awaited<ReturnType<typeof svc.addComment>>; issue: NonNullable<Awaited<ReturnType<typeof svc.update>>> };
       try {
         txResult = await db.transaction(async (tx) => {
+          // Verify ONCE per transaction — svc.addComment's own internal
+          // verification (below) and the issueExecutionDecisions insert
+          // both need this, so resolve it here rather than re-querying twice
+          // inside the same tx.
+          const verifiedRunId = await resolveVerifiedRunId(tx, actor.runId);
+          // currentIssue.id (resolved UUID) — see the identifier-vs-uuid note
+          // on the reopenedIssue call above; same fix applies here.
           const insertedComment = await svc.addComment(
-            id,
+            currentIssue.id,
             req.body.body,
             {
               agentId: actor.agentId ?? undefined,
               userId: actor.actorType === "user" ? actor.actorId : undefined,
-              runId: actor.runId,
+              runId: verifiedRunId,
             },
             commentOptions,
             tx,
           );
-          const updated = await svc.update(id, updatePatch, tx);
+          const updated = await svc.update(currentIssue.id, updatePatch, tx);
           // Throw (not return null) so drizzle rolls back the inserted comment when the issue
           // has been concurrently deleted between the initial fetch and the in-transaction update.
           if (!updated) throw new AutoApprovalIssueMissingError();
@@ -6867,7 +6983,7 @@ export function issueRoutes(
               actorUserId: actor.actorType === "user" ? actor.actorId : null,
               outcome: transition.decision.outcome,
               body: transition.decision.body,
-              createdByRunId: actor.runId ?? null,
+              createdByRunId: verifiedRunId,
             });
           }
 
@@ -6911,7 +7027,9 @@ export function issueRoutes(
         requestedByActorId: actor.actorId,
       });
     } else {
-      comment = await svc.addComment(id, req.body.body, {
+      // currentIssue.id (resolved UUID), not the raw path param — same
+      // identifier-vs-uuid fix as above.
+      comment = await svc.addComment(currentIssue.id, req.body.body, {
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,

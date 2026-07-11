@@ -265,7 +265,16 @@ describe("issue workspace command authorization", () => {
       agentId: "agent-1",
       companyId: "company-1",
       source: "agent_key",
-      runId: "run-1",
+      // A well-formed uuid, not the "run-1" placeholder used elsewhere in
+      // this suite: the POST /companies/:companyId/issues route runs the
+      // low-trust control-plane gate (resolveAgentTrustForIssue) BEFORE the
+      // host-workspace-command check this test targets, and that gate now
+      // fails closed UNCONDITIONALLY on a present-but-malformed run id
+      // (codex ceiling round) — a bare "run-1" would 400 there before ever
+      // reaching the RCE-prevention check under test. mockDbSelectWhere
+      // above resolves any query to a row matching this actor, so a
+      // well-formed uuid clears the gate exactly like a real run would.
+      runId: "11111111-1111-4111-8111-111111111111",
     });
 
     const res = await request(app)

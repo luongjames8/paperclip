@@ -94,6 +94,12 @@ const manifest: PaperclipPluginManifestV1 = {
             properties: {
               titleRegex: { type: "string", title: "Title Regex", description: "Regex matched against the issue title." },
               channelId: { type: "string", title: "Channel ID", description: "Discord channel ID to post the confirmation card into." },
+              carouselBatch: {
+                type: "boolean",
+                title: "Carousel Batch",
+                description: "Marks this rule as gating a carousel-batch publish decision, so an interaction matching neither the structured payload contract nor the legacy section-heading shape still degrades to an images-included render instead of falling through to the generic image-stripping path. Default false.",
+                default: false,
+              },
             },
           },
         },

@@ -248,8 +248,49 @@ describeEmbeddedPostgres("resolveActorSourceTrustForIssue", () => {
       preset: LOW_TRUST_REVIEW_PRESET,
       disposition: "quarantined",
       sourceIssueId: issue!.id,
-      sourceRunId: run!.id,
+      // Another agent's run id is UNVERIFIED for this actor — never
+      // attributed (sourceRunId carries only verified-at-derivation ids).
+      sourceRunId: null,
       sourceAgentId: actorAgent.id,
+    });
+  });
+
+  it("scrubs a malformed run id to null in quarantined metadata — never stores a contract-invalid sourceRunId", async () => {
+    const company = await createCompany();
+    const agent = await createAgent(company.id);
+    const [issue] = await db
+      .insert(issues)
+      .values({
+        companyId: company.id,
+        title: "Standard issue",
+        status: "in_progress",
+        priority: "high",
+        assigneeAgentId: agent.id,
+      })
+      .returning();
+
+    const sourceTrust = await resolveActorSourceTrustForIssue({
+      db,
+      issue: {
+        id: issue!.id,
+        companyId: company.id,
+        projectId: null,
+        executionPolicy: null,
+      },
+      actor: {
+        actorType: "agent",
+        actorId: agent.id,
+        agentId: agent.id,
+        runId: "not-a-uuid-at-all",
+      },
+    });
+
+    // sourceTrustMetadataSchema pins sourceRunId to a UUID when present —
+    // the raw non-UUID header used to leak straight into the metadata here.
+    // null is the only contract-valid value for an unverifiable header.
+    expect(sourceTrust).toMatchObject({
+      disposition: "quarantined",
+      sourceRunId: null,
     });
   });
 

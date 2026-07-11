@@ -723,6 +723,17 @@ export const requestConfirmationPayloadSchema = z.object({
   allowDeclineReason: z.boolean().optional().default(true),
   declineReasonPlaceholder: z.string().trim().min(1).max(240).nullable().optional(),
   detailsMarkdown: z.string().max(20000).nullable().optional(),
+  // Structured, machine-consumed render payloads (the discord-fleet
+  // confirmation sweep's carouselBatch contract) ride ALONGSIDE the prose
+  // detailsMarkdown. The server persists them opaquely — consumers
+  // shape-guard at read time (parseCarouselBatchPayload) and degrade
+  // visibly on contract misses — but the key MUST be enumerated here:
+  // zod object parsing strips unknown keys, and this schema's parse
+  // result REPLACES req.body at the route boundary
+  // (server/src/middleware/validate.ts), so an unlisted key silently
+  // never persists (codex P1: the structured contract was dead for every
+  // production-created interaction).
+  carouselBatch: z.record(z.unknown()).nullable().optional(),
   supersedeOnUserComment: z.boolean().optional(),
   target: requestConfirmationTargetSchema.nullable().optional(),
 });

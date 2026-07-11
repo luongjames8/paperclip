@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { truncate } from "../src/render/plain.js";
-import { enforceEmbedLimits, buildApprovalActionRow, APPROVAL_BUTTON_PREFIX, buildApprovalEmbed } from "../src/render/embeds.js";
+import { enforceEmbedLimits, buildApprovalActionRow, APPROVAL_BUTTON_PREFIX, buildApprovalEmbed, buildCarouselAnchorEmbed } from "../src/render/embeds.js";
 import { ButtonStyle, ComponentType } from "discord.js";
 
 describe("render helpers", () => {
@@ -160,5 +160,58 @@ describe("buildApprovalEmbed — description", () => {
   it("does NOT promise a thread below (orphan-thread design was retired in 72bdca5f)", () => {
     expect(embed.description).not.toMatch(/thread below/i);
     expect(embed.description).not.toMatch(/Content batch/i);
+  });
+});
+
+// ─── buildCarouselAnchorEmbed — status vocabulary shared by sweep + button
+// handler (kills "stacked generations", 2026-07-11 live incident) ───────────
+
+describe("buildCarouselAnchorEmbed", () => {
+  const issueUrl = "https://paperclip.example.com/tc1/issues/ISS-1";
+
+  it("awaiting: 🟡 status line + issue link, blue color", () => {
+    const embed = buildCarouselAnchorEmbed({ issueUrl, status: "awaiting" });
+    expect(embed.description).toContain("🟡 awaiting decision");
+    expect(embed.description).toContain(`[View full batch in Paperclip](${issueUrl})`);
+    expect(embed.color).toBe(0x5865f2);
+  });
+
+  it("accepted: ✅ status line + detail, green color", () => {
+    const embed = buildCarouselAnchorEmbed({ issueUrl, status: "accepted", detail: "Accepted by alice at 2026-07-11T00:00:00.000Z" });
+    expect(embed.description).toContain("✅ accepted");
+    expect(embed.description).toContain("Accepted by alice");
+    expect(embed.color).toBe(0x57f287);
+  });
+
+  it("rejected: ❌ status line + reason detail, red color", () => {
+    const embed = buildCarouselAnchorEmbed({ issueUrl, status: "rejected", detail: "Rejected by bob — wrong week" });
+    expect(embed.description).toContain("❌ rejected");
+    expect(embed.description).toContain("wrong week");
+    expect(embed.color).toBe(0xed4245);
+  });
+
+  it("superseded: ⏰ status line, grey color, no detail required", () => {
+    const embed = buildCarouselAnchorEmbed({ issueUrl, status: "superseded" });
+    expect(embed.description).toContain("⏰ superseded");
+    expect(embed.color).toBe(0x99aab5);
+  });
+
+  it("expired: ⏰ status line, distinct wording from superseded", () => {
+    const embed = buildCarouselAnchorEmbed({ issueUrl, status: "expired" });
+    expect(embed.description).toContain("⏰ expired");
+    expect(embed.description).not.toContain("superseded");
+  });
+
+  it("title is a function of status — the operator can tell decided/expired from pending without opening the card", () => {
+    expect(buildCarouselAnchorEmbed({ issueUrl, status: "awaiting" }).title).toBe("Decision needed");
+    expect(buildCarouselAnchorEmbed({ issueUrl, status: "accepted" }).title).toBe("Decision: accepted");
+    expect(buildCarouselAnchorEmbed({ issueUrl, status: "rejected" }).title).toBe("Decision: rejected");
+    expect(buildCarouselAnchorEmbed({ issueUrl, status: "superseded" }).title).toBe("Superseded");
+    expect(buildCarouselAnchorEmbed({ issueUrl, status: "expired" }).title).toBe("Expired — no decision in time");
+  });
+
+  it("detail is truncated/sanitized through safe() (long or secret-bearing detail never blows embed limits)", () => {
+    const embed = buildCarouselAnchorEmbed({ issueUrl, status: "rejected", detail: "x".repeat(5000) });
+    expect(embed.description!.length).toBeLessThan(6000);
   });
 });

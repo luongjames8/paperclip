@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns, projects } from "@paperclipai/db";
 import {
+  isUuidLike,
   LOW_TRUST_REVIEW_PRESET,
   type SourceTrustMetadata,
 } from "@paperclipai/shared";
@@ -120,7 +121,17 @@ export async function resolveActorSourceTrustForIssue(input: {
           .where(and(eq(projects.id, input.issue.projectId), eq(projects.companyId, input.issue.companyId)))
           .then((rows) => rows[0] ?? null)
       : Promise.resolve(null),
-    input.actor.runId
+    // isUuidLike guard: input.actor.runId is the caller-supplied
+    // X-Paperclip-Run-Id header, unvalidated. heartbeatRuns.id is a Postgres
+    // uuid column — eq() against a malformed non-uuid string throws
+    // uncaught (same live-incident class as resolveAgentTrustForIssue in
+    // routes/issues.ts). Unlike that function, no new fail-closed branch is
+    // needed here: this function ALREADY treats "run couldn't be resolved to
+    // a matching row" as fail-closed-to-quarantined below, so skipping the
+    // query for a malformed id and leaving `run` null lands in that same
+    // existing branch — a malformed header can only ever make output MORE
+    // quarantined here, never less, so there is no bypass to guard against.
+    input.actor.runId && isUuidLike(input.actor.runId)
       ? input.db
           .select({
             companyId: heartbeatRuns.companyId,
@@ -134,10 +145,17 @@ export async function resolveActorSourceTrustForIssue(input: {
   ]);
 
   if (input.actor.runId && (!run || run.agentId !== input.actor.agentId)) {
-    // Fail closed: an unknown or mismatched run cannot prove higher trust, so tag the write as quarantined.
+    // Fail closed: an unknown, malformed, or mismatched run cannot prove higher trust, so tag the write as quarantined.
+    // sourceRunId carries ONLY verified-at-derivation run ids
+    // (sourceTrustMetadataSchema pins it to a UUID): in this branch the
+    // header value is by construction unverified — malformed, unknown, or
+    // another agent's run — so it is scrubbed to null rather than stored as
+    // contract-invalid (or mis-attributed) metadata. The verified path below
+    // never lands here: `run` is only non-null after the isUuidLike +
+    // company-scoped lookup, and the owning-agent match just passed.
     return buildLowTrustSourceTrust({
       issueId: input.issue.id,
-      runId: input.actor.runId,
+      runId: null,
       agentId: input.actor.agentId,
     });
   }
