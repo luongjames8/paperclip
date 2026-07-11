@@ -3,6 +3,7 @@ import { MAX_ISSUE_REQUEST_DEPTH } from "../index.js";
 import {
   addIssueCommentSchema,
   createIssueSchema,
+  createIssueThreadInteractionSchema,
   issueBlockedInboxAttentionSchema,
   resolveIssueRecoveryActionSchema,
   respondIssueThreadInteractionSchema,
@@ -13,6 +14,38 @@ import {
 import { createAgentSchema } from "./agent.js";
 
 describe("issue validators", () => {
+  // codex P1 (PR #28): validate() REPLACES req.body with the zod parse
+  // result, and zod object parsing STRIPS unknown keys — so any payload
+  // field not enumerated in requestConfirmationPayloadSchema silently never
+  // persists for production-created interactions. This pins carouselBatch
+  // surviving the parse (the structured render contract was dead without
+  // it) while unknown keys still get stripped (we did not passthrough
+  // everything).
+  it("request_confirmation payload preserves carouselBatch through schema parse (unknown keys still stripped)", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_confirmation",
+      idempotencyKey: "carousel-batch:2026-07-13",
+      payload: {
+        version: 1,
+        prompt: "Approve & publish?",
+        detailsMarkdown: "prose artifact",
+        carouselBatch: {
+          version: 1,
+          weekOf: "2026-07-13",
+          cadence: { days: ["Sat", "Sun"], held: 0, strays: 0 },
+          items: [{ slug: "akihabara", day: "Sat", caption: "Electric town.", slides: ["https://r2.example.com/a1.jpg"] }],
+        },
+        someUnknownKey: "should be stripped",
+      },
+    });
+
+    expect(parsed.kind).toBe("request_confirmation");
+    const payload = parsed.payload as Record<string, unknown>;
+    expect(payload.carouselBatch).toMatchObject({ version: 1, weekOf: "2026-07-13" });
+    expect((payload.carouselBatch as Record<string, unknown>).items).toHaveLength(1);
+    expect("someUnknownKey" in payload).toBe(false);
+  });
+
   it("passes real line breaks through unchanged", () => {
     const parsed = createIssueSchema.parse({
       title: "Follow up PR",
