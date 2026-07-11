@@ -215,6 +215,36 @@ async function postCarouselBatch(
         interactionId: interaction.id,
         source,
       });
+
+      // SUPERSEDE THE STALE ANCHOR (codex P2): a hash change here means a
+      // PREVIOUSLY rendered (non-empty) generation just got revised down to
+      // zero items. Without this, the old anchor is left showing "🟡
+      // awaiting decision" with live accept/reject buttons for a generation
+      // that no longer exists — same "stacked generations" failure class as
+      // the hashChanged supersede block below, just hitting the early return
+      // before that block ever runs. Guarded by lastRenderedStatus (edits at
+      // most once) and tolerates edit failure (log + continue), exactly like
+      // reconcileResolvedCarouselAnchors.
+      const previousAnchorId = existing ? resolveAnchorMessageId(existing) : undefined;
+      let lastRenderedStatus = existing?.lastRenderedStatus;
+      if (existing && previousAnchorId && existing.lastRenderedStatus !== "superseded") {
+        const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
+        try {
+          await editMessageInChannel(client, channelId, previousAnchorId, {
+            embeds: [buildCarouselAnchorEmbed({ issueUrl, status: "superseded" })],
+            components: [],
+          });
+          lastRenderedStatus = "superseded";
+        } catch (err) {
+          ctx.logger.warn("confirmation-sweep: best-effort disable of superseded anchor failed (zero-item revision) — proceeding", {
+            companyId: company.companyId,
+            interactionId: interaction.id,
+            anchorMessageId: previousAnchorId,
+            error: String(err),
+          });
+        }
+      }
+
       state[interaction.id] = {
         postedAt: new Date(now).toISOString(),
         sectionsPosted: 0,
@@ -223,6 +253,8 @@ async function postCarouselBatch(
         headerPosted: false,
         trailerPosted: false,
         lastSeenUpdatedAt: interaction.updatedAt,
+        ...(previousAnchorId ? { anchorMessageId: previousAnchorId } : {}),
+        ...(lastRenderedStatus ? { lastRenderedStatus } : {}),
       };
     }
     return;
