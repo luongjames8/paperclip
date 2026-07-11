@@ -1205,6 +1205,30 @@ describeEmbeddedPostgres("malformed X-Paperclip-Run-Id fails closed on trust res
     expect(res.body.error).toMatch(/not-a-uuid/);
   });
 
+  // codex round 4: a WELL-FORMED but STALE/nonexistent run id (never inserted
+  // into heartbeat_runs) passes isUuidLike and must fail closed identically to
+  // a malformed one — a fabricated-but-well-formed run id must not be able to
+  // bypass the run-carried low-trust boundary any more than garbage can.
+  it("a WELL-FORMED but STALE (nonexistent) run id header on the low-trust control-plane gate ALSO responds 400, never a silent standard-trust resolution", async () => {
+    const runId = randomUUID();
+    const fixture = await seedRunOnlyLowTrustFixture(runId);
+    const staleRunId = randomUUID(); // well-formed uuid, never inserted into heartbeat_runs
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: staleRunId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${fixture.company.id}/issues`)
+      .send({ title: "New issue via stale run id" });
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error).toMatch(/X-Paperclip-Run-Id/);
+    expect(res.body.error).toMatch(new RegExp(staleRunId));
+  });
+
   it("the SAME actor with the real run id attached resolves low-trust and is NOT bypassed", async () => {
     const runId = randomUUID();
     const fixture = await seedRunOnlyLowTrustFixture(runId);
@@ -1232,5 +1256,125 @@ describeEmbeddedPostgres("malformed X-Paperclip-Run-Id fails closed on trust res
 
     const res = await request(app).get(`/api/issues/${fixture.issue.id}/heartbeat-context`);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
+  });
+});
+
+// ─── Malformed/stale X-Paperclip-Run-Id no longer 500s the comment route
+// (codex round 4, P1: server/src/routes/issues.ts addComment ->
+// issue_comments.created_by_run_id is a foreign key into heartbeat_runs; the
+// operator's original live 500 on 2026-07-11) ───────────────────────────────
+//
+// Neither a malformed (non-uuid) header NOR a well-formed-but-stale/
+// nonexistent uuid header may crash the comment POST — both must persist a
+// null created_by_run_id instead. Uses an ORDINARY agent/issue with zero
+// trust-related config anywhere (not the run-only-low-trust fixture above)
+// so this exercises the plain telemetry path, not trust resolution.
+describeEmbeddedPostgres("malformed/stale X-Paperclip-Run-Id no longer 500s the comment route", () => {
+  let db!: Db;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-run-id-comment-route-");
+    db = createDb(tempDb.connectionString);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+    await deleteHeartbeatRunsAfterActivityLogDrains(db);
+    await db.delete(issueComments);
+    await db.delete(issues);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedOrdinaryFixture() {
+    const [company] = await db.insert(companies).values({
+      name: "Ordinary comment-route company",
+      issuePrefix: `OR${randomUUID().replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+    }).returning();
+    const [agent] = await db.insert(agents).values({
+      companyId: company!.id,
+      name: "Ordinary Agent",
+      role: "engineer",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    }).returning();
+    // status: "todo" (NOT "in_progress") — assertAgentIssueMutationAllowed
+    // requires a valid checkout runId matching issue.checkoutRunId only when
+    // status === "in_progress" (a separate, pre-existing gate unrelated to
+    // run-id verification). "todo" short-circuits that gate so these tests
+    // exercise ONLY the run-id-verification path the comment route's
+    // addComment call goes through.
+    const [issue] = await db.insert(issues).values({
+      companyId: company!.id,
+      title: "Ordinary issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agent!.id,
+    }).returning();
+    return { company: company!, agent: agent!, issue: issue! };
+  }
+
+  it("malformed X-Paperclip-Run-Id header -> comment POST succeeds (201) with a null created_by_run_id, not a 500", async () => {
+    const fixture = await seedOrdinaryFixture();
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: "not-a-uuid",
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/issues/${fixture.issue.id}/comments`)
+      .send({ body: "comment via malformed run id header" });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.createdByRunId).toBeNull();
+  });
+
+  it("well-formed but STALE (nonexistent) X-Paperclip-Run-Id header -> comment POST succeeds (201) with a null created_by_run_id, not a 500", async () => {
+    const fixture = await seedOrdinaryFixture();
+    const staleRunId = randomUUID(); // well-formed uuid, never inserted into heartbeat_runs
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: staleRunId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/issues/${fixture.issue.id}/comments`)
+      .send({ body: "comment via stale run id header" });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.createdByRunId).toBeNull();
+  });
+
+  it("a REAL, existing run id header -> comment POST persists the actual created_by_run_id (verification doesn't drop a valid run)", async () => {
+    const fixture = await seedOrdinaryFixture();
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId: fixture.company.id,
+      agentId: fixture.agent.id,
+      status: "running",
+    }).returning();
+    const app = createApp(db, {
+      type: "agent",
+      agentId: fixture.agent.id,
+      companyId: fixture.company.id,
+      runId: run!.id,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/issues/${fixture.issue.id}/comments`)
+      .send({ body: "comment via real run id header" });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.createdByRunId).toBe(run!.id);
   });
 });

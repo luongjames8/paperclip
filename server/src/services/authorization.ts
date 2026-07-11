@@ -565,22 +565,35 @@ export function authorizationService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
-  // A distinct sentinel (not null) for "the caller supplied a run id but it
-  // isn't a valid uuid" — this is a DIFFERENT outcome from "no run supplied"
-  // (see resolveActorTrust below). heartbeatRuns.id is a Postgres uuid
-  // column; the same live-incident class as resolveAgentTrustForIssue in
-  // routes/issues.ts (2026-07-11 malformed X-Paperclip-Run-Id header) applies
-  // here — eq() against a malformed string throws "invalid input syntax for
-  // type uuid", uncaught, turning ANY agent request through access.decide()
-  // (used by virtually every authorization check in the server) into a bare
-  // 500.
+  // Distinct sentinels (not null) for the two ways a supplied run id can
+  // fail to resolve — both are DIFFERENT outcomes from "no run supplied"
+  // (see resolveActorTrust below):
+  //   - MALFORMED_RUN_ID: the header isn't uuid-shaped at all. heartbeatRuns.id
+  //     is a Postgres uuid column; the same live-incident class as
+  //     resolveAgentTrustForIssue in routes/issues.ts (2026-07-11 malformed
+  //     X-Paperclip-Run-Id header) applies here — eq() against a malformed
+  //     string throws "invalid input syntax for type uuid", uncaught, turning
+  //     ANY agent request through access.decide() (used by virtually every
+  //     authorization check in the server) into a bare 500.
+  //   - UNKNOWN_RUN_ID: the header IS uuid-shaped, but no matching
+  //     heartbeat_runs row exists for this company+agent (stale/pruned/
+  //     fabricated). This passes isUuidLike and would otherwise silently
+  //     resolve the same as "no run" — the second live-incident class this
+  //     fix closes: a fabricated-but-well-formed run id must not be able to
+  //     hide a low-trust boundary any more than a malformed one can.
   const MALFORMED_RUN_ID = Symbol("malformed_run_id");
+  const UNKNOWN_RUN_ID = Symbol("unknown_run_id");
 
   async function loadRunPolicy(
     runId: string | null | undefined,
     companyId: string,
     agentId: string,
-  ): Promise<{ companyId: string; executionPolicy: Record<string, unknown> } | null | typeof MALFORMED_RUN_ID> {
+  ): Promise<
+    | { companyId: string; executionPolicy: Record<string, unknown> }
+    | null
+    | typeof MALFORMED_RUN_ID
+    | typeof UNKNOWN_RUN_ID
+  > {
     if (!runId) return null;
     if (!isUuidLike(runId)) return MALFORMED_RUN_ID;
     const row = await db
@@ -593,7 +606,7 @@ export function authorizationService(db: Db) {
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
-    if (!row || row.companyId !== companyId || row.agentId !== agentId) return null;
+    if (!row || row.companyId !== companyId || row.agentId !== agentId) return UNKNOWN_RUN_ID;
     const context = isPlainRecord(row.contextSnapshot) ? row.contextSnapshot : null;
     return isPlainRecord(context?.executionPolicy)
       ? { companyId: row.companyId, executionPolicy: context.executionPolicy }
@@ -638,7 +651,8 @@ export function authorizationService(db: Db) {
   }): Promise<TrustPresetResolution> {
     const { issue, project } = await loadResourceContext(input.resource);
     const run = await loadRunPolicy(input.actor.runId, input.companyId, input.actorAgent.id);
-    const resolvedRun = run === MALFORMED_RUN_ID ? null : run;
+    const runUnresolved = run === MALFORMED_RUN_ID || run === UNKNOWN_RUN_ID;
+    const resolvedRun = runUnresolved ? null : run;
     const resolution = resolveCoreTrustPreset({
       companyId: input.companyId,
       agent: input.actorAgent,
@@ -646,17 +660,20 @@ export function authorizationService(db: Db) {
       issue,
       run: resolvedRun,
     });
-    // Fail closed ONLY where a malformed run id can actually change the
+    // Fail closed ONLY where an unresolvable run id can actually change the
     // outcome — same judgment as resolveAgentTrustForIssue in
     // routes/issues.ts (see that function's comment for the full rationale).
-    // A malformed run id must not 400/deny every ordinary agent request that
-    // happens to carry a stray non-uuid run header (the ORIGINAL 2026-07-11
-    // incident this class of fix exists for), so this only denies when BOTH:
+    // Applies identically whether the header is MALFORMED (not uuid-shaped)
+    // or UNKNOWN (well-formed but no matching heartbeat_runs row for this
+    // company+agent) — neither can be trusted to carry a low-trust boundary,
+    // and both must not 400/deny every ordinary agent request that happens
+    // to carry a stray/stale run header (the ORIGINAL 2026-07-11 incident
+    // this class of fix exists for), so this only denies when BOTH:
     // (1) agent/project/issue alone already resolve `standard`, and (2) this
     // agent/project/issue shows SOME trust-related config at all (otherwise
     // there is nothing here for the run to plausibly have been hiding).
     if (
-      run === MALFORMED_RUN_ID &&
+      runUnresolved &&
       resolution.kind === "standard" &&
       (hasAnyTrustRelatedKey(input.actorAgent.permissions) ||
         hasAnyTrustRelatedKey(project?.executionWorkspacePolicy) ||
@@ -666,7 +683,9 @@ export function authorizationService(db: Db) {
         kind: "denied",
         reason: "invalid_run_id",
         source: "run",
-        detail: `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.actor.runId}"`,
+        detail: run === MALFORMED_RUN_ID
+          ? `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.actor.runId}"`
+          : `X-Paperclip-Run-Id header does not match a known run for this agent: "${input.actor.runId}"`,
         sourcePresets: resolution.sourcePresets,
       };
     }

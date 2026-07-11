@@ -137,6 +137,7 @@ import {
   resolveCoreTrustPreset,
   type TrustPresetResolution,
 } from "../services/trust-preset-resolver.js";
+import { resolveVerifiedRunId } from "../services/run-id-trust.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -1206,6 +1207,14 @@ export function issueRoutes(
         : Promise.resolve(null),
     ]);
     if (!agent || agent.companyId !== companyId) return null;
+    // A well-formed uuid that isn't malformed but ALSO doesn't resolve to a
+    // real run (wrong company, wrong agent, or simply doesn't exist —
+    // pruned/fabricated) is the SAME class of "the run cannot be trusted to
+    // carry a low-trust boundary" as a malformed header. Distinguish it from
+    // "no run supplied at all" (input.runId falsy) so the fail-closed check
+    // below applies identically to both malformed and stale-valid-shaped ids.
+    const runIdSupplied = !malformedRunId && isUuidLike(input.runId);
+    const wellFormedButUnknownRunId = runIdSupplied && (!run || run.agentId !== input.agentId);
     const runContext = run?.agentId === agent.id && run.contextSnapshot && typeof run.contextSnapshot === "object"
       ? run.contextSnapshot as Record<string, unknown>
       : null;
@@ -1233,9 +1242,15 @@ export function issueRoutes(
       hasTrustRelatedConfig ||
       hasAnyTrustRelatedKey(agent.permissions) ||
       hasAnyTrustRelatedKey(resolvedProject?.executionWorkspacePolicy);
-    if (malformedRunId && resolution.kind === "standard" && isPlausibleLowTrustCandidate) {
+    if (
+      (malformedRunId || wellFormedButUnknownRunId) &&
+      resolution.kind === "standard" &&
+      isPlausibleLowTrustCandidate
+    ) {
       throw badRequest(
-        `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.runId}"`,
+        malformedRunId
+          ? `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.runId}"`
+          : `X-Paperclip-Run-Id header does not match a known run for this agent: "${input.runId}"`,
       );
     }
     return resolution;
@@ -3506,7 +3521,7 @@ export function issueRoutes(
       baseRevisionId: req.body.baseRevisionId ?? null,
       createdByAgentId: actor.agentId ?? null,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-      createdByRunId: actor.runId ?? null,
+      createdByRunId: await resolveVerifiedRunId(db, actor.runId),
       sourceTrust,
       lockedDocumentStrategy: req.actor.type === "agent" ? "create_new_document" : "conflict",
     });
@@ -3996,6 +4011,7 @@ export function issueRoutes(
       promotedAt,
     });
     const product = await db.transaction(async (tx) => {
+      const verifiedRunId = await resolveVerifiedRunId(tx, actor.runId);
       const markPromoted = { sourceTrust: promotionTrust, updatedAt: promotedAt };
       const updatedSource = await (async () => {
         if (req.body.sourceArtifactKind === "issue") {
@@ -4063,7 +4079,7 @@ export function issueRoutes(
             },
           },
           sourceTrust: promotionTrust,
-          createdByRunId: actor.runId ?? null,
+          createdByRunId: verifiedRunId,
         })
         .returning()
         .then((rows) => rows[0] ?? null);
@@ -5232,7 +5248,7 @@ export function issueRoutes(
             actorUserId: actor.actorType === "user" ? actor.actorId : null,
             outcome: decision.outcome,
             body: decision.body,
-            createdByRunId: actor.runId ?? null,
+            createdByRunId: await resolveVerifiedRunId(tx, actor.runId),
           });
 
           return updated;
@@ -6633,7 +6649,9 @@ export function issueRoutes(
         deletedByType: actor.actorType,
         deletedByAgentId: actor.actorType === "agent" ? actor.agentId : null,
         deletedByUserId: actor.actorType === "user" ? actor.actorId : null,
-        deletedByRunId: actor.runId,
+        // The comment's OWN persisted (verified) value, not the raw
+        // actor.runId — see services/issues.ts tombstoneComment.
+        deletedByRunId: deleted.deletedByRunId,
         deletedAt: deleted.deletedAt,
         deletedAnnotationCommentIds: annotationCleanup.deletedCommentIds,
         resolvedAnnotationThreadIds: annotationCleanup.resolvedThreadIds,
@@ -6951,6 +6969,11 @@ export function issueRoutes(
       let txResult: { comment: Awaited<ReturnType<typeof svc.addComment>>; issue: NonNullable<Awaited<ReturnType<typeof svc.update>>> };
       try {
         txResult = await db.transaction(async (tx) => {
+          // Verify ONCE per transaction — svc.addComment's own internal
+          // verification (below) and the issueExecutionDecisions insert
+          // both need this, so resolve it here rather than re-querying twice
+          // inside the same tx.
+          const verifiedRunId = await resolveVerifiedRunId(tx, actor.runId);
           // currentIssue.id (resolved UUID) — see the identifier-vs-uuid note
           // on the reopenedIssue call above; same fix applies here.
           const insertedComment = await svc.addComment(
@@ -6959,7 +6982,7 @@ export function issueRoutes(
             {
               agentId: actor.agentId ?? undefined,
               userId: actor.actorType === "user" ? actor.actorId : undefined,
-              runId: actor.runId,
+              runId: verifiedRunId,
             },
             commentOptions,
             tx,
@@ -6980,7 +7003,7 @@ export function issueRoutes(
               actorUserId: actor.actorType === "user" ? actor.actorId : null,
               outcome: transition.decision.outcome,
               body: transition.decision.body,
-              createdByRunId: actor.runId ?? null,
+              createdByRunId: verifiedRunId,
             });
           }
 

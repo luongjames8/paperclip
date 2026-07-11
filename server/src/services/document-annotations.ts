@@ -21,6 +21,7 @@ import {
   UpdateDocumentAnnotationThread,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { resolveVerifiedRunId } from "./run-id-trust.js";
 
 type ActorInput = {
   actorType: "agent" | "user";
@@ -241,6 +242,7 @@ export function documentAnnotationService(db: Db) {
 
       const now = new Date();
       const linkedIssueComment = await assertLinkedIssueComment(issueId, input.issueCommentId, tx);
+      const verifiedRunId = await resolveVerifiedRunId(tx, actor.runId);
       const [thread] = await tx
         .insert(documentAnnotationThreads)
         .values({
@@ -281,7 +283,7 @@ export function documentAnnotationService(db: Db) {
           authorType: actor.actorType,
           authorAgentId: actor.agentId ?? null,
           authorUserId: actor.userId ?? null,
-          createdByRunId: actor.runId ?? null,
+          createdByRunId: verifiedRunId,
           issueCommentId: linkedIssueComment?.id ?? null,
           createdAt: now,
           updatedAt: now,
@@ -302,6 +304,7 @@ export function documentAnnotationService(db: Db) {
       if (!thread) throw notFound("Annotation thread not found");
       const now = new Date();
       const linkedIssueComment = await assertLinkedIssueComment(issueId, input.issueCommentId, tx);
+      const verifiedRunId = await resolveVerifiedRunId(tx, actor.runId);
       const [comment] = await tx
         .insert(documentAnnotationComments)
         .values({
@@ -313,7 +316,7 @@ export function documentAnnotationService(db: Db) {
           authorType: actor.actorType,
           authorAgentId: actor.agentId ?? null,
           authorUserId: actor.userId ?? null,
-          createdByRunId: actor.runId ?? null,
+          createdByRunId: verifiedRunId,
           issueCommentId: linkedIssueComment?.id ?? null,
           createdAt: now,
           updatedAt: now,

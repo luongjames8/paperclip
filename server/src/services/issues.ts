@@ -72,6 +72,7 @@ import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy } from ".
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
+import { resolveVerifiedRunId } from "./run-id-trust.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getRunLogStore } from "./run-log-store.js";
 import { getDefaultCompanyGoal } from "./goals.js";
@@ -6089,6 +6090,7 @@ export function issueService(db: Db) {
 
       return db.transaction(async (tx) => {
         const now = new Date();
+        const verifiedRunId = await resolveVerifiedRunId(tx, actor.runId);
         const [comment] = await tx
           .update(issueComments)
           .set({
@@ -6099,7 +6101,7 @@ export function issueService(db: Db) {
             deletedByType: actor.actorType,
             deletedByAgentId: actor.actorType === "agent" ? actor.agentId ?? null : null,
             deletedByUserId: actor.actorType === "user" ? actor.userId ?? null : null,
-            deletedByRunId: actor.runId ?? null,
+            deletedByRunId: verifiedRunId,
             updatedAt: now,
           })
           .where(and(eq(issueComments.id, commentId), isNull(issueComments.deletedAt)))
@@ -6151,6 +6153,7 @@ export function issueService(db: Db) {
       const presentation = issueCommentPresentationSchema.nullable().parse(options?.presentation ?? null);
       const metadata = issueCommentMetadataSchema.nullable().parse(options?.metadata ?? null);
       const createdAt = options?.createdAt ? new Date(options.createdAt) : null;
+      const verifiedRunId = await resolveVerifiedRunId(dbOrTx, actor.runId);
       const [comment] = await dbOrTx
         .insert(issueComments)
         .values({
@@ -6159,7 +6162,7 @@ export function issueService(db: Db) {
           authorAgentId: actor.agentId ?? null,
           authorUserId: actor.userId ?? null,
           authorType,
-          createdByRunId: actor.runId ?? null,
+          createdByRunId: verifiedRunId,
           body: redactedBody,
           presentation,
           metadata,

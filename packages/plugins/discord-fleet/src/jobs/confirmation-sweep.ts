@@ -8,6 +8,7 @@ import {
   buildCarouselConfirmationActionRow,
   buildCarouselAnchorEmbed,
   CAROUSEL_HASH_TOKEN_LEN,
+  type CarouselAnchorStatus,
 } from "../render/embeds.js";
 import { chunkEmbedsForDiscord } from "../render/issue-docs.js";
 import {
@@ -63,16 +64,21 @@ export interface CarouselBatchSweepRecord {
   // before this migration (falls back to trailerMessageId — see
   // resolveAnchorMessageId).
   anchorMessageId?: string;
-  // Last status rendered onto the anchor by SWEEP-driven edits only
-  // ("awaiting" | "superseded" | "expired"). Terminal states
-  // ("accepted"/"rejected") are rendered directly by the button handler on
-  // ITS OWN interaction.message reference and never routed back through this
-  // record. "expired" IS routed through this record — unlike
-  // accepted/rejected, there is no button click to render it, so the
-  // resolved-reconcile pass below (reconcileResolvedCarouselAnchor) is the
-  // ONLY place that ever renders it, guarded by this field so it edits the
-  // anchor at most once. Absent on records from before this field existed.
-  lastRenderedStatus?: "awaiting" | "superseded" | "expired";
+  // Last status rendered onto the anchor by SWEEP-driven edits
+  // ("awaiting" | "superseded" | "expired" | "accepted" | "rejected" |
+  // "cancelled"). A Discord-button accept/reject ALSO renders the anchor
+  // directly via the button handler's own interaction.message reference
+  // (renderAnchorResolved) without going through this field — but that
+  // in-Discord path is never the only way a decision can be made: an
+  // accept/reject/cancel made from the Paperclip web UI/API leaves the
+  // Discord anchor showing stale "Decision needed" buttons forever unless
+  // something else catches it. reconcileResolvedCarouselAnchors (below) is
+  // that catch-all: for ANY non-pending terminal status whose value here
+  // doesn't already match, it edits the anchor and records the match here —
+  // guarded by this field so each status transition is rendered at most once
+  // regardless of which path (Discord click vs. reconcile sweep) got there
+  // first. Absent on records from before this field existed.
+  lastRenderedStatus?: "awaiting" | "superseded" | "expired" | "accepted" | "rejected" | "cancelled";
   // The interaction's server-side updatedAt as of the last tick this record's
   // full parse+hash path ran. STALENESS GATE: when a fully-posted record's
   // interaction.updatedAt is unchanged from this value, the sweep skips
@@ -357,21 +363,38 @@ function resolveAnchorMessageId(record: CarouselBatchSweepRecord): string | unde
   return record.anchorMessageId ?? record.trailerMessageId;
 }
 
-// RESOLVED-RECONCILE (wires the dead "expired" anchor status): the main sweep
-// loop only ever considers interactions with status === "pending" (see
-// pendingConfirmations below), so once a request_confirmation interaction's
-// status leaves "pending" WITHOUT going through the carousel-confirmation
-// button handler (i.e. it EXPIRED server-side rather than being
-// accepted/rejected by a click), nothing else in this plugin ever revisits
-// its anchor — it would sit showing "🟡 awaiting decision" forever despite
-// the decision window having closed. This pass catches exactly that gap:
-// for every carousel-batch record this sweep knows about (has an
-// anchorMessageId) whose interaction is now "expired" and whose anchor
-// hasn't already been edited to "expired" (lastRenderedStatus guard — at
-// most one edit per record), edit the anchor in place and strip its buttons.
-// Accepted/rejected are NOT handled here — those are rendered directly by
-// the button handler on its own interaction.message reference (see the
-// CarouselBatchSweepRecord.lastRenderedStatus doc) and never need this pass.
+// request_confirmation interaction status -> the CarouselAnchorStatus the
+// anchor should show. Only terminal (non-"pending") statuses are mapped —
+// "pending" is intentionally absent (handled by the main sweep loop, not
+// this pass) and any unrecognized value falls through to undefined (skip).
+const TERMINAL_INTERACTION_STATUS_TO_ANCHOR: Readonly<Record<string, CarouselAnchorStatus | undefined>> = {
+  accepted: "accepted",
+  rejected: "rejected",
+  cancelled: "cancelled",
+  expired: "expired",
+};
+
+// RESOLVED-RECONCILE (wires every dead terminal anchor status, not just
+// "expired"): the main sweep loop only ever considers interactions with
+// status === "pending" (see pendingConfirmations below), so once a
+// request_confirmation interaction's status leaves "pending" WITHOUT going
+// through the carousel-confirmation Discord button handler — i.e. it was
+// accepted/rejected/cancelled from the Paperclip web UI/API, or it expired
+// server-side — nothing else in this plugin ever revisits its anchor: it
+// would sit showing "🟡 awaiting decision" WITH LIVE BUTTONS forever despite
+// the decision already being made. This pass catches exactly that gap: for
+// every carousel-batch record this sweep knows about (has an
+// anchorMessageId) whose interaction is now ANY known non-pending terminal
+// status (accepted/rejected/cancelled/expired) and whose anchor hasn't
+// already been edited to match (lastRenderedStatus guard), edit the anchor
+// in place and strip its buttons, then persist the match so the NEXT tick is
+// a no-op. Note: the Discord button handler renders accepted/rejected
+// directly via its own interaction.message reference (renderAnchorResolved)
+// WITHOUT writing back to this sweep's persisted state, so a Discord-driven
+// decision can cause exactly one redundant (but harmless — same terminal
+// embed, edit-failure-tolerant either way) re-edit here on the tick right
+// after the click, before lastRenderedStatus catches up; every tick after
+// that is a true no-op.
 async function reconcileResolvedCarouselAnchors(
   ctx: PluginContext,
   client: Client,
@@ -383,26 +406,28 @@ async function reconcileResolvedCarouselAnchors(
 ): Promise<void> {
   for (const interaction of interactions) {
     if (interaction.kind !== "request_confirmation") continue;
-    if (interaction.status !== "expired") continue;
+    const anchorStatus = TERMINAL_INTERACTION_STATUS_TO_ANCHOR[interaction.status];
+    if (!anchorStatus) continue;
 
     const record = state[interaction.id];
     if (!record) continue;
     const anchorMessageId = resolveAnchorMessageId(record);
     if (!anchorMessageId) continue;
-    if (record.lastRenderedStatus === "expired") continue;
+    if (record.lastRenderedStatus === anchorStatus) continue;
 
     const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
     try {
       await editMessageInChannel(client, channelId, anchorMessageId, {
-        embeds: [buildCarouselAnchorEmbed({ issueUrl, status: "expired" })],
+        embeds: [buildCarouselAnchorEmbed({ issueUrl, status: anchorStatus })],
         components: [],
       });
-      state[interaction.id] = { ...record, lastRenderedStatus: "expired" };
+      state[interaction.id] = { ...record, lastRenderedStatus: anchorStatus };
     } catch (err) {
-      ctx.logger.warn("confirmation-sweep: failed to edit anchor to expired — will retry next sweep", {
+      ctx.logger.warn("confirmation-sweep: failed to edit anchor to resolved status — will retry next sweep", {
         companyId: company.companyId,
         interactionId: interaction.id,
         anchorMessageId,
+        status: anchorStatus,
         error: String(err),
       });
     }

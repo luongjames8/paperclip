@@ -85,12 +85,13 @@ export function buildCarouselConfirmationActionRow(
 // generations" confusion: 2026-07-11 live incident, partial + full renders of
 // the same week both sitting in the channel with nothing marking which was
 // current).
-export type CarouselAnchorStatus = "awaiting" | "accepted" | "rejected" | "superseded" | "expired";
+export type CarouselAnchorStatus = "awaiting" | "accepted" | "rejected" | "cancelled" | "superseded" | "expired";
 
 const CAROUSEL_ANCHOR_STATUS_LINE: Record<CarouselAnchorStatus, string> = {
   awaiting: "🟡 awaiting decision",
   accepted: "✅ accepted",
   rejected: "❌ rejected",
+  cancelled: "🚫 cancelled",
   superseded: "⏰ superseded — a newer version was posted below",
   expired: "⏰ expired — no decision was made in time",
 };
@@ -104,6 +105,7 @@ const CAROUSEL_ANCHOR_TITLE: Record<CarouselAnchorStatus, string> = {
   awaiting: "Decision needed",
   accepted: "Decision: accepted",
   rejected: "Decision: rejected",
+  cancelled: "Cancelled",
   superseded: "Superseded",
   expired: "Expired — no decision in time",
 };

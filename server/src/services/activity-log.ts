@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { activityLog } from "@paperclipai/db";
-import { PLUGIN_EVENT_TYPES, isUuidLike, type PluginEventType } from "@paperclipai/shared";
+import { PLUGIN_EVENT_TYPES, type PluginEventType } from "@paperclipai/shared";
 import type { PluginEvent } from "@paperclipai/plugin-sdk";
 import { publishLiveEvent } from "./live-events.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
@@ -9,6 +9,7 @@ import { sanitizeRecord } from "../redaction.js";
 import { logger } from "../middleware/logger.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { resolveVerifiedRunId } from "./run-id-trust.js";
 
 const PLUGIN_EVENT_SET: ReadonlySet<string> = new Set(PLUGIN_EVENT_TYPES);
 const ACTIVITY_ACTION_TO_PLUGIN_EVENT: Readonly<Record<string, PluginEventType>> = {
@@ -74,19 +75,22 @@ export async function logActivity(db: Db, input: LogActivityInput) {
   // X-Paperclip-Run-Id request header (via getActorInfo → actor.runId), with
   // NO validation anywhere upstream — the header is a bare string an agent
   // sets on every mutating call (AGENTS.md mandates it). activityLog.runId is
-  // a Postgres uuid column; a malformed/stale/non-uuid header value throws
-  // "invalid input syntax for type uuid" from the driver, uncaught, turning
-  // into a bare HTTP 500 on the ENTIRE mutation this logActivity call was
-  // just recording — not merely a lost log row (2026-07-11 live incident:
-  // the openclaw agent's comment/issue-create POSTs 500'd twice WITH the
-  // header set and succeeded immediately after removing it). Drop an
-  // invalid runId to null (with a warning) rather than let a diagnostic
-  // header crash the real mutation — the documented-correct behavior
-  // (sending the header) must never be worse than the undocumented
+  // a Postgres uuid column AND a foreign key into heartbeat_runs — either a
+  // malformed (non-uuid) value OR a well-formed-but-stale/nonexistent uuid
+  // throws "invalid input syntax for type uuid" / a foreign key violation
+  // from the driver, uncaught, turning into a bare HTTP 500 on the ENTIRE
+  // mutation this logActivity call was just recording — not merely a lost
+  // log row (2026-07-11 live incident: the openclaw agent's comment/
+  // issue-create POSTs 500'd twice WITH the header set and succeeded
+  // immediately after removing it). resolveVerifiedRunId does a single
+  // indexed existence check and drops anything that isn't a real
+  // heartbeat_runs row to null (with a warning) rather than let a
+  // diagnostic header crash the real mutation — the documented-correct
+  // behavior (sending the header) must never be worse than the undocumented
   // workaround (omitting it).
-  const safeRunId = input.runId && isUuidLike(input.runId) ? input.runId : null;
+  const safeRunId = await resolveVerifiedRunId(db, input.runId);
   if (input.runId && !safeRunId) {
-    logger.warn({ runId: input.runId, action: input.action }, "logActivity: runId is not a valid uuid — dropping to null instead of crashing the mutation");
+    logger.warn({ runId: input.runId, action: input.action }, "logActivity: runId is not a valid/known heartbeat run — dropping to null instead of crashing the mutation");
   }
   await db.insert(activityLog).values({
     companyId: input.companyId,

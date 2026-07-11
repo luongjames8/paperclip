@@ -1348,12 +1348,15 @@ describe("runConfirmationSweep — zero-item revision supersedes the previous an
   });
 });
 
-// ─── RESOLVED-RECONCILE: wires the dead "expired" anchor status. The main
-// sweep loop only ever considers status==="pending" interactions, so an
-// interaction that expires server-side (never clicked) would otherwise sit
-// with its anchor stuck on "🟡 awaiting decision" forever ─────────────────
+// ─── RESOLVED-RECONCILE: wires every dead terminal anchor status (expired,
+// and — codex round 4 — accepted/rejected/cancelled decided from the
+// Paperclip web UI/API rather than a Discord button click). The main sweep
+// loop only ever considers status==="pending" interactions, so an
+// interaction that leaves "pending" WITHOUT a Discord click would otherwise
+// sit with its anchor stuck on "🟡 awaiting decision" WITH LIVE BUTTONS
+// forever ───────────────────────────────────────────────────────────────
 
-describe("runConfirmationSweep — resolved-reconcile (expired interaction)", () => {
+describe("runConfirmationSweep — resolved-reconcile (non-pending terminal statuses)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -1452,7 +1455,13 @@ describe("runConfirmationSweep — resolved-reconcile (expired interaction)", ()
     expect(editMessageInChannel).not.toHaveBeenCalled();
   });
 
-  it("accepted/rejected interactions are NOT touched by the resolved-reconcile pass (handled by the button handler, not the sweep)", async () => {
+  // A decision made from the Paperclip web UI/API (not a Discord button
+  // click) leaves interaction.status accepted/rejected/cancelled but NEVER
+  // touches the Discord anchor — the button handler only renders its own
+  // interaction.message reference when the click itself happens in Discord.
+  // Without this pass, that anchor sits showing "🟡 awaiting decision" WITH
+  // LIVE BUTTONS forever despite the decision already being made elsewhere.
+  it("web-accepted interaction → edits the anchor to 'accepted' and strips components", async () => {
     const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
     const { editMessageInChannel } = await import("../src/discord/rest.js");
 
@@ -1479,6 +1488,209 @@ describe("runConfirmationSweep — resolved-reconcile (expired interaction)", ()
     const paperclip = makePaperclip(
       [makeIssue()],
       [makeInteraction({ status: "accepted", payload: { detailsMarkdown: markdown } })],
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, messageId, opts] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("ch-carousel");
+    expect(messageId).toBe("anchor-msg-1");
+    expect(opts.embeds[0].title).toBe("Decision: accepted");
+    expect(opts.embeds[0].description).toMatch(/✅ accepted/);
+    expect(opts.components).toEqual([]);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].lastRenderedStatus).toBe("accepted");
+  });
+
+  it("does NOT re-edit the anchor on a second sweep tick once lastRenderedStatus is already 'accepted' (idempotent)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "anchor-msg-1",
+          anchorMessageId: "anchor-msg-1",
+          lastRenderedStatus: "accepted",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ status: "accepted", payload: { detailsMarkdown: markdown } })],
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).not.toHaveBeenCalled();
+  });
+
+  it("web-rejected interaction → edits the anchor to 'rejected' and strips components", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "anchor-msg-1",
+          anchorMessageId: "anchor-msg-1",
+          lastRenderedStatus: "awaiting",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ status: "rejected", payload: { detailsMarkdown: markdown } })],
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, messageId, opts] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("ch-carousel");
+    expect(messageId).toBe("anchor-msg-1");
+    expect(opts.embeds[0].title).toBe("Decision: rejected");
+    expect(opts.embeds[0].description).toMatch(/❌ rejected/);
+    expect(opts.components).toEqual([]);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].lastRenderedStatus).toBe("rejected");
+  });
+
+  it("does NOT re-edit the anchor on a second sweep tick once lastRenderedStatus is already 'rejected' (idempotent)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "anchor-msg-1",
+          anchorMessageId: "anchor-msg-1",
+          lastRenderedStatus: "rejected",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ status: "rejected", payload: { detailsMarkdown: markdown } })],
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).not.toHaveBeenCalled();
+  });
+
+  it("cancelled interaction → edits the anchor to 'cancelled' and strips components", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "anchor-msg-1",
+          anchorMessageId: "anchor-msg-1",
+          lastRenderedStatus: "awaiting",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ status: "cancelled", payload: { detailsMarkdown: markdown } })],
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, messageId, opts] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("ch-carousel");
+    expect(messageId).toBe("anchor-msg-1");
+    expect(opts.embeds[0].title).toBe("Cancelled");
+    expect(opts.embeds[0].description).toMatch(/🚫 cancelled/);
+    expect(opts.components).toEqual([]);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].lastRenderedStatus).toBe("cancelled");
+  });
+
+  it("does NOT re-edit the anchor on a second sweep tick once lastRenderedStatus is already 'cancelled' (idempotent)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "anchor-msg-1",
+          anchorMessageId: "anchor-msg-1",
+          lastRenderedStatus: "cancelled",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ status: "cancelled", payload: { detailsMarkdown: markdown } })],
     );
 
     await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);

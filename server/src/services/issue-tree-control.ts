@@ -22,6 +22,7 @@ import {
   type IssueTreePreviewWarning,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { resolveVerifiedRunId } from "./run-id-trust.js";
 
 type IssueRow = typeof issues.$inferSelect;
 type HoldRow = typeof issueTreeHolds.$inferSelect;
@@ -718,6 +719,10 @@ export function issueTreeControlService(db: Db) {
       mode: input.mode,
       releasePolicy: holdReleasePolicy,
     });
+    // Verify ONCE per call — every created_by_run_id write below (both the
+    // "resume" and fallback branches) consumes this, never input.actor.runId
+    // directly. See run-id-trust.ts for the incident class this closes.
+    const verifiedCreatedByRunId = await resolveVerifiedRunId(db, input.actor.runId);
 
     if (input.mode === "resume") {
       const issueIds = [...new Set(holdPreview.issues.map((issue) => issue.id))];
@@ -737,7 +742,7 @@ export function issueTreeControlService(db: Db) {
             createdByActorType: input.actor.actorType,
             createdByAgentId: input.actor.agentId ?? null,
             createdByUserId: input.actor.userId ?? (input.actor.actorType === "user" ? input.actor.actorId : null),
-            createdByRunId: input.actor.runId ?? null,
+            createdByRunId: verifiedCreatedByRunId,
           })
           .returning();
 
@@ -815,7 +820,7 @@ export function issueTreeControlService(db: Db) {
           createdByActorType: input.actor.actorType,
           createdByAgentId: input.actor.agentId ?? null,
           createdByUserId: input.actor.userId ?? (input.actor.actorType === "user" ? input.actor.actorId : null),
-          createdByRunId: input.actor.runId ?? null,
+          createdByRunId: verifiedCreatedByRunId,
         })
         .returning();
 
@@ -956,6 +961,9 @@ export function issueTreeControlService(db: Db) {
 
     const now = new Date();
     const releasedCancelHoldIds = activeCancelHolds.map((hold) => hold.id);
+    // Verify ONCE per call — both released_by_run_id writes below consume
+    // this, never input.actor.runId directly.
+    const verifiedReleasedByRunId = await resolveVerifiedRunId(db, input.actor.runId);
     const updatedIssues = await db.transaction(async (tx) => {
       const restored: TreeStatusUpdateResult["updatedIssues"] = [];
       for (const [status, issueIdsForStatus] of issueIdsByStatus) {
@@ -1000,7 +1008,7 @@ export function issueTreeControlService(db: Db) {
             releasedByActorType: input.actor.actorType,
             releasedByAgentId: input.actor.agentId ?? null,
             releasedByUserId: input.actor.userId ?? (input.actor.actorType === "user" ? input.actor.actorId : null),
-            releasedByRunId: input.actor.runId ?? null,
+            releasedByRunId: verifiedReleasedByRunId,
             releaseReason: input.reason ?? "Restored by subtree restore operation",
             releaseMetadata: {
               restoreHoldId,
@@ -1019,7 +1027,7 @@ export function issueTreeControlService(db: Db) {
           releasedByActorType: input.actor.actorType,
           releasedByAgentId: input.actor.agentId ?? null,
           releasedByUserId: input.actor.userId ?? (input.actor.actorType === "user" ? input.actor.actorId : null),
-          releasedByRunId: input.actor.runId ?? null,
+          releasedByRunId: verifiedReleasedByRunId,
           releaseReason: input.reason ?? "Restore operation applied",
           releaseMetadata: {
             restoredIssueIds: restored.map((issue) => issue.id),
@@ -1126,6 +1134,7 @@ export function issueTreeControlService(db: Db) {
       throw conflict("Issue tree hold is already released");
     }
 
+    const verifiedReleasedByRunId = await resolveVerifiedRunId(db, input.actor.runId);
     const [updated] = await db
       .update(issueTreeHolds)
       .set({
@@ -1134,7 +1143,7 @@ export function issueTreeControlService(db: Db) {
         releasedByActorType: input.actor.actorType,
         releasedByAgentId: input.actor.agentId ?? null,
         releasedByUserId: input.actor.userId ?? (input.actor.actorType === "user" ? input.actor.actorId : null),
-        releasedByRunId: input.actor.runId ?? null,
+        releasedByRunId: verifiedReleasedByRunId,
         releaseReason: input.reason ?? null,
         releasePolicy: input.releasePolicy
           ? (normalizeReleasePolicy(input.releasePolicy) as unknown as Record<string, unknown>)

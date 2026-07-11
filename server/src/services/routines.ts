@@ -59,6 +59,7 @@ import { parseCron, validateCron } from "./cron.js";
 import { heartbeatService } from "./heartbeat.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
+import { resolveVerifiedRunId } from "./run-id-trust.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
@@ -586,6 +587,7 @@ export function routineService(
     const snapshot = await buildRoutineRevisionSnapshot(executor, routine);
     const nextRevisionNumber = routine.latestRevisionId ? routine.latestRevisionNumber + 1 : 1;
     const now = new Date();
+    const verifiedRunId = await resolveVerifiedRunId(executor, actor.runId);
     const [revision] = await executor
       .insert(routineRevisions)
       .values({
@@ -599,7 +601,7 @@ export function routineService(
         restoredFromRevisionId: options.restoredFromRevisionId ?? null,
         createdByAgentId: actor.agentId ?? null,
         createdByUserId: actor.userId ?? null,
-        createdByRunId: actor.runId ?? null,
+        createdByRunId: verifiedRunId,
         createdAt: now,
       })
       .returning();
