@@ -2258,6 +2258,32 @@ describe("runConfirmationSweep — carousel-shape loss retires the old anchor be
     expect(state["int-1"].anchorMessageId).toBe("degrade-anchor-id");
   });
 
+  it("BROAD-FIRST rule ordering: the unflagged rule skips the generic image-stripped card entirely when a carouselBatch rule also matches (codex round-7)", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    // Broad unflagged rule iterates FIRST — it used to post the generic
+    // image-stripped card before the flagged rule's degrade render.
+    const config = makeConfig({
+      c1: [
+        { titleRegex: ".*", channelId: "ch-generic" },
+        { titleRegex: "Carousel", channelId: "ch-flagged", carouselBatch: true },
+      ],
+    });
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "![img](https://r2.example.com/x/1.jpg)\nUnstructured prose the LLM wrote." } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip);
+
+    // The generic single-embed card never posts for a carousel-owned
+    // interaction — only the flagged rule's degrade render does.
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+    const degradeHeader = (postToChannel as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[1] === "ch-flagged" && String(c[2]).includes("Carousel batch awaiting confirmation"),
+    );
+    expect(degradeHeader).toHaveLength(1);
+  });
+
   it("a later revision BACK to carousel shape — even byte-identical to the retired generation — re-posts from scratch (the '' sentinel never matches a real hash)", async () => {
     const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
     const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");

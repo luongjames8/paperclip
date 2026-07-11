@@ -992,12 +992,17 @@ export async function runConfirmationSweep(
           // while its anchor sits superseded with no live buttons.
           // Shape detection is RULE-scoped (rule.carouselBatch) but the
           // record is INTERACTION-scoped and shared across every rule of
-          // the company — so an unflagged rule matching the same issue as a
-          // carouselBatch-flagged rule must NOT retire the anchor the
-          // flagged rule legitimately owns (the flagged rule renders this
-          // exact interaction via the unstructured-degrade path). Shape
-          // loss is only real when NO matching rule can render it as a
-          // carousel.
+          // the company. When a carouselBatch-flagged sibling rule matches
+          // this issue's title, the carousel machinery owns this
+          // interaction END-TO-END — that rule's own iteration always
+          // renders it (structured, legacy, or unstructured-degrade posts
+          // SOMETHING for a flagged rule) — so this unflagged rule must
+          // neither retire the anchor the flagged rule legitimately owns
+          // nor fall through to the generic image-stripped card below
+          // (codex round-7: with a broad unflagged rule ordered FIRST, the
+          // generic card would post before the flagged rule's degrade
+          // render every time — exactly the blind/duplicate card the
+          // structured contract exists to kill).
           const carouselFlaggedElsewhere = rules.some((r) => {
             if (!r.carouselBatch) return false;
             try {
@@ -1006,8 +1011,10 @@ export async function runConfirmationSweep(
               return false;
             }
           });
+          if (carouselFlaggedElsewhere) continue;
+
           const shapeLostRecord = carouselState[interaction.id];
-          if (shapeLostRecord && shapeLostRecord.artifactHash !== "" && !carouselFlaggedElsewhere) {
+          if (shapeLostRecord && shapeLostRecord.artifactHash !== "") {
             const staleAnchors = await retireCurrentAnchor(
               ctx, client, rule.channelId, company.companyId, issue.id, interaction.id, issueUrl, shapeLostRecord,
             );

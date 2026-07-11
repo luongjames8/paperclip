@@ -146,9 +146,16 @@ export async function resolveActorSourceTrustForIssue(input: {
 
   if (input.actor.runId && (!run || run.agentId !== input.actor.agentId)) {
     // Fail closed: an unknown, malformed, or mismatched run cannot prove higher trust, so tag the write as quarantined.
+    // sourceRunId carries ONLY verified-at-derivation run ids
+    // (sourceTrustMetadataSchema pins it to a UUID): in this branch the
+    // header value is by construction unverified — malformed, unknown, or
+    // another agent's run — so it is scrubbed to null rather than stored as
+    // contract-invalid (or mis-attributed) metadata. The verified path below
+    // never lands here: `run` is only non-null after the isUuidLike +
+    // company-scoped lookup, and the owning-agent match just passed.
     return buildLowTrustSourceTrust({
       issueId: input.issue.id,
-      runId: input.actor.runId,
+      runId: null,
       agentId: input.actor.agentId,
     });
   }
