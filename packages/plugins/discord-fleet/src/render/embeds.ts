@@ -95,6 +95,19 @@ const CAROUSEL_ANCHOR_STATUS_LINE: Record<CarouselAnchorStatus, string> = {
   expired: "⏰ expired — no decision was made in time",
 };
 
+// Anchor embed title is a function of status — the operator scanning a
+// channel full of carousel-batch cards must be able to tell decided from
+// pending from expired WITHOUT opening each one (a hardcoded "Decision
+// needed" title regardless of status was itself a contract wobble: an
+// accepted/rejected/expired card kept showing "Decision needed" forever).
+const CAROUSEL_ANCHOR_TITLE: Record<CarouselAnchorStatus, string> = {
+  awaiting: "Decision needed",
+  accepted: "Decision: accepted",
+  rejected: "Decision: rejected",
+  superseded: "Superseded",
+  expired: "Expired — no decision in time",
+};
+
 // Builds the anchor embed body (status line + optional actor/reason detail).
 // Callers attach the action row (buildCarouselConfirmationActionRow) only
 // while status is "awaiting" — every other status strips components.
@@ -117,7 +130,7 @@ export function buildCarouselAnchorEmbed(opts: {
           : 0x99aab5;
   return enforceEmbedLimits({
     color,
-    title: "Decision needed",
+    title: CAROUSEL_ANCHOR_TITLE[opts.status],
     description: lines.join("\n"),
   });
 }

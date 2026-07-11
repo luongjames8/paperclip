@@ -63,14 +63,25 @@ export interface CarouselBatchSweepRecord {
   // resolveAnchorMessageId).
   anchorMessageId?: string;
   // Last status rendered onto the anchor by SWEEP-driven edits only
-  // ("awaiting" | "superseded"). Terminal states ("accepted"/"rejected") are
-  // rendered directly by the button handler on ITS OWN interaction.message
-  // reference and never routed back through this record — by the time the
-  // sweep would see the interaction again, its server-side status is no
-  // longer "pending" and the sweep loop has already stopped considering it
-  // (see runConfirmationSweep's pendingConfirmations filter). Absent on
-  // records from before this field existed.
-  lastRenderedStatus?: "awaiting" | "superseded";
+  // ("awaiting" | "superseded" | "expired"). Terminal states
+  // ("accepted"/"rejected") are rendered directly by the button handler on
+  // ITS OWN interaction.message reference and never routed back through this
+  // record. "expired" IS routed through this record — unlike
+  // accepted/rejected, there is no button click to render it, so the
+  // resolved-reconcile pass below (reconcileResolvedCarouselAnchor) is the
+  // ONLY place that ever renders it, guarded by this field so it edits the
+  // anchor at most once. Absent on records from before this field existed.
+  lastRenderedStatus?: "awaiting" | "superseded" | "expired";
+  // The interaction's server-side updatedAt as of the last tick this record's
+  // full parse+hash path ran. STALENESS GATE: when a fully-posted record's
+  // interaction.updatedAt is unchanged from this value, the sweep skips
+  // parseCarouselBatchPayload/parseCarouselBatchMarkdown/JSON.stringify/sha256
+  // entirely for that interaction on this tick — those all run once per
+  // interaction per underlying change, never once per interaction per sweep
+  // tick regardless of change. Absent on records from before this field
+  // existed (first tick after upgrade always runs the full path once, then
+  // starts gating).
+  lastSeenUpdatedAt?: string;
 }
 type CarouselBatchSweepState = Record<string, CarouselBatchSweepRecord>;
 
@@ -86,17 +97,6 @@ export function sha256(text: string): string {
 // generic single-embed path (unchanged) runs.
 function looksLikeCarouselBatch(detailsMarkdown: string): boolean {
   return SECTION_HEADING_RE.test(detailsMarkdown);
-}
-
-// A carousel-titled issue is one whose request_confirmation is gating an
-// Instagram-carousel publish decision, independent of whether its
-// detailsMarkdown happens to parse. Used ONLY to decide whether an
-// unstructured/unparseable artifact should still degrade to an
-// images-included render (never the image-stripping generic path) — see
-// looksLikeCarouselTitle below the generic path.
-const CAROUSEL_TITLE_RE = /Publisher \(Carousel\)\s*—/;
-function looksLikeCarouselTitle(title: string): boolean {
-  return CAROUSEL_TITLE_RE.test(title);
 }
 
 // Extract the first image URL from markdown text (first `![...](url)` match).
@@ -169,7 +169,10 @@ async function postCarouselBatch(
 
   // Fully posted AND hash unchanged: nothing to do. Checked before parsing —
   // this is the common steady-state tick (no section work left), so it must
-  // not pay for getParsed() just to find that out.
+  // not pay for getParsed() just to find that out. Still stamps
+  // lastSeenUpdatedAt (cheap — no parse/stringify/hash work above this point)
+  // so the CALLER's staleness gate can skip the parse+hash work entirely on
+  // the NEXT tick if updatedAt hasn't moved again.
   if (
     existing &&
     existing.artifactHash === artifactHash &&
@@ -177,6 +180,9 @@ async function postCarouselBatch(
     existing.trailerPosted &&
     existing.sectionsPosted >= existing.totalSections
   ) {
+    if (existing.lastSeenUpdatedAt !== interaction.updatedAt) {
+      state[interaction.id] = { ...existing, lastSeenUpdatedAt: interaction.updatedAt };
+    }
     return;
   }
 
@@ -190,7 +196,11 @@ async function postCarouselBatch(
     !existing.trailerPosted &&
     existing.sectionsPosted >= existing.totalSections
   ) {
-    await postCarouselTrailer(ctx, client, channelId, company.companyId, issue, interaction, issueUrl, existing, state, now);
+    await postCarouselTrailer(
+      ctx, client, channelId, company.companyId, issue, interaction, issueUrl,
+      { ...existing, lastSeenUpdatedAt: interaction.updatedAt },
+      state, now,
+    );
     return;
   }
 
@@ -217,6 +227,7 @@ async function postCarouselBatch(
         artifactHash,
         headerPosted: false,
         trailerPosted: false,
+        lastSeenUpdatedAt: interaction.updatedAt,
       };
     }
     return;
@@ -227,8 +238,8 @@ async function postCarouselBatch(
   const hashChanged = existing && existing.artifactHash !== artifactHash;
   const record: CarouselBatchSweepRecord =
     !existing || hashChanged
-      ? { postedAt: new Date(now).toISOString(), sectionsPosted: 0, totalSections, artifactHash, headerPosted: false, trailerPosted: false }
-      : { ...existing, totalSections };
+      ? { postedAt: new Date(now).toISOString(), sectionsPosted: 0, totalSections, artifactHash, headerPosted: false, trailerPosted: false, lastSeenUpdatedAt: interaction.updatedAt }
+      : { ...existing, totalSections, lastSeenUpdatedAt: interaction.updatedAt };
 
   // ANCHOR — mark the PREVIOUS generation superseded (kills "stacked
   // generations": 2026-07-11 live incident, partial + full renders of the
@@ -317,6 +328,58 @@ async function postCarouselBatch(
 // on which message id is "the" anchor.
 function resolveAnchorMessageId(record: CarouselBatchSweepRecord): string | undefined {
   return record.anchorMessageId ?? record.trailerMessageId;
+}
+
+// RESOLVED-RECONCILE (wires the dead "expired" anchor status): the main sweep
+// loop only ever considers interactions with status === "pending" (see
+// pendingConfirmations below), so once a request_confirmation interaction's
+// status leaves "pending" WITHOUT going through the carousel-confirmation
+// button handler (i.e. it EXPIRED server-side rather than being
+// accepted/rejected by a click), nothing else in this plugin ever revisits
+// its anchor — it would sit showing "🟡 awaiting decision" forever despite
+// the decision window having closed. This pass catches exactly that gap:
+// for every carousel-batch record this sweep knows about (has an
+// anchorMessageId) whose interaction is now "expired" and whose anchor
+// hasn't already been edited to "expired" (lastRenderedStatus guard — at
+// most one edit per record), edit the anchor in place and strip its buttons.
+// Accepted/rejected are NOT handled here — those are rendered directly by
+// the button handler on its own interaction.message reference (see the
+// CarouselBatchSweepRecord.lastRenderedStatus doc) and never need this pass.
+async function reconcileResolvedCarouselAnchors(
+  ctx: PluginContext,
+  client: Client,
+  channelId: string,
+  company: DiscordFleetConfig["companies"][number],
+  issue: PaperclipIssue,
+  interactions: PaperclipInteraction[],
+  state: CarouselBatchSweepState,
+): Promise<void> {
+  for (const interaction of interactions) {
+    if (interaction.kind !== "request_confirmation") continue;
+    if (interaction.status !== "expired") continue;
+
+    const record = state[interaction.id];
+    if (!record) continue;
+    const anchorMessageId = resolveAnchorMessageId(record);
+    if (!anchorMessageId) continue;
+    if (record.lastRenderedStatus === "expired") continue;
+
+    const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
+    try {
+      await editMessageInChannel(client, channelId, anchorMessageId, {
+        embeds: [buildCarouselAnchorEmbed({ issueUrl, status: "expired" })],
+        components: [],
+      });
+      state[interaction.id] = { ...record, lastRenderedStatus: "expired" };
+    } catch (err) {
+      ctx.logger.warn("confirmation-sweep: failed to edit anchor to expired — will retry next sweep", {
+        companyId: company.companyId,
+        interactionId: interaction.id,
+        anchorMessageId,
+        error: String(err),
+      });
+    }
+  }
 }
 
 // Post the trailer/anchor message (decision embed + accept/reject buttons)
@@ -520,6 +583,12 @@ export async function runConfirmationSweep(
           continue;
         }
 
+        // Resolved-reconcile: interactions that left "pending" WITHOUT a
+        // button click (i.e. expired server-side) never reappear in
+        // pendingConfirmations below — this is the only pass that revisits
+        // them, so their anchor doesn't sit stuck on "awaiting" forever.
+        await reconcileResolvedCarouselAnchors(ctx, client, rule.channelId, company, issue, interactions, carouselState);
+
         const pendingConfirmations = interactions.filter(
           (i) => i.kind === "request_confirmation" && i.status === "pending",
         );
@@ -562,11 +631,34 @@ export async function runConfirmationSweep(
           //      cards, or a carouselState record already proving this
           //      interaction was identified as carousel-batch on a prior
           //      sweep — skips re-running the regex once shape is settled).
-          //   3. neither matched, but the issue TITLE is carousel-shaped
-          //      (`Publisher (Carousel) — ...`) → unstructured-degrade: a
-          //      contract miss must be VISIBLE, never blind. Renders with
-          //      images intact (never stripImageLines for a carousel-titled
-          //      issue) plus a loud "⚠ unstructured artifact" warning line.
+          //   3. neither matched, but the MATCHING rule is flagged
+          //      `carouselBatch: true` (operator-configured discriminator —
+          //      the rule that matched this issue's title is already known
+          //      by this point in the loop; no second hardcoded title
+          //      pattern needed) → unstructured-degrade: a contract miss must
+          //      be VISIBLE, never blind. Renders with images intact (never
+          //      stripImageLines for a carousel-batch rule) plus a loud
+          //      "⚠ unstructured artifact" warning line.
+
+          // STALENESS GATE (cheap skip before the parse+hash work below):
+          // once a carousel-batch record is fully posted AND the interaction's
+          // server-side updatedAt hasn't moved since the last tick that ran
+          // the full path, there is nothing new to detect — every steady-state
+          // tick would otherwise re-run parseCarouselBatchPayload/
+          // parseCarouselBatchMarkdown/JSON.stringify/sha256 for NO reason.
+          // First-seen or changed updatedAt always falls through to the full
+          // path below (and that path updates lastSeenUpdatedAt once it does).
+          const existingRecord = carouselState[interaction.id];
+          const fullyPosted = Boolean(
+            existingRecord &&
+              existingRecord.headerPosted &&
+              existingRecord.trailerPosted &&
+              existingRecord.sectionsPosted >= existingRecord.totalSections,
+          );
+          if (fullyPosted && existingRecord!.lastSeenUpdatedAt === interaction.updatedAt) {
+            continue;
+          }
+
           const structuredPayload = parseCarouselBatchPayload(interaction.payload?.carouselBatch);
           const knownCarousel = Boolean(carouselState[interaction.id]);
           const legacyMatches = detailsMarkdown && (knownCarousel || looksLikeCarouselBatch(detailsMarkdown));
@@ -594,7 +686,7 @@ export async function runConfirmationSweep(
             continue;
           }
 
-          if (looksLikeCarouselTitle(safeStr(issue.title, 512))) {
+          if (rule.carouselBatch) {
             await postUnstructuredCarouselDegrade(ctx, client, rule.channelId, company, issue, interaction, detailsMarkdown, carouselState, now);
             continue;
           }

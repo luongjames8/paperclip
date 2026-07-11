@@ -202,10 +202,12 @@ describe("buildCarouselAnchorEmbed", () => {
     expect(embed.description).not.toContain("superseded");
   });
 
-  it("title is always 'Decision needed' regardless of status (the anchor is edited in place, never re-titled)", () => {
-    for (const status of ["awaiting", "accepted", "rejected", "superseded", "expired"] as const) {
-      expect(buildCarouselAnchorEmbed({ issueUrl, status }).title).toBe("Decision needed");
-    }
+  it("title is a function of status — the operator can tell decided/expired from pending without opening the card", () => {
+    expect(buildCarouselAnchorEmbed({ issueUrl, status: "awaiting" }).title).toBe("Decision needed");
+    expect(buildCarouselAnchorEmbed({ issueUrl, status: "accepted" }).title).toBe("Decision: accepted");
+    expect(buildCarouselAnchorEmbed({ issueUrl, status: "rejected" }).title).toBe("Decision: rejected");
+    expect(buildCarouselAnchorEmbed({ issueUrl, status: "superseded" }).title).toBe("Superseded");
+    expect(buildCarouselAnchorEmbed({ issueUrl, status: "expired" }).title).toBe("Expired — no decision in time");
   });
 
   it("detail is truncated/sanitized through safe() (long or secret-bearing detail never blows embed limits)", () => {

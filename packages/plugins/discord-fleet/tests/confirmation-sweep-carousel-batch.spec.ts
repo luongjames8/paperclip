@@ -418,6 +418,115 @@ describe("runConfirmationSweep — carousel-batch idempotent resume", () => {
     parseSpy.mockRestore();
   });
 
+  // ─── STALENESS GATE (finding 5): a cheap interaction.updatedAt comparison
+  // short-circuits the ENTIRE parse+hash path — not just the parse, but also
+  // JSON.stringify(structuredPayload)/sha256 — for a fully-posted record when
+  // nothing changed server-side between ticks ─────────────────────────────
+  it("second tick with UNCHANGED interaction.updatedAt on a fully-posted record performs NO re-post and NO parse work (staleness gate)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const carouselBatchModule = await import("../src/render/carousel-batch.js");
+    const parseMarkdownSpy = vi.spyOn(carouselBatchModule, "parseCarouselBatchMarkdown");
+    const parsePayloadSpy = vi.spyOn(carouselBatchModule, "parseCarouselBatchPayload");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    const fixedUpdatedAt = "2026-07-11T00:00:00.000Z";
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ updatedAt: fixedUpdatedAt, payload: { detailsMarkdown: markdown } })],
+    );
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          lastSeenUpdatedAt: fixedUpdatedAt,
+        },
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // The staleness gate fires BEFORE detection even runs — neither parser is
+    // ever invoked (proxy evidence that the JSON.stringify+sha256 work that
+    // would otherwise follow parsing never runs either).
+    expect(parseMarkdownSpy).not.toHaveBeenCalled();
+    expect(parsePayloadSpy).not.toHaveBeenCalled();
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+
+    parseMarkdownSpy.mockRestore();
+    parsePayloadSpy.mockRestore();
+  });
+
+  it("second tick with a CHANGED interaction.updatedAt on a fully-posted record still enters postCarouselBatch (outer gate does not skip), refreshing lastSeenUpdatedAt without re-posting", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ updatedAt: "2026-07-11T05:00:00.000Z", payload: { detailsMarkdown: markdown } })],
+    );
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          lastSeenUpdatedAt: "2026-07-11T00:00:00.000Z", // stale — different from interaction.updatedAt
+        },
+      },
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // updatedAt moved → the OUTER staleness gate does not skip; control
+    // reaches postCarouselBatch, whose OWN hash-based fast path (artifact
+    // content unchanged) still avoids any re-post — but it now stamps the
+    // fresh updatedAt onto the record so a THIRD tick with this same
+    // updatedAt would be gated again.
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].lastSeenUpdatedAt).toBe("2026-07-11T05:00:00.000Z");
+  });
+
+  it("first tick ever (no existing record) always runs the full path regardless of updatedAt", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ payload: { detailsMarkdown: markdown } })]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(postEmbedsToChannel).toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].lastSeenUpdatedAt).toBeDefined();
+  });
+
   it("trailer-only resume (all sections posted, trailer missing) posts exactly one message and does NOT re-parse", async () => {
     const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
     const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
@@ -817,15 +926,15 @@ describe("runConfirmationSweep — STRUCTURED PAYLOAD CONTRACT (version 1)", () 
 });
 
 // ─── UNSTRUCTURED DEGRADE (kills failure 2's blind spot): neither the
-// structured contract NOR the legacy heading regex matched, but the issue
-// TITLE is carousel-shaped → render with images intact + a loud warning,
-// NEVER the generic stripImageLines path ───────────────────────────────────
+// structured contract NOR the legacy heading regex matched, but the MATCHING
+// rule is flagged carouselBatch:true → render with images intact + a loud
+// warning, NEVER the generic stripImageLines path ───────────────────────────
 
 function makeCarouselTitledIssue(overrides: Partial<PaperclipIssue> = {}): PaperclipIssue {
   return makeIssue({ title: "Publisher (Carousel) — wk-2026-07-13", ...overrides });
 }
 
-const CAROUSEL_TITLE_CONFIG = makeConfig({ c1: [{ titleRegex: "Publisher \\(Carousel\\)", channelId: "ch-carousel" }] });
+const CAROUSEL_TITLE_CONFIG = makeConfig({ c1: [{ titleRegex: "Publisher \\(Carousel\\)", channelId: "ch-carousel", carouselBatch: true }] });
 
 describe("runConfirmationSweep — unstructured-degrade (carousel-titled issue, unparseable shape)", () => {
   beforeEach(() => {
@@ -1019,6 +1128,186 @@ describe("runConfirmationSweep — anchor status transitions", () => {
     })) as Record<string, any>;
     expect(finalState["int-1"].anchorMessageId).toBeDefined();
     expect(finalState["int-1"].anchorMessageId).toBe(finalState["int-1"].trailerMessageId);
+    expect(finalState["int-1"].lastRenderedStatus).toBe("awaiting");
+  });
+});
+
+// ─── RESOLVED-RECONCILE: wires the dead "expired" anchor status. The main
+// sweep loop only ever considers status==="pending" interactions, so an
+// interaction that expires server-side (never clicked) would otherwise sit
+// with its anchor stuck on "🟡 awaiting decision" forever ─────────────────
+
+describe("runConfirmationSweep — resolved-reconcile (expired interaction)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("interaction now status='expired' with a posted anchor (lastRenderedStatus='awaiting') → edits the anchor to 'expired' and strips components", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "anchor-msg-1",
+          anchorMessageId: "anchor-msg-1",
+          lastRenderedStatus: "awaiting",
+        },
+      },
+    );
+
+    // The interaction now reports status="expired" (paperclip-side expiry) —
+    // never went through pendingConfirmations again.
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ status: "expired", payload: { detailsMarkdown: markdown } })],
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, messageId, opts] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("ch-carousel");
+    expect(messageId).toBe("anchor-msg-1");
+    expect(opts.embeds[0].title).toBe("Expired — no decision in time");
+    expect(opts.embeds[0].description).toMatch(/⏰ expired/);
+    expect(opts.components).toEqual([]);
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(finalState["int-1"].lastRenderedStatus).toBe("expired");
+  });
+
+  it("does NOT re-edit the anchor on a second sweep tick once lastRenderedStatus is already 'expired' (idempotent)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "anchor-msg-1",
+          anchorMessageId: "anchor-msg-1",
+          lastRenderedStatus: "expired",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ status: "expired", payload: { detailsMarkdown: markdown } })],
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).not.toHaveBeenCalled();
+  });
+
+  it("interaction expired but NO carousel-batch record exists for it (never rendered by this sweep) → no-op, no throw", async () => {
+    const { runConfirmationSweep } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const paperclip = makePaperclip([makeIssue()], [makeInteraction({ status: "expired" })]);
+
+    await expect(
+      runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip),
+    ).resolves.not.toThrow();
+    expect(editMessageInChannel).not.toHaveBeenCalled();
+  });
+
+  it("accepted/rejected interactions are NOT touched by the resolved-reconcile pass (handled by the button handler, not the sweep)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "anchor-msg-1",
+          anchorMessageId: "anchor-msg-1",
+          lastRenderedStatus: "awaiting",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ status: "accepted", payload: { detailsMarkdown: markdown } })],
+    );
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).not.toHaveBeenCalled();
+  });
+
+  it("editMessageInChannel throwing is tolerated — logged and retried next sweep, does not throw", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+    (editMessageInChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("message not found"));
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(markdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "anchor-msg-1",
+          anchorMessageId: "anchor-msg-1",
+          lastRenderedStatus: "awaiting",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ status: "expired", payload: { detailsMarkdown: markdown } })],
+    );
+
+    await expect(
+      runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip),
+    ).resolves.not.toThrow();
+
+    const finalState = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    // Not marked expired since the edit failed — next sweep retries.
     expect(finalState["int-1"].lastRenderedStatus).toBe("awaiting");
   });
 });

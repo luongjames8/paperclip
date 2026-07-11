@@ -41,30 +41,52 @@ export interface CarouselBatchCadence {
 
 export interface CarouselBatchPayload {
   version: 1;
-  weekOf: string;
-  cadence: CarouselBatchCadence;
+  // weekOf/cadence are OPTIONAL passthrough — the contract's job is to make
+  // sure the operator ALWAYS sees the batch (never a blind fallthrough), not
+  // to gate visibility on metadata the publisher may omit or malform. A
+  // payload with valid items but missing/wrong-typed weekOf/cadence still
+  // parses as structured; only `version` and `items` are load-bearing.
+  weekOf?: string;
+  cadence?: CarouselBatchCadence;
   items: CarouselBatchItem[];
 }
 
 // Runtime shape guard — payload is `Record<string, unknown>` at the API
 // boundary (interaction.payload), so a malformed or absent field must
 // degrade to "not structured" rather than throw deep in the sweep loop.
+//
+// Only `version === 1` and `items` (an array of well-formed items — 0 items
+// is a legitimate "batch held everything over" state, see the dedicated
+// test) are required. `weekOf`/`cadence` are passthrough-if-well-formed,
+// dropped-if-not — a contract wobble on metadata must never blind the
+// operator to the batch itself (the whole reason this structured path
+// exists).
 export function parseCarouselBatchPayload(raw: unknown): CarouselBatchPayload | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
   if (obj.version !== 1) return null;
-  if (typeof obj.weekOf !== "string") return null;
+
+  const weekOf = typeof obj.weekOf === "string" ? obj.weekOf : undefined;
+
+  let cadence: CarouselBatchCadence | undefined;
   const cadenceRaw = obj.cadence;
-  if (!cadenceRaw || typeof cadenceRaw !== "object") return null;
-  const cadenceObj = cadenceRaw as Record<string, unknown>;
-  if (!Array.isArray(cadenceObj.days) || !cadenceObj.days.every((d) => typeof d === "string")) return null;
-  if (typeof cadenceObj.held !== "number" || typeof cadenceObj.strays !== "number") return null;
-  const cadence: CarouselBatchCadence = {
-    days: cadenceObj.days as string[],
-    held: cadenceObj.held,
-    strays: cadenceObj.strays,
-    ...(typeof cadenceObj.heldOldestWeek === "string" ? { heldOldestWeek: cadenceObj.heldOldestWeek } : {}),
-  };
+  if (cadenceRaw && typeof cadenceRaw === "object") {
+    const cadenceObj = cadenceRaw as Record<string, unknown>;
+    if (
+      Array.isArray(cadenceObj.days) &&
+      cadenceObj.days.every((d) => typeof d === "string") &&
+      typeof cadenceObj.held === "number" &&
+      typeof cadenceObj.strays === "number"
+    ) {
+      cadence = {
+        days: cadenceObj.days as string[],
+        held: cadenceObj.held,
+        strays: cadenceObj.strays,
+        ...(typeof cadenceObj.heldOldestWeek === "string" ? { heldOldestWeek: cadenceObj.heldOldestWeek } : {}),
+      };
+    }
+  }
+
   if (!Array.isArray(obj.items)) return null;
   const items: CarouselBatchItem[] = [];
   for (const rawItem of obj.items) {
@@ -76,7 +98,12 @@ export function parseCarouselBatchPayload(raw: unknown): CarouselBatchPayload | 
     if (!Array.isArray(item.slides) || !item.slides.every((s) => typeof s === "string")) return null;
     items.push({ slug: item.slug, day: item.day, caption: item.caption, slides: item.slides as string[] });
   }
-  return { version: 1, weekOf: obj.weekOf, cadence, items };
+  return {
+    version: 1,
+    ...(weekOf !== undefined ? { weekOf } : {}),
+    ...(cadence !== undefined ? { cadence } : {}),
+    items,
+  };
 }
 
 // Adapts a structured CarouselBatchPayload into the same ParsedCarouselBatch

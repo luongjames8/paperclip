@@ -201,7 +201,7 @@ describe("parseCarouselBatchPayload", () => {
 
   it("accepts an optional heldOldestWeek on cadence", () => {
     const parsed = parseCarouselBatchPayload(validPayload({ cadence: { days: [], held: 3, strays: 0, heldOldestWeek: "2026-07-06" } }));
-    expect(parsed!.cadence.heldOldestWeek).toBe("2026-07-06");
+    expect(parsed!.cadence?.heldOldestWeek).toBe("2026-07-06");
   });
 
   it("accepts a null day on an item (unplanned stray)", () => {
@@ -230,15 +230,45 @@ describe("parseCarouselBatchPayload", () => {
     expect(parseCarouselBatchPayload({ ...validPayload(), version: "1" })).toBeNull();
   });
 
-  it("missing weekOf → null", () => {
+  // weekOf/cadence are OPTIONAL passthrough — a contract wobble on metadata
+  // must never blind the operator to the batch itself. Valid items always
+  // parse as structured regardless of weekOf/cadence shape.
+  it("missing weekOf → still parses structured (weekOf is optional passthrough)", () => {
     const { weekOf, ...rest } = validPayload();
-    expect(parseCarouselBatchPayload(rest)).toBeNull();
+    const parsed = parseCarouselBatchPayload(rest);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.weekOf).toBeUndefined();
+    expect(parsed!.items).toHaveLength(2);
   });
 
-  it("missing/malformed cadence → null", () => {
-    expect(parseCarouselBatchPayload({ ...validPayload(), cadence: undefined })).toBeNull();
-    expect(parseCarouselBatchPayload({ ...validPayload(), cadence: { days: "not-an-array", held: 0, strays: 0 } })).toBeNull();
-    expect(parseCarouselBatchPayload({ ...validPayload(), cadence: { days: [], held: "zero", strays: 0 } })).toBeNull();
+  it("missing/malformed cadence → still parses structured, cadence simply absent from the result", () => {
+    const noCadence = parseCarouselBatchPayload({ ...validPayload(), cadence: undefined });
+    expect(noCadence).not.toBeNull();
+    expect(noCadence!.cadence).toBeUndefined();
+
+    // Wrong-typed `held` (e.g. "3" from a schema/serialization slip) — the
+    // exact live-incident shape this finding exists to survive.
+    const wrongTypeHeld = parseCarouselBatchPayload({ ...validPayload(), cadence: { days: ["Sat"], held: "3", strays: 0 } });
+    expect(wrongTypeHeld).not.toBeNull();
+    expect(wrongTypeHeld!.cadence).toBeUndefined();
+    expect(wrongTypeHeld!.items).toHaveLength(2);
+
+    const wrongTypeDays = parseCarouselBatchPayload({ ...validPayload(), cadence: { days: "not-an-array", held: 0, strays: 0 } });
+    expect(wrongTypeDays).not.toBeNull();
+    expect(wrongTypeDays!.cadence).toBeUndefined();
+
+    const wrongTypeStrays = parseCarouselBatchPayload({ ...validPayload(), cadence: { days: [], held: 0, strays: "zero" } });
+    expect(wrongTypeStrays).not.toBeNull();
+    expect(wrongTypeStrays!.cadence).toBeUndefined();
+  });
+
+  it("valid items + no cadence at all (field absent from payload) → parses structured", () => {
+    const payload = validPayload();
+    delete (payload as any).cadence;
+    const parsed = parseCarouselBatchPayload(payload);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.items).toHaveLength(2);
+    expect(parsed!.cadence).toBeUndefined();
   });
 
   it("items not an array → null", () => {
