@@ -19,6 +19,7 @@ vi.mock("../src/discord/rest.js", () => ({
   postEmbedToThread: vi.fn().mockResolvedValue("msg-4"),
   postToThread: vi.fn().mockResolvedValue("msg-5"),
   editMessageInChannel: vi.fn().mockResolvedValue(undefined),
+  findRecentMessageWithCustomId: vi.fn().mockResolvedValue(null),
 }));
 
 function sha256(text: string): string {
@@ -1249,8 +1250,16 @@ describe("runConfirmationSweep — zero-item revision supersedes the previous an
     })) as Record<string, any>;
     expect(finalState["int-1"].totalSections).toBe(0);
     expect(finalState["int-1"].headerPosted).toBe(false);
-    expect(finalState["int-1"].anchorMessageId).toBe("old-anchor-id");
-    expect(finalState["int-1"].lastRenderedStatus).toBe("superseded");
+    // The successor record carries NO anchor pointer — a zero-item generation
+    // posts nothing, so it HAS no current anchor. The retired old card must
+    // never be reachable by the resolved-reconcile pass (codex round-6 P2:
+    // it used to be repainted accepted/rejected, undoing the superseded
+    // marker on an obsolete batch).
+    expect(finalState["int-1"].anchorMessageId).toBeUndefined();
+    expect(finalState["int-1"].trailerMessageId).toBeUndefined();
+    expect(finalState["int-1"].lastRenderedStatus).toBeUndefined();
+    // Edit landed — nothing parked for retry.
+    expect(finalState["int-1"].staleAnchors).toBeUndefined();
   });
 
   it("second tick (same zero-item hash) is a no-op — does NOT re-edit the anchor", async () => {
@@ -1285,7 +1294,7 @@ describe("runConfirmationSweep — zero-item revision supersedes the previous an
     expect(editMessageInChannel).not.toHaveBeenCalled();
   });
 
-  it("edit failure on the zero-item supersede path is tolerated (logged, not thrown) — record still stamped with the zero-item state", async () => {
+  it("edit failure on the zero-item supersede path is tolerated (logged, not thrown) — zero-item state stamped AND the failed supersede PARKED in staleAnchors for retry", async () => {
     const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
     const { editMessageInChannel } = await import("../src/discord/rest.js");
     (editMessageInChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("message not found: old-anchor-id"));
@@ -1323,9 +1332,12 @@ describe("runConfirmationSweep — zero-item revision supersedes the previous an
     })) as Record<string, any>;
     expect(finalState["int-1"].totalSections).toBe(0);
     expect(finalState["int-1"].headerPosted).toBe(false);
-    // Edit failed — lastRenderedStatus stays at its previous value (not advanced to "superseded").
-    expect(finalState["int-1"].lastRenderedStatus).toBe("awaiting");
-    expect(finalState["int-1"].anchorMessageId).toBe("old-anchor-id");
+    // Edit failed — the old anchor is PARKED for retry (codex round-6 P2:
+    // the old code stamped the new hash with the retry gated off forever),
+    // and the successor record carries no current-anchor pointer.
+    expect(finalState["int-1"].anchorMessageId).toBeUndefined();
+    expect(finalState["int-1"].lastRenderedStatus).toBeUndefined();
+    expect(finalState["int-1"].staleAnchors).toEqual([{ messageId: "old-anchor-id", channelId: "ch-carousel" }]);
   });
 
   it("no existing anchor (first-ever tick, zero items from the start) → does NOT call editMessageInChannel", async () => {
@@ -1737,5 +1749,687 @@ describe("runConfirmationSweep — resolved-reconcile (non-pending terminal stat
     })) as Record<string, any>;
     // Not marked expired since the edit failed — next sweep retries.
     expect(finalState["int-1"].lastRenderedStatus).toBe("awaiting");
+  });
+});
+
+// ─── RETIREMENT QUEUE + ADOPT-DON'T-DUPLICATE (codex round-6 class-closer):
+// anchorMessageId only ever points at the CURRENT generation's anchor;
+// retired anchors move to staleAnchors and are retried until their
+// "superseded" edit lands; ambiguous trailer sends probe-adopt instead of
+// double-posting ─────────────────────────────────────────────────────────
+
+describe("runConfirmationSweep — retirement queue (staleAnchors) retried until success", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function fullyPostedRecord(markdown: string, overrides: Record<string, unknown> = {}) {
+    return {
+      postedAt: new Date().toISOString(),
+      sectionsPosted: 2,
+      totalSections: 2,
+      artifactHash: sha256(markdown.trim()),
+      headerPosted: true,
+      trailerPosted: true,
+      trailerMessageId: "old-anchor-id",
+      anchorMessageId: "old-anchor-id",
+      lastRenderedStatus: "awaiting",
+      ...overrides,
+    };
+  }
+
+  it("zero-item supersede failure is retried on the NEXT tick via the reconcile pass — parked entry cleared once the edit lands", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+    (editMessageInChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("transient 503"));
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      { "int-1": fullyPostedRecord(oldMarkdown) },
+    );
+
+    const payload = buildStructuredPayload({ items: [], cadence: { days: [], held: 2, strays: 0, heldOldestWeek: "2026-07-06" } });
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "irrelevant", carouselBatch: payload } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+
+    // Tick 1: supersede edit fails → parked.
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+    let state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].staleAnchors).toEqual([{ messageId: "old-anchor-id", channelId: "ch-carousel" }]);
+
+    // Tick 2: same zero-item hash (the old code would skip forever here) —
+    // the reconcile pass retries the parked edit and clears the queue.
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+    const retryCall = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(retryCall[1]).toBe("ch-carousel");
+    expect(retryCall[2]).toBe("old-anchor-id");
+    expect(retryCall[3].embeds[0].description).toMatch(/⏰ superseded/);
+    expect(retryCall[3].components).toEqual([]);
+
+    state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].staleAnchors).toBeUndefined();
+  });
+
+  it("hashChanged supersede failure parks the OLD anchor on the successor record (old code dropped the id entirely) and retries next tick", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel, postEmbedsToChannel } = await import("../src/discord/rest.js");
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockResolvedValue("msg-2");
+    (editMessageInChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("transient 503"));
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      { "int-1": fullyPostedRecord(oldMarkdown) },
+    );
+
+    // Revision: different legacy markdown → hash change → full re-post.
+    const newMarkdown = buildBatch([3, 1]);
+    const interaction = makeInteraction({ payload: { detailsMarkdown: newMarkdown } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+
+    // Tick 1: supersede of the old anchor fails → parked; re-post proceeds.
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+    let state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].staleAnchors).toEqual([{ messageId: "old-anchor-id", channelId: "ch-carousel" }]);
+    // The successor record's current anchor is the NEW trailer, not the old one.
+    expect(state["int-1"].anchorMessageId).toBe("msg-2");
+    expect(state["int-1"].artifactHash).toBe(sha256(newMarkdown.trim()));
+
+    // Tick 2: reconcile pass retries the parked supersede and clears it.
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+    const retryCall = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(retryCall[2]).toBe("old-anchor-id");
+    expect(retryCall[3].embeds[0].description).toMatch(/⏰ superseded/);
+
+    state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].staleAnchors).toBeUndefined();
+    expect(state["int-1"].anchorMessageId).toBe("msg-2");
+  });
+
+  it("parked supersede is retried even after the interaction leaves 'pending' (web-accepted) — and the retired card is NEVER repainted with the terminal status", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const payload = buildStructuredPayload({ items: [], cadence: { days: [], held: 2, strays: 0, heldOldestWeek: "2026-07-06" } });
+    const interaction = makeInteraction({ status: "accepted", payload: { detailsMarkdown: "irrelevant", carouselBatch: payload } });
+    const { carouselArtifactHash } = await import("../src/render/carousel-batch.js");
+
+    // Zero-item successor record with a still-parked supersede: the pending
+    // loop will never see this interaction again (status=accepted), so the
+    // reconcile pass is the only thing that can drain the queue.
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 0,
+          totalSections: 0,
+          artifactHash: carouselArtifactHash(interaction),
+          headerPosted: false,
+          trailerPosted: false,
+          staleAnchors: [{ messageId: "old-anchor-id", channelId: "ch-carousel" }],
+        },
+      },
+    );
+
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // Exactly ONE edit: the superseded retry. The accepted status is NOT
+    // rendered anywhere — a zero-item generation has no current anchor, and
+    // the retired old card must not be resurrected as the decision card
+    // (codex round-6 P2).
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, messageId, opts] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("ch-carousel");
+    expect(messageId).toBe("old-anchor-id");
+    expect(opts.embeds[0].description).toMatch(/⏰ superseded/);
+
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].staleAnchors).toBeUndefined();
+    expect(state["int-1"].lastRenderedStatus).toBeUndefined();
+  });
+
+  it("supersede target deleted on Discord (Unknown Message 10008) → retirement completes, entry NOT parked forever", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+    const gone = Object.assign(new Error("Unknown Message"), { code: 10008 });
+    (editMessageInChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(gone);
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      { "int-1": fullyPostedRecord(oldMarkdown) },
+    );
+
+    const payload = buildStructuredPayload({ items: [], cadence: { days: [], held: 2, strays: 0, heldOldestWeek: "2026-07-06" } });
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "irrelevant", carouselBatch: payload } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // A deleted message cannot show live buttons — nothing to retry.
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].staleAnchors).toBeUndefined();
+  });
+
+  it("supersede target in a deleted channel (Unknown Channel 10003) → retirement completes, entry NOT parked forever", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+    const gone = Object.assign(new Error("Unknown Channel"), { code: 10003 });
+    (editMessageInChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(gone);
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      { "int-1": fullyPostedRecord(oldMarkdown) },
+    );
+
+    const payload = buildStructuredPayload({ items: [], cadence: { days: [], held: 2, strays: 0, heldOldestWeek: "2026-07-06" } });
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "irrelevant", carouselBatch: payload } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].staleAnchors).toBeUndefined();
+  });
+
+  it("malformed staleAnchors entry in stored state is DROPPED with a warning — does not crash the sweep, well-formed siblings still drain", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+    const { carouselArtifactHash } = await import("../src/render/carousel-batch.js");
+
+    const harness = createTestHarness({ manifest });
+    const payload = buildStructuredPayload({ items: [], cadence: { days: [], held: 2, strays: 0, heldOldestWeek: "2026-07-06" } });
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "irrelevant", carouselBatch: payload } });
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 0,
+          totalSections: 0,
+          artifactHash: carouselArtifactHash(interaction),
+          headerPosted: false,
+          trailerPosted: false,
+          // Junk alongside a real entry — untyped JSON state can carry both.
+          staleAnchors: [null, { messageId: 42 }, { messageId: "good-id", channelId: "ch-carousel" }],
+        },
+      },
+    );
+
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await expect(
+      runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip),
+    ).resolves.not.toThrow();
+
+    // The well-formed entry drained; the junk is gone, not retried.
+    const drained = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[2] === "good-id");
+    expect(drained).toHaveLength(1);
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].staleAnchors).toBeUndefined();
+  });
+
+  it("malformed NON-ARRAY staleAnchors container + corrupted artifactHash on a generation change do not wedge the interaction (retireCurrentAnchor tolerates junk shapes)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          // artifactHash corrupted to a number + ambiguous-send marker set:
+          // the orphan-probe guard must not call .slice() on it.
+          artifactHash: 42,
+          headerPosted: true,
+          trailerPosted: false,
+          trailerAttemptedAt: "2026-07-11T00:00:00.000Z",
+          anchorMessageId: "old-anchor-id",
+          lastRenderedStatus: "awaiting",
+          // Truthy non-array container: must be treated as empty, not spread.
+          staleAnchors: { junk: true },
+        },
+      },
+    );
+
+    // Revision → generation change → retireCurrentAnchor runs against the
+    // corrupted record. Must not throw; the new generation must post.
+    const newMarkdown = buildBatch([3, 1]);
+    const interaction = makeInteraction({ payload: { detailsMarkdown: newMarkdown } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await expect(
+      runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip),
+    ).resolves.not.toThrow();
+
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    // The record healed: fresh generation stamped, junk container gone.
+    expect(state["int-1"].artifactHash).toBe(sha256(newMarkdown.trim()));
+    expect(state["int-1"].trailerPosted).toBe(true);
+  });
+
+  it("legacy record whose pointer is already marked 'superseded' is never repainted by the terminal reconcile (pre-rewrite zero-item shape)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+    const { carouselArtifactHash } = await import("../src/render/carousel-batch.js");
+
+    const harness = createTestHarness({ manifest });
+    const payload = buildStructuredPayload({ items: [], cadence: { days: [], held: 2, strays: 0, heldOldestWeek: "2026-07-06" } });
+    const interaction = makeInteraction({ status: "accepted", payload: { detailsMarkdown: "irrelevant", carouselBatch: payload } });
+
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 0,
+          totalSections: 0,
+          artifactHash: carouselArtifactHash(interaction),
+          headerPosted: false,
+          trailerPosted: false,
+          anchorMessageId: "old-anchor-id",
+          lastRenderedStatus: "superseded",
+        },
+      },
+    );
+
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).not.toHaveBeenCalled();
+  });
+
+  it("terminal reconcile edits the anchor in the channel it was POSTED in (anchorChannelId), not the sweeping rule's current channel", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      { "int-1": fullyPostedRecord(markdown, { anchorMessageId: "anchor-msg-1", trailerMessageId: "anchor-msg-1", anchorChannelId: "ch-original" }) },
+    );
+
+    const paperclip = makePaperclip(
+      [makeIssue()],
+      [makeInteraction({ status: "expired", payload: { detailsMarkdown: markdown } })],
+    );
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, messageId] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("ch-original");
+    expect(messageId).toBe("anchor-msg-1");
+  });
+});
+
+describe("runConfirmationSweep — carousel-shape loss retires the old anchor before the generic path", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("record exists but revision is not carousel-shaped by ANY path (unflagged rule) → old anchor superseded, record reset to the '' hash sentinel, generic card posts", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel, postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(oldMarkdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          trailerMessageId: "old-anchor-id",
+          anchorMessageId: "old-anchor-id",
+          lastRenderedStatus: "awaiting",
+          lastSeenUpdatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    );
+
+    // Revision: plain prose — no structured payload, no legacy heading. The
+    // matching rule carries NO carouselBatch flag, so this falls to the
+    // generic path (which used to leave the old anchor live forever).
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "Just a plain note now, no carousel shape at all." } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // Old anchor retired…
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, messageId, opts] = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("ch-carousel");
+    expect(messageId).toBe("old-anchor-id");
+    expect(opts.embeds[0].description).toMatch(/⏰ superseded/);
+    // …and the generic card still posts.
+    expect(postEmbedToChannel).toHaveBeenCalled();
+
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].artifactHash).toBe("");
+    expect(state["int-1"].anchorMessageId).toBeUndefined();
+    expect(state["int-1"].trailerMessageId).toBeUndefined();
+    expect(state["int-1"].headerPosted).toBe(false);
+    expect(state["int-1"].staleAnchors).toBeUndefined();
+  });
+
+  it("shape-loss supersede failure parks the anchor for retry; the reset happens regardless", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+    (editMessageInChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("transient 503"));
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(oldMarkdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          anchorMessageId: "old-anchor-id",
+          lastRenderedStatus: "awaiting",
+        },
+      },
+    );
+
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "Plain prose revision." } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].artifactHash).toBe("");
+    expect(state["int-1"].staleAnchors).toEqual([{ messageId: "old-anchor-id", channelId: "ch-carousel" }]);
+  });
+
+  it("the '' sentinel gates re-entry: a shape-lost record does NOT re-fire retirement on later generic-path ticks (even with a zombie anchor pointer)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 0,
+          totalSections: 0,
+          artifactHash: "",
+          headerPosted: false,
+          trailerPosted: false,
+          // Zombie pointer (corrupted/hand-edited state) — the sentinel must
+          // still gate the block; retirement ran at shape-loss time.
+          anchorMessageId: "zombie-anchor-id",
+        },
+      },
+    );
+
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "Still plain prose, still not a carousel." } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(editMessageInChannel).not.toHaveBeenCalled();
+  });
+
+  it("an UNFLAGGED sibling rule matching the same issue does NOT retire the anchor a carouselBatch-flagged rule owns (rule-scoped shape vs interaction-scoped state)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    // Partial degrade record owned by the flagged rule (mid-resume — the
+    // staleness gate does not shield it, so the unflagged rule would have
+    // reached the shape-loss block without the sibling-flag guard).
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 1,
+          totalSections: 1,
+          artifactHash: sha256("Unstructured prose the LLM wrote."),
+          headerPosted: true,
+          trailerPosted: true,
+          anchorMessageId: "degrade-anchor-id",
+          anchorChannelId: "ch-flagged",
+          lastRenderedStatus: "awaiting",
+          lastSeenUpdatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    );
+
+    const config = makeConfig({
+      c1: [
+        { titleRegex: "Carousel", channelId: "ch-flagged", carouselBatch: true },
+        { titleRegex: ".*", channelId: "ch-generic" },
+      ],
+    });
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "Unstructured prose the LLM wrote." } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), config, async () => paperclip);
+
+    // No supersede fired against the flagged rule's anchor…
+    const supersedes = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[2] === "degrade-anchor-id",
+    );
+    expect(supersedes).toHaveLength(0);
+    // …and the record was not reset to the shape-loss sentinel.
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].artifactHash).not.toBe("");
+    expect(state["int-1"].anchorMessageId).toBe("degrade-anchor-id");
+  });
+
+  it("a later revision BACK to carousel shape — even byte-identical to the retired generation — re-posts from scratch (the '' sentinel never matches a real hash)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockResolvedValue("msg-2");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    // Post-shape-loss record: anchor retired, hash sentinel in place.
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 0,
+          totalSections: 0,
+          artifactHash: "",
+          headerPosted: false,
+          trailerPosted: false,
+          lastSeenUpdatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+    );
+
+    const interaction = makeInteraction({ payload: { detailsMarkdown: markdown } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // Full fresh post: header + sections + trailer.
+    expect(postToChannel).toHaveBeenCalled();
+    expect(postEmbedsToChannel).toHaveBeenCalled();
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].artifactHash).toBe(sha256(markdown.trim()));
+    expect(state["int-1"].trailerPosted).toBe(true);
+    expect(state["int-1"].anchorMessageId).toBe("msg-2");
+  });
+});
+
+describe("runConfirmationSweep — adopt-don't-duplicate (ambiguous trailer sends)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function pendingTrailerRecord(markdown: string) {
+    return {
+      postedAt: new Date().toISOString(),
+      sectionsPosted: 2,
+      totalSections: 2,
+      artifactHash: sha256(markdown.trim()),
+      headerPosted: true,
+      trailerPosted: false,
+      trailerAttemptedAt: "2026-07-11T00:00:00.000Z",
+    };
+  }
+
+  it("prior trailer send with unknown outcome + the message actually landed → probe ADOPTS it, no duplicate live-button anchor is posted", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel, findRecentMessageWithCustomId } = await import("../src/discord/rest.js");
+    (findRecentMessageWithCustomId as ReturnType<typeof vi.fn>).mockResolvedValueOnce("landed-msg-id");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      { "int-1": pendingTrailerRecord(markdown) },
+    );
+
+    const interaction = makeInteraction({ payload: { detailsMarkdown: markdown } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // Probe matched by this generation's EXACT accept customId.
+    const hash8 = sha256(markdown.trim()).slice(0, 8);
+    const probeCall = (findRecentMessageWithCustomId as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(probeCall[1]).toBe("ch-carousel");
+    expect(probeCall[2]).toBe(`car-ok:${hash8}:iss-1:int-1`);
+
+    // No second trailer posted — the landed message becomes the anchor.
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].trailerPosted).toBe(true);
+    expect(state["int-1"].anchorMessageId).toBe("landed-msg-id");
+    expect(state["int-1"].anchorChannelId).toBe("ch-carousel");
+    expect(state["int-1"].lastRenderedStatus).toBe("awaiting");
+  });
+
+  it("probe finds nothing → trailer posts normally; the send is attempt-stamped and the anchor records its channel", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockResolvedValue("msg-2");
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      { "int-1": pendingTrailerRecord(markdown) },
+    );
+
+    const interaction = makeInteraction({ payload: { detailsMarkdown: markdown } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].trailerPosted).toBe(true);
+    expect(state["int-1"].anchorMessageId).toBe("msg-2");
+    expect(state["int-1"].anchorChannelId).toBe("ch-carousel");
+    expect(state["int-1"].trailerAttemptedAt).toBeDefined();
+  });
+
+  it("a FRESH trailer send that throws still persists trailerAttemptedAt (stamped BEFORE the send) — the next tick knows the outcome was ambiguous", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+    // Sections (no components arg) succeed; the trailer (posted WITH the
+    // action-row components) times out.
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_client, _channelId, _embeds, components) => {
+        if (components) throw new Error("timeout after send");
+        return "msg-2";
+      },
+    );
+
+    const harness = createTestHarness({ manifest });
+    const markdown = buildBatch([2, 2]);
+    const interaction = makeInteraction({ payload: { detailsMarkdown: markdown } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    // trailerPosted false, but the attempt is on record — moving the stamp
+    // to AFTER the send would defeat the entire duplicate-anchor defense.
+    expect(state["int-1"].trailerPosted).toBe(false);
+    expect(state["int-1"].trailerAttemptedAt).toBeDefined();
+    // Restore the shared mock for later tests.
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockReset();
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockResolvedValue("msg-2");
+  });
+
+  it("ambiguous trailer send followed by a GENERATION change → retirement probes for the outgoing generation's orphan and supersedes it", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel, findRecentMessageWithCustomId } = await import("../src/discord/rest.js");
+    (findRecentMessageWithCustomId as ReturnType<typeof vi.fn>).mockResolvedValueOnce("orphan-anchor-id");
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      { "int-1": pendingTrailerRecord(oldMarkdown) },
+    );
+
+    // Revision to a different artifact BEFORE the ambiguous send was resolved.
+    const newMarkdown = buildBatch([3, 1]);
+    const interaction = makeInteraction({ payload: { detailsMarkdown: newMarkdown } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // The probe used the OUTGOING generation's customId…
+    const oldHash8 = sha256(oldMarkdown.trim()).slice(0, 8);
+    const probeCall = (findRecentMessageWithCustomId as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(probeCall[2]).toBe(`car-ok:${oldHash8}:iss-1:int-1`);
+    // …and the found orphan was superseded.
+    const supersedeCalls = (editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[2] === "orphan-anchor-id",
+    );
+    expect(supersedeCalls).toHaveLength(1);
+    expect(supersedeCalls[0][3].embeds[0].description).toMatch(/⏰ superseded/);
   });
 });

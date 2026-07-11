@@ -2,11 +2,12 @@ import type { Client } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { DiscordFleetConfig } from "../config/schema.js";
 import type { PaperclipClient, PaperclipIssue, PaperclipInteraction } from "../api/paperclip.js";
-import { postEmbedToChannel, postEmbedsToChannel, postToChannel, editMessageInChannel } from "../discord/rest.js";
+import { postEmbedToChannel, postEmbedsToChannel, postToChannel, editMessageInChannel, findRecentMessageWithCustomId } from "../discord/rest.js";
 import {
   enforceEmbedLimits,
   buildCarouselConfirmationActionRow,
   buildCarouselAnchorEmbed,
+  carouselConfirmAcceptCustomId,
   CAROUSEL_HASH_TOKEN_LEN,
   type CarouselAnchorStatus,
 } from "../render/embeds.js";
@@ -63,7 +64,41 @@ export interface CarouselBatchSweepRecord {
   // "the message with buttons on it". New field; absent on records from
   // before this migration (falls back to trailerMessageId — see
   // resolveAnchorMessageId).
+  //
+  // INVARIANT (codex round-6 class-closer): this field only ever points at
+  // the CURRENT generation's anchor — set solely when a trailer is posted
+  // (or probe-adopted) for record.artifactHash, and DROPPED on every
+  // generation change (hash change, zero-item revision, carousel-shape
+  // loss). An anchor belonging to a retired generation lives in
+  // staleAnchors below until its "superseded" edit lands; it never occupies
+  // this field, so the resolved-reconcile pass can never repaint an old
+  // card as the current decision card.
   anchorMessageId?: string;
+  // The channel the current anchor was POSTED in. Every later edit of the
+  // anchor (supersede, terminal reconcile) targets this channel — never the
+  // channel of whichever sweep rule happens to be iterating, which can
+  // differ when multiple rules match the same issue or a rule's channelId
+  // is reconfigured. Absent on records from before this field existed
+  // (edits fall back to the sweeping rule's channelId — prior behavior).
+  anchorChannelId?: string;
+  // RETIREMENT QUEUE: anchors of PRIOR generations whose "superseded" edit
+  // has not succeeded yet (the edit failed transiently, or a lost-response
+  // trailer was probe-recovered after its generation was already retired).
+  // Drained by reconcileResolvedCarouselAnchors every tick — each entry is
+  // re-attempted until its edit lands, then removed. This is what makes
+  // "anchors of non-current generations are eventually rendered superseded"
+  // TRUE BY CONSTRUCTION rather than best-effort-once: a transient Discord
+  // failure can never permanently strand an old anchor with live buttons
+  // (codex round-6 P2 ×3: zero-item retry, generic-fallback supersede,
+  // reconcile-vs-superseded-anchor).
+  staleAnchors?: Array<{ messageId: string; channelId: string }>;
+  // Stamped immediately BEFORE each trailer send. Presence with
+  // trailerPosted still false means a prior send's outcome is UNKNOWN (the
+  // send threw, but Discord may have created the message — timeout-after-
+  // send). The next trailer attempt then PROBES the channel for a message
+  // carrying this generation's accept-button customId and ADOPTS it instead
+  // of posting a duplicate live-button anchor.
+  trailerAttemptedAt?: string;
   // Last status rendered onto the anchor by SWEEP-driven edits
   // ("awaiting" | "superseded" | "expired" | "accepted" | "rejected" |
   // "cancelled"). A Discord-button accept/reject ALSO renders the anchor
@@ -222,34 +257,20 @@ async function postCarouselBatch(
         source,
       });
 
-      // SUPERSEDE THE STALE ANCHOR (codex P2): a hash change here means a
-      // PREVIOUSLY rendered (non-empty) generation just got revised down to
-      // zero items. Without this, the old anchor is left showing "🟡
-      // awaiting decision" with live accept/reject buttons for a generation
-      // that no longer exists — same "stacked generations" failure class as
-      // the hashChanged supersede block below, just hitting the early return
-      // before that block ever runs. Guarded by lastRenderedStatus (edits at
-      // most once) and tolerates edit failure (log + continue), exactly like
-      // reconcileResolvedCarouselAnchors.
-      const previousAnchorId = existing ? resolveAnchorMessageId(existing) : undefined;
-      let lastRenderedStatus = existing?.lastRenderedStatus;
-      if (existing && previousAnchorId && existing.lastRenderedStatus !== "superseded") {
-        const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
-        try {
-          await editMessageInChannel(client, channelId, previousAnchorId, {
-            embeds: [buildCarouselAnchorEmbed({ issueUrl, status: "superseded" })],
-            components: [],
-          });
-          lastRenderedStatus = "superseded";
-        } catch (err) {
-          ctx.logger.warn("confirmation-sweep: best-effort disable of superseded anchor failed (zero-item revision) — proceeding", {
-            companyId: company.companyId,
-            interactionId: interaction.id,
-            anchorMessageId: previousAnchorId,
-            error: String(err),
-          });
-        }
-      }
+      // GENERATION-CHANGE RETIREMENT (codex round-6 P2 ×2): the outgoing
+      // generation's anchor is retired via the shared primitive — a failed
+      // edit is PARKED in staleAnchors and retried every tick by
+      // reconcileResolvedCarouselAnchors, never stamped over (the old code
+      // stamped the new hash even when the edit failed, and the hash-change
+      // guard above then gated the retry off forever). The successor record
+      // deliberately carries NO anchor pointer: a zero-item generation posts
+      // nothing, so it HAS no current anchor, and the resolved-reconcile
+      // pass must never treat the retired old card as this generation's
+      // decision card (it used to repaint it accepted/rejected, undoing the
+      // superseded marker on an obsolete batch).
+      const staleAnchors = existing
+        ? await retireCurrentAnchor(ctx, client, channelId, company.companyId, issue.id, interaction.id, issueUrl, existing)
+        : [];
 
       state[interaction.id] = {
         postedAt: new Date(now).toISOString(),
@@ -259,8 +280,7 @@ async function postCarouselBatch(
         headerPosted: false,
         trailerPosted: false,
         lastSeenUpdatedAt: interaction.updatedAt,
-        ...(previousAnchorId ? { anchorMessageId: previousAnchorId } : {}),
-        ...(lastRenderedStatus ? { lastRenderedStatus } : {}),
+        ...(staleAnchors.length ? { staleAnchors } : {}),
       };
     }
     return;
@@ -274,29 +294,20 @@ async function postCarouselBatch(
       ? { postedAt: new Date(now).toISOString(), sectionsPosted: 0, totalSections, artifactHash, headerPosted: false, trailerPosted: false, lastSeenUpdatedAt: interaction.updatedAt }
       : { ...existing, totalSections, lastSeenUpdatedAt: interaction.updatedAt };
 
-  // ANCHOR — mark the PREVIOUS generation superseded (kills "stacked
+  // ANCHOR — retire the PREVIOUS generation's anchor (kills "stacked
   // generations": 2026-07-11 live incident, partial + full renders of the
   // same week both sitting in the channel with nothing marking which was
-  // current). This EDITS the old anchor in place rather than leaving it live
-  // — belt-and-suspenders only: the customId version-token check at click
-  // time (FIX (a), PR #27) is what actually prevents a stale accept/reject
-  // from taking effect, so a failure here is logged and swallowed, never
-  // fatal to the re-post.
-  const previousAnchorId = existing ? resolveAnchorMessageId(existing) : undefined;
-  if (hashChanged && previousAnchorId) {
-    try {
-      await editMessageInChannel(client, channelId, previousAnchorId, {
-        embeds: [buildCarouselAnchorEmbed({ issueUrl, status: "superseded" })],
-        components: [],
-      });
-    } catch (err) {
-      ctx.logger.warn("confirmation-sweep: best-effort disable of superseded anchor failed — proceeding (version-token guard still applies)", {
-        companyId: company.companyId,
-        interactionId: interaction.id,
-        anchorMessageId: previousAnchorId,
-        error: String(err),
-      });
-    }
+  // current). The customId version-token check at click time (FIX (a),
+  // PR #27) is what prevents a stale accept/reject from TAKING EFFECT, but
+  // the visual retirement is no longer best-effort-once: a failed edit is
+  // parked in staleAnchors on the successor record and retried every tick
+  // until it lands — the old code dropped the old anchor id from state
+  // entirely on failure, permanently stranding a live-button card.
+  if (hashChanged && existing) {
+    const staleAnchors = await retireCurrentAnchor(
+      ctx, client, channelId, company.companyId, issue.id, interaction.id, issueUrl, existing,
+    );
+    if (staleAnchors.length) record.staleAnchors = staleAnchors;
   }
 
   if (!record.headerPosted) {
@@ -363,6 +374,131 @@ function resolveAnchorMessageId(record: CarouselBatchSweepRecord): string | unde
   return record.anchorMessageId ?? record.trailerMessageId;
 }
 
+// Edit one message to the terminal "superseded" card, stripping its buttons.
+// Returns true when the edit landed, false when it failed — the caller MUST
+// park a false result in staleAnchors (retried every tick by
+// reconcileResolvedCarouselAnchors) rather than dropping it: a swallowed
+// failure here used to permanently strand an old anchor with live buttons.
+async function supersedeAnchorMessage(
+  ctx: PluginContext,
+  client: Client,
+  channelId: string,
+  companyId: string,
+  interactionId: string,
+  messageId: string,
+  issueUrl: string,
+): Promise<boolean> {
+  try {
+    await editMessageInChannel(client, channelId, messageId, {
+      embeds: [buildCarouselAnchorEmbed({ issueUrl, status: "superseded" })],
+      components: [],
+    });
+    return true;
+  } catch (err) {
+    // Unknown Message (10008) / Unknown Channel (10003): the message no
+    // longer exists, so it cannot show live buttons — retirement is
+    // vacuously complete. Treating this as failure would park the entry to
+    // be retried every tick FOREVER against a message that will never come
+    // back.
+    const code = (err as { code?: unknown })?.code;
+    if (code === 10008 || code === 10003) {
+      ctx.logger.info("confirmation-sweep: supersede target no longer exists — retirement complete", {
+        companyId,
+        interactionId,
+        anchorMessageId: messageId,
+        channelId,
+        code,
+      });
+      return true;
+    }
+    ctx.logger.warn("confirmation-sweep: supersede edit failed — parked in staleAnchors for retry next sweep", {
+      companyId,
+      interactionId,
+      anchorMessageId: messageId,
+      channelId,
+      error: String(err),
+    });
+    return false;
+  }
+}
+
+// GENERATION-CHANGE RETIREMENT — the single implementation behind all three
+// change shapes (artifact hash change, revision down to zero items,
+// carousel-shape loss to the generic path). Retires every live-button
+// artifact the outgoing generation could have left in the channel:
+//   1. carries forward anything already parked in existing.staleAnchors;
+//   2. if the outgoing generation's last trailer send was AMBIGUOUS
+//      (trailerAttemptedAt set, trailerPosted false — the send threw but the
+//      message may have landed), probes the channel for that generation's
+//      accept-button customId and treats a found orphan as a live anchor;
+//   3. edits the current anchor (and any probed orphan) to "superseded" —
+//      an edit that fails is PARKED, not dropped, so it is retried every
+//      tick until it lands.
+// Anchors already rendered terminal (accepted/rejected/cancelled/expired —
+// buttons long stripped) or already superseded are left untouched: repainting
+// a decided card as "superseded" would destroy the audit trail.
+// Returns the staleAnchors array the SUCCESSOR record must carry.
+async function retireCurrentAnchor(
+  ctx: PluginContext,
+  client: Client,
+  fallbackChannelId: string,
+  companyId: string,
+  issueId: string,
+  interactionId: string,
+  issueUrl: string,
+  existing: CarouselBatchSweepRecord,
+): Promise<Array<{ messageId: string; channelId: string }>> {
+  // Stored state is untyped JSON — tolerate a malformed container the same
+  // way the reconcile drain tolerates malformed entries (a throw here would
+  // wedge this interaction's generation changes forever, since nothing
+  // repairs the record before the throw recurs).
+  const parked = Array.isArray(existing.staleAnchors) ? [...existing.staleAnchors] : [];
+  const channelId = existing.anchorChannelId ?? fallbackChannelId;
+
+  const toRetire: string[] = [];
+  const currentId = resolveAnchorMessageId(existing);
+  if (currentId && (existing.lastRenderedStatus === "awaiting" || existing.lastRenderedStatus === undefined)) {
+    toRetire.push(currentId);
+  }
+
+  // Lost-response orphan: the outgoing generation attempted a trailer whose
+  // outcome is unknown. If it actually landed, it is a live-button anchor
+  // this record never learned the id of — probe for it so it gets retired
+  // with the rest. DELIBERATE RESIDUAL: this probe runs once, at retirement —
+  // an orphan it fails to find (probe error, or buried deeper than the
+  // 100-message fetch window within one sweep interval) is not hunted again;
+  // its id was never knowable, so it cannot be parked. A click on such a
+  // card is still refused by the click-time version-token guard (stale
+  // hash), so the residual is a dead-looking card after a triple-rare
+  // coincidence, never a wrong decision — not worth a forever-probing ghost
+  // queue.
+  if (existing.trailerAttemptedAt && !existing.trailerPosted && typeof existing.artifactHash === "string" && existing.artifactHash) {
+    const hash8 = existing.artifactHash.slice(0, CAROUSEL_HASH_TOKEN_LEN);
+    try {
+      const orphanId = await findRecentMessageWithCustomId(
+        client,
+        channelId,
+        carouselConfirmAcceptCustomId(issueId, interactionId, hash8),
+      );
+      if (orphanId && !toRetire.includes(orphanId)) toRetire.push(orphanId);
+    } catch (err) {
+      ctx.logger.warn("confirmation-sweep: orphan-anchor probe failed during retirement — skipping", {
+        companyId,
+        interactionId,
+        error: String(err),
+      });
+    }
+  }
+
+  for (const messageId of toRetire) {
+    const ok = await supersedeAnchorMessage(ctx, client, channelId, companyId, interactionId, messageId, issueUrl);
+    if (!ok && !parked.some((s) => s.messageId === messageId)) {
+      parked.push({ messageId, channelId });
+    }
+  }
+  return parked;
+}
+
 // request_confirmation interaction status -> the CarouselAnchorStatus the
 // anchor should show. Only terminal (non-"pending") statuses are mapped —
 // "pending" is intentionally absent (handled by the main sweep loop, not
@@ -406,18 +542,58 @@ async function reconcileResolvedCarouselAnchors(
 ): Promise<void> {
   for (const interaction of interactions) {
     if (interaction.kind !== "request_confirmation") continue;
+    let record = state[interaction.id];
+    if (!record) continue;
+    const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
+
+    // RETIREMENT-QUEUE DRAIN: parked supersede edits from prior generation
+    // changes (the inline attempt failed transiently). Retried HERE — the
+    // one pass that sees every interaction this sweep knows about regardless
+    // of status, pending AND terminal — so a stale anchor is still retired
+    // even after its interaction leaves "pending" (the main loop would never
+    // revisit it). Each entry is re-attempted until its edit lands, then
+    // dropped; each entry carries the channel its message was POSTED in.
+    if (record.staleAnchors && record.staleAnchors.length > 0) {
+      const remaining: Array<{ messageId: string; channelId: string }> = [];
+      for (const stale of record.staleAnchors) {
+        // Stored state is untyped JSON — a malformed entry must be DROPPED
+        // (with a warning), never dereferenced: a throw here sits outside
+        // the per-interaction try/catch, would kill the whole company's
+        // sweep tick, and would recur every tick since the crash precedes
+        // the drain-write that could clear it.
+        if (!stale || typeof stale.messageId !== "string" || typeof stale.channelId !== "string") {
+          ctx.logger.warn("confirmation-sweep: dropping malformed staleAnchors entry", {
+            companyId: company.companyId,
+            interactionId: interaction.id,
+            entry: JSON.stringify(stale ?? null),
+          });
+          continue;
+        }
+        const ok = await supersedeAnchorMessage(
+          ctx, client, stale.channelId, company.companyId, interaction.id, stale.messageId, issueUrl,
+        );
+        if (!ok) remaining.push(stale);
+      }
+      const { staleAnchors: _drained, ...rest } = record;
+      record = remaining.length > 0 ? { ...rest, staleAnchors: remaining } : rest;
+      state[interaction.id] = record;
+    }
+
     const anchorStatus = TERMINAL_INTERACTION_STATUS_TO_ANCHOR[interaction.status];
     if (!anchorStatus) continue;
 
-    const record = state[interaction.id];
-    if (!record) continue;
     const anchorMessageId = resolveAnchorMessageId(record);
     if (!anchorMessageId) continue;
     if (record.lastRenderedStatus === anchorStatus) continue;
+    // A pointer marked "superseded" is a retired old card, not the current
+    // generation's decision card — never repaint it as accepted/rejected
+    // (that would resurrect an obsolete batch as the decided one). Only
+    // records written before the retirement-queue rewrite can carry this
+    // combination; new records drop the pointer on generation change.
+    if (record.lastRenderedStatus === "superseded") continue;
 
-    const issueUrl = `${company.paperclipApiUrl}/${company.companyPrefix}/issues/${issue.identifier}`;
     try {
-      await editMessageInChannel(client, channelId, anchorMessageId, {
+      await editMessageInChannel(client, record.anchorChannelId ?? channelId, anchorMessageId, {
         embeds: [buildCarouselAnchorEmbed({ issueUrl, status: anchorStatus })],
         components: [],
       });
@@ -451,8 +627,48 @@ async function postCarouselTrailer(
   state: CarouselBatchSweepState,
   now: number,
 ): Promise<boolean> {
+  const hash8 = record.artifactHash.slice(0, CAROUSEL_HASH_TOKEN_LEN);
   try {
-    const hash8 = record.artifactHash.slice(0, CAROUSEL_HASH_TOKEN_LEN);
+    // ADOPT-DON'T-DUPLICATE: a prior send for THIS generation threw with an
+    // unknown outcome (trailerAttemptedAt stamped, trailerPosted never set —
+    // classic timeout-after-send: Discord created the message but the
+    // response was lost). Posting again would put TWO live-button anchors
+    // with identical version tokens in the channel, both of which the
+    // click-time guard would accept. Probe for the already-landed message
+    // (matched by this generation's exact accept customId) and adopt it as
+    // the anchor instead. A probe failure throws into the catch below —
+    // "retry next sweep" is the fail direction, never "assume safe to post".
+    if (record.trailerAttemptedAt && !record.trailerPosted) {
+      const adoptedId = await findRecentMessageWithCustomId(
+        client,
+        channelId,
+        carouselConfirmAcceptCustomId(issue.id, interaction.id, hash8),
+      );
+      if (adoptedId) {
+        state[interaction.id] = {
+          ...record,
+          trailerPosted: true,
+          postedAt: new Date(now).toISOString(),
+          trailerMessageId: adoptedId,
+          anchorMessageId: adoptedId,
+          anchorChannelId: channelId,
+          lastRenderedStatus: "awaiting",
+        };
+        ctx.logger.info("confirmation-sweep: adopted already-landed trailer from a lost-response send — no duplicate posted", {
+          companyId,
+          interactionId: interaction.id,
+          anchorMessageId: adoptedId,
+        });
+        return true;
+      }
+    }
+
+    // Stamp the attempt BEFORE the send — if the send throws after Discord
+    // created the message, the next tick sees the ambiguity and probes
+    // (above) before ever posting again.
+    const attemptedAt = new Date(now).toISOString();
+    state[interaction.id] = { ...record, trailerAttemptedAt: attemptedAt };
+
     const messageId = await postEmbedsToChannel(
       client,
       channelId,
@@ -461,10 +677,12 @@ async function postCarouselTrailer(
     );
     state[interaction.id] = {
       ...record,
+      trailerAttemptedAt: attemptedAt,
       trailerPosted: true,
       postedAt: new Date(now).toISOString(),
       trailerMessageId: messageId,
       anchorMessageId: messageId,
+      anchorChannelId: channelId,
       lastRenderedStatus: "awaiting",
     };
     return true;
@@ -755,6 +973,54 @@ export async function runConfirmationSweep(
           if (rule.carouselBatch) {
             await postUnstructuredCarouselDegrade(ctx, client, rule.channelId, company, issue, interaction, detailsMarkdown, carouselState, now);
             continue;
+          }
+
+          // CAROUSEL-SHAPE LOSS (codex round-6 P2): this interaction
+          // previously rendered as a carousel (a record exists) but the
+          // current revision is not carousel-shaped by ANY detection path —
+          // no structured payload, no legacy heading, rule not
+          // carouselBatch-flagged — and is about to render via the generic
+          // path below. That is a generation change like any other: retire
+          // the old anchor (parked on failure, retried every tick) instead
+          // of leaving it "awaiting decision" with live buttons for a
+          // generation that no longer exists. The record's artifactHash is
+          // reset to the "" sentinel (never equal to a real sha256) so that
+          // (a) this block runs at most once per shape loss, and (b) a later
+          // revision back to carousel shape — even byte-identical to the
+          // retired generation — is a hash change that re-posts from
+          // scratch, rather than matching the old record as "fully posted"
+          // while its anchor sits superseded with no live buttons.
+          // Shape detection is RULE-scoped (rule.carouselBatch) but the
+          // record is INTERACTION-scoped and shared across every rule of
+          // the company — so an unflagged rule matching the same issue as a
+          // carouselBatch-flagged rule must NOT retire the anchor the
+          // flagged rule legitimately owns (the flagged rule renders this
+          // exact interaction via the unstructured-degrade path). Shape
+          // loss is only real when NO matching rule can render it as a
+          // carousel.
+          const carouselFlaggedElsewhere = rules.some((r) => {
+            if (!r.carouselBatch) return false;
+            try {
+              return new RegExp(r.titleRegex).test(safeStr(issue.title, 512));
+            } catch {
+              return false;
+            }
+          });
+          const shapeLostRecord = carouselState[interaction.id];
+          if (shapeLostRecord && shapeLostRecord.artifactHash !== "" && !carouselFlaggedElsewhere) {
+            const staleAnchors = await retireCurrentAnchor(
+              ctx, client, rule.channelId, company.companyId, issue.id, interaction.id, issueUrl, shapeLostRecord,
+            );
+            carouselState[interaction.id] = {
+              postedAt: new Date(now).toISOString(),
+              sectionsPosted: 0,
+              totalSections: 0,
+              artifactHash: "",
+              headerPosted: false,
+              trailerPosted: false,
+              lastSeenUpdatedAt: interaction.updatedAt,
+              ...(staleAnchors.length ? { staleAnchors } : {}),
+            };
           }
 
           // Generic path only: safeParseMs turns a corrupted stored timestamp

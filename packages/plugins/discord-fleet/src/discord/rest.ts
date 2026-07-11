@@ -67,6 +67,38 @@ export async function editMessageInChannel(
   });
 }
 
+// PROBE (adopt-don't-duplicate): find a recently-posted message in the
+// channel carrying a button with the given customId. Used when a prior
+// trailer send's outcome is UNKNOWN — the send threw, but the message may
+// have landed on Discord's side (timeout-after-send). The sweep adopts the
+// found message as the anchor instead of posting a duplicate live-button
+// trailer. Returns the message id or null; throws on fetch failure (callers
+// treat that as "retry next sweep", never as "safe to post").
+// limit defaults to Discord's per-fetch maximum (100). A message buried
+// deeper than that within one sweep window is not adoptable — callers treat
+// null as "post fresh" (trailer adopt) or "nothing to retire" (retirement
+// probe); the click-time version-token guard still refuses any buried
+// stale-generation card, so the residual is a dead-looking card, never a
+// wrong decision.
+export async function findRecentMessageWithCustomId(
+  client: Client,
+  channelId: string,
+  customId: string,
+  limit = 100,
+): Promise<string | null> {
+  return rateLimit.enqueue(channelId, async () => {
+    const channel = await fetchTextChannel(client, channelId);
+    const messages = await channel.messages.fetch({ limit });
+    for (const msg of messages.values()) {
+      for (const row of msg.components ?? []) {
+        const comps = (row as { components?: Array<{ customId?: string | null }> }).components ?? [];
+        if (comps.some((c) => c && c.customId === customId)) return msg.id;
+      }
+    }
+    return null;
+  });
+}
+
 export async function postToThread(client: Client, threadId: string, text: string): Promise<string> {
   return rateLimit.enqueue(threadId, async () => {
     const thread = await fetchThreadChannel(client, threadId);

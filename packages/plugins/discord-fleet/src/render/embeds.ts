@@ -50,12 +50,19 @@ export const CAROUSEL_HASH_TOKEN_LEN = 8;
 // reject prefix 7 + hash8 8 + 1 + 36 + 1 + 36 = 89).
 const MAX_CUSTOM_ID_LEN = 100;
 
+// Single source for the accept-button customId — the confirmation-sweep's
+// adopt-don't-duplicate probe matches messages by this EXACT string, so it
+// must never be re-derived by a second interpolation that could drift.
+export function carouselConfirmAcceptCustomId(issueId: string, interactionId: string, hash8: string): string {
+  return `${CAROUSEL_CONFIRM_BUTTON_PREFIX.accept}${hash8}:${issueId}:${interactionId}`;
+}
+
 export function buildCarouselConfirmationActionRow(
   issueId: string,
   interactionId: string,
   hash8: string,
 ): APIActionRowComponent<APIComponentInMessageActionRow> {
-  const acceptId = `${CAROUSEL_CONFIRM_BUTTON_PREFIX.accept}${hash8}:${issueId}:${interactionId}`;
+  const acceptId = carouselConfirmAcceptCustomId(issueId, interactionId, hash8);
   const rejectId = `${CAROUSEL_CONFIRM_BUTTON_PREFIX.reject}${hash8}:${issueId}:${interactionId}`;
   if (acceptId.length > MAX_CUSTOM_ID_LEN || rejectId.length > MAX_CUSTOM_ID_LEN) {
     throw new Error(
