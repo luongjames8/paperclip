@@ -50,13 +50,17 @@ describe("logActivity — activity.logged catch-all emit", () => {
     const emitMock = vi.fn().mockResolvedValue({ errors: [] });
     setPluginEventBus({ emit: emitMock } as unknown as PluginEventBus);
 
-    await logActivity(makeDb(), makeInput("issue.comment_added"));
+    // issue.status_changed is not in PLUGIN_EVENT_SET nor ACTIVITY_ACTION_TO_PLUGIN_EVENT
+    // (unlike issue.comment_added, which normalizes to issue_comment_added and IS mapped —
+    // verified against v2026.707.0's activity-log.ts; re-check this action still unmapped
+    // on future paperclip upgrades).
+    await logActivity(makeDb(), makeInput("issue.status_changed"));
 
     expect(emitMock).toHaveBeenCalledTimes(1);
     expect(emitMock).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "activity.logged",
-        payload: expect.objectContaining({ action: "issue.comment_added" }),
+        payload: expect.objectContaining({ action: "issue.status_changed" }),
       }),
     );
   });
