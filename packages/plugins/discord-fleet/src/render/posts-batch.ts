@@ -104,7 +104,13 @@ export function parsePostsBatchPayload(raw: unknown): PostsBatchPayload | null {
   for (const rawItem of obj.items) {
     if (!rawItem || typeof rawItem !== "object") return null;
     const item = rawItem as Record<string, unknown>;
-    if (typeof item.slug !== "string") return null;
+    // Slug is bounded at the contract boundary (codex P2, round 7): an
+    // unbounded slug rides into renderOverflowMessages' per-chunk header and
+    // can eat the entire message budget (a ~1.9k-char slug made
+    // header==budget -> bodyBudget 0 -> the chunkText infinite loop). 200
+    // chars is far beyond any real slug; longer = malformed AS A WHOLE,
+    // degrading to the visible fallback paths like every other contract miss.
+    if (typeof item.slug !== "string" || item.slug.length === 0 || item.slug.length > 200) return null;
     if (item.day !== null && item.day !== undefined && typeof item.day !== "string") return null;
     if (item.postTime !== null && item.postTime !== undefined && typeof item.postTime !== "string") return null;
     if (!isRenderableImageUrl(item.imageUrl)) return null;
@@ -286,8 +292,11 @@ export function renderOverflowMessages(item: PostsBatchPlatformOverflow, maxLen 
   // a future misuse passing a tiny maxLen must be a loud error, never a
   // silently-oversized message (the exact failure class this function
   // exists to close).
-  if (maxLen < maxHeaderLen) {
-    throw new Error(`renderOverflowMessages: maxLen (${maxLen}) is smaller than the reserved header budget (${maxHeaderLen}) — cannot fit even an empty body`);
+  // `<= `, not `<` (codex P2, round 7): equality leaves bodyBudget = 0,
+  // which used to reach chunkText(text, 0) — an infinite loop. The body
+  // budget must be at least 1 char.
+  if (maxLen <= maxHeaderLen) {
+    throw new Error(`renderOverflowMessages: maxLen (${maxLen}) leaves no body budget after the reserved header (${maxHeaderLen}) — cannot fit even a 1-char body`);
   }
   const bodyBudget = maxLen - maxHeaderLen;
   const bodyChunks = chunkText(item.fullText, bodyBudget);

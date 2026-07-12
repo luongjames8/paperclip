@@ -17,6 +17,13 @@ describe("render helpers", () => {
     expect(result.endsWith(url)).toBe(true);
   });
 
+  it("chunkText: non-positive maxLen throws — it used to INFINITE-LOOP (empty chunk pushed, remaining never shrinks; codex P2, posts-batch round 7)", () => {
+    expect(() => chunkText("non-empty", 0)).toThrow(/maxLen must be >= 1/);
+    expect(() => chunkText("non-empty", -5)).toThrow(/maxLen must be >= 1/);
+    // maxLen 1 with a leading paragraph break must still terminate.
+    expect(chunkText("\n\nab", 1).join("")).toBe("\n\nab");
+  });
+
   it("chunkText: text ≤maxLen passes through as a single chunk, unchanged", () => {
     const text = "a".repeat(1900);
     expect(chunkText(text)).toEqual([text]);
