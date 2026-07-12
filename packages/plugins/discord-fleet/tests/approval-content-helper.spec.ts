@@ -109,6 +109,39 @@ describe("resolveApprovalContent header block (summary/recommendedAction/risks)"
   });
 });
 
+// ── resolveApprovalGuidance unit tests (GH #501 codex P2 extraction) ─────────
+// Extracted from resolveApprovalContent's header block so the postsBatch
+// structured render path can post guidance separately from the (now
+// redundant, for a structured card) body text.
+
+describe("resolveApprovalGuidance", () => {
+  it("produces the IDENTICAL header text resolveApprovalContent used to inline", async () => {
+    const { resolveApprovalGuidance, resolveApprovalContent } = await import("../src/handlers/approval-created.js");
+    const payload = {
+      summary: "Ship the relay note",
+      recommendedAction: "Approve",
+      risks: ["low blast radius", "throwaway claw"],
+      proposedComment: "The assembled note body.",
+    };
+    const guidance = resolveApprovalGuidance(payload);
+    const full = resolveApprovalContent(payload);
+    expect(guidance).toBe("Ship the relay note\n**Recommended:** Approve\n**Risks:** low blast radius; throwaway claw");
+    expect(full).toBe(`${guidance}\n\nThe assembled note body.`);
+  });
+
+  it("returns empty string when none of summary/recommendedAction/risks are present", async () => {
+    const { resolveApprovalGuidance } = await import("../src/handlers/approval-created.js");
+    expect(resolveApprovalGuidance({ proposedComment: "body only, no guidance" })).toBe("");
+    expect(resolveApprovalGuidance({})).toBe("");
+  });
+
+  it("ignores non-string risks entries and non-string header fields", async () => {
+    const { resolveApprovalGuidance } = await import("../src/handlers/approval-created.js");
+    const out = resolveApprovalGuidance({ summary: 42, recommendedAction: null, risks: [null, "real risk", 7] });
+    expect(out).toBe("**Risks:** real risk");
+  });
+});
+
 describe("resolveApprovalContent", () => {
   it("returns proposedComment when present", async () => {
     const { resolveApprovalContent } = await import("../src/handlers/approval-created.js");

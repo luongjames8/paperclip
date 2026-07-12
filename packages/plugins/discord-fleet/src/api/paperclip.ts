@@ -47,6 +47,14 @@ export interface PaperclipApproval {
     proposedComment?: unknown;
     details?: unknown;
     description?: unknown;
+    // Guidance fields resolveApprovalContent/resolveApprovalGuidance read —
+    // declared here (GH #501) so callers that type an approval payload as
+    // PaperclipApproval["payload"] (e.g. test fixtures) don't need a cast.
+    summary?: unknown;
+    recommendedAction?: unknown;
+    risks?: unknown;
+    // Structured posts-batch render contract (GH #501) — see ../render/posts-batch.js.
+    postsBatch?: unknown;
   } | null;
 }
 

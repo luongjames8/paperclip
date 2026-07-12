@@ -13,6 +13,12 @@ import { stripSecrets } from "../render/secrets.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
 import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
+import {
+  parsePostsBatchPayload,
+  chunkPostsBatchForDiscord,
+  renderOverflowMessages,
+  buildPartialDeliveryWarning,
+} from "../render/posts-batch.js";
 import { PaperclipClient } from "../api/paperclip.js";
 import { postDeliveryFailureFallback } from "./delivery-fallback.js";
 
@@ -39,6 +45,8 @@ interface ApprovalCreatedPayload {
   proposedComment?: unknown;
   details?: unknown;
   description?: unknown;
+  // Structured posts-batch render contract (GH #501) — see ../render/posts-batch.js.
+  postsBatch?: unknown;
 }
 
 // PENDING is a shared list wiped daily by jobs/digest.ts (pre-existing
@@ -59,6 +67,30 @@ export const POSTING_MARKER_PREFIX = "approval-posting:";
 export const POSTING_STALE_MS = 2 * 60 * 1000;
 const CONTENT_CHUNK_MAX = 1900;
 
+const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+
+// Composes the "guidance" header block: summary, recommendedAction, risks —
+// the fields the web UI treats as first-class. Extracted from
+// resolveApprovalContent (GH #501 codex P2) so the postsBatch structured
+// render path can post this guidance ALONGSIDE the per-post embeds — those
+// embeds only carry image/hook/platform-copy fields, so without this,
+// summary/recommendedAction/risks would silently disappear from Discord for
+// any approval that has BOTH postsBatch and guidance fields set. Returns ""
+// when none of the three fields are present.
+export function resolveApprovalGuidance(payload: {
+  summary?: unknown;
+  recommendedAction?: unknown;
+  risks?: unknown;
+  [key: string]: unknown;
+}): string {
+  const header: string[] = [];
+  if (str(payload.summary)) header.push(str(payload.summary));
+  if (str(payload.recommendedAction)) header.push(`**Recommended:** ${str(payload.recommendedAction)}`);
+  const risks = Array.isArray(payload.risks) ? payload.risks.map(str).filter(Boolean) : [];
+  if (risks.length) header.push(`**Risks:** ${risks.join("; ")}`);
+  return header.join("\n");
+}
+
 // Resolve the reviewable content string from an approval payload.
 // Composes the operator-facing card text. Header block: summary,
 // recommendedAction, risks — the fields the web UI treats as first-class but
@@ -76,13 +108,8 @@ export function resolveApprovalContent(payload: {
   risks?: unknown;
   [key: string]: unknown;
 }): string {
-  const s = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
-  const header: string[] = [];
-  if (s(payload.summary)) header.push(s(payload.summary));
-  if (s(payload.recommendedAction)) header.push(`**Recommended:** ${s(payload.recommendedAction)}`);
-  const risks = Array.isArray(payload.risks) ? payload.risks.map(s).filter(Boolean) : [];
-  if (risks.length) header.push(`**Risks:** ${risks.join("; ")}`);
-  const body = s(payload.proposedComment) || s(payload.details) || s(payload.description) || s(payload.body) || "";
+  const header = resolveApprovalGuidance(payload);
+  const body = str(payload.proposedComment) || str(payload.details) || str(payload.description) || str(payload.body) || "";
   // Render-everything backstop (live incident 2026-07-04: an agent shipped the
   // whole artifact in payload.note — a field NO allowlist reads — and the card
   // was blank while the content sat in paperclip). Any unknown payload key with
@@ -106,7 +133,7 @@ export function resolveApprovalContent(payload: {
       if (items.length) extras.push(`**${k}:** ${items.join("; ")}`);
     }
   }
-  return [header.join("\n"), body, extras.join("\n")].filter(Boolean).join("\n\n");
+  return [header, body, extras.join("\n")].filter(Boolean).join("\n\n");
 }
 
 function chunkBySection(text: string): string[] {
@@ -321,6 +348,20 @@ export async function handleApprovalCreated(
   // is available and let its payload win; the event payload is just the hint
   // that arrives when the API is down.
   let effectiveContent = reviewableContent;
+  // postsBatch (GH #501): a structured, machine-built render contract that
+  // rides ALONGSIDE proposedComment — same shape-guard philosophy as
+  // carouselBatch on request_confirmation interactions (see
+  // ../render/posts-batch.ts). The approval.created EVENT payload is
+  // partial (server only puts title + proposedComment on it), so postsBatch
+  // is really only ever found on the FULL fetched approval below — checked
+  // on both so a future server change that includes it on the event still
+  // works without this handler needing an update.
+  let postsBatch = parsePostsBatchPayload(payload.postsBatch);
+  // postsBatchGuidance (codex P2): summary/recommendedAction/risks, resolved
+  // the SAME way effectiveContent is — the postsBatch structured embeds only
+  // carry per-post image/hook/platform fields, so without this, guidance set
+  // alongside postsBatch would silently disappear from Discord.
+  let postsBatchGuidance = resolveApprovalGuidance(payload);
   if (paperclip) {
     try {
       const fullApproval = await paperclip.getApprovalById(approvalId);
@@ -329,6 +370,11 @@ export async function handleApprovalCreated(
         if (full) {
           effectiveContent = full;
           ctx.logger.info("approval-created: content resolved from the stored approval payload", { approvalId });
+        }
+        const fullGuidance = resolveApprovalGuidance(fullApproval.payload);
+        if (fullGuidance) postsBatchGuidance = fullGuidance;
+        if (!postsBatch) {
+          postsBatch = parsePostsBatchPayload(fullApproval.payload.postsBatch);
         }
       }
     } catch (err) {
@@ -382,7 +428,128 @@ export async function handleApprovalCreated(
     }
   }
 
-  if (effectiveContent) {
+  // postsBatch structured render (GH #501): one embed per post (image + hook
+  // + per-platform copy) instead of the plaintext chunkBySection path below.
+  // A contract miss (absent/malformed postsBatch) falls straight through to
+  // the existing plaintext path — legacy cards (and any card whose editor
+  // hasn't shipped postsBatch yet) render exactly as before.
+  //
+  // DELIVERY-COMPLETENESS (codex P2, round 6): a bare "did anything post"
+  // boolean flipped true by the FIRST successful embed group hid every LATER
+  // group's failure — for a >10-post weekly batch, chunkPostsBatchForDiscord
+  // splits into multiple Discord messages, and a transient failure on group 2
+  // used to leave the operator an approvable card showing only group 1 with
+  // no indication anything was missing. Fixed by tracking PER-UNIT delivery
+  // (deliveredSlugs/missingSlugs) instead of one scalar, so the invariant —
+  // "the operator must never see an approvable card whose visible content is
+  // a silent subset of the batch" — holds regardless of which specific
+  // groups/overflow messages fail, not just the all-or-nothing case:
+  //   - every group/overflow-send gets one retry (mirrors the existing
+  //     content-chunk retry-once pattern below) so a transient hiccup
+  //     self-heals within this same call;
+  //   - any RESIDUAL failure (after retry) is always tracked by slug in
+  //     missingSlugs, never just logged-and-dropped;
+  //   - if missingSlugs is non-empty when the loop ends, an unsuppressable
+  //     buildPartialDeliveryWarning message posts naming exactly what's
+  //     missing + the deep link to the full record — independent of whatever
+  //     else succeeded, so it can never be silently skipped by a later
+  //     success or an earlier one;
+  //   - deliveredSlugs.size > 0 is what the plaintext-fallback gate below
+  //     checks (unchanged semantics from the old boolean for the TOTAL
+  //     failure case: 0 delivered still falls through to full plaintext,
+  //     which is correct — with nothing delivered there is no "missing
+  //     range" narrower than the whole batch).
+  const deliveredSlugs = new Set<string>();
+  const missingSlugs: string[] = [];
+  // postSendWithRetry: one retry after a short pause, mirroring the
+  // plaintext-chunk retry pattern below — factored out so the embed-group and
+  // overflow-message loops (below) don't each duplicate the try/retry/catch
+  // shape a third and fourth time.
+  const postSendWithRetry = async (send: () => Promise<unknown>, label: string, logFields: Record<string, unknown>): Promise<boolean> => {
+    try {
+      await send();
+      return true;
+    } catch (err) {
+      ctx.logger.warn(`approval-created: ${label} post failed; retrying once`, { ...logFields, error: String(err) });
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        await send();
+        return true;
+      } catch (err2) {
+        ctx.logger.warn(`approval-created: ${label} post failed after retry`, { ...logFields, error: String(err2) });
+        return false;
+      }
+    }
+  };
+  if (postsBatch) {
+    // Guidance (summary/recommendedAction/risks) posts BEFORE the per-post
+    // embeds — renderPostsBatchEmbeds only carries image/hook/platform-copy
+    // fields, so this is the only place that approval-level guidance reaches
+    // Discord for a structured card (codex P2). Posted regardless of whether
+    // the embeds themselves succeed below — a transient embed-send failure
+    // must not also swallow guidance that already sent successfully. Routed
+    // through postSendWithRetry + missingSlugs like every other unit
+    // (DELIVERY-COMPLETENESS, round 6): guidance is part of the card's
+    // visible content too, so a residual guidance-post failure must surface
+    // via the same unsuppressable warning, not vanish into a log line.
+    if (postsBatchGuidance) {
+      const ok = await postSendWithRetry(
+        () => postToChannel(client, destinationChannelId, truncate(stripSecrets(postsBatchGuidance), CONTENT_CHUNK_MAX)),
+        "postsBatch guidance",
+        { approvalId, destinationChannelId },
+      );
+      if (!ok) missingSlugs.push("guidance (summary/recommendedAction/risks)");
+    }
+    const { groups, overflow } = chunkPostsBatchForDiscord(postsBatch);
+    for (const group of groups) {
+      const ok = await postSendWithRetry(
+        () => postEmbedsToChannel(client, destinationChannelId, group.embeds),
+        "postsBatch embed group",
+        { approvalId, destinationChannelId, slugs: group.slugs },
+      );
+      if (ok) for (const slug of group.slugs) deliveredSlugs.add(slug);
+      else missingSlugs.push(...group.slugs);
+    }
+    // Platform copy longer than Discord's 1024-char embed field limit (codex
+    // P2) — the embed field already shows a truncated preview; post the FULL
+    // text as a plaintext follow-up so nothing is silently cut with no trace.
+    // renderOverflowMessages reserves header budget BEFORE chunking (codex
+    // P2, round 2: chunking to the full message budget then prepending a
+    // header could itself overflow and get silently cut by postToChannel's
+    // own truncate) — every returned string already fits within
+    // CONTENT_CHUNK_MAX including its header.
+    for (const item of overflow) {
+      const messages = renderOverflowMessages(item, CONTENT_CHUNK_MAX);
+      for (let i = 0; i < messages.length; i++) {
+        const message = messages[i];
+        const label = `postsBatch platform-copy overflow (${item.itemSlug}/${item.platformLabel} ${i + 1}/${messages.length})`;
+        const ok = await postSendWithRetry(
+          () => postToChannel(client, destinationChannelId, stripSecrets(message)),
+          label,
+          { approvalId, destinationChannelId, itemSlug: item.itemSlug, platformLabel: item.platformLabel },
+        );
+        if (!ok) missingSlugs.push(`${item.itemSlug} (${item.platformLabel} full text ${i + 1}/${messages.length})`);
+      }
+    }
+    // Unsuppressable: posts on ANY residual failure, regardless of how many
+    // groups/overflow messages succeeded around it. Never gated by
+    // deliveredSlugs — a partial batch (some delivered, some missing) must
+    // surface this exactly as loudly as an all-failed one.
+    if (missingSlugs.length > 0) {
+      try {
+        await postToChannel(client, destinationChannelId, buildPartialDeliveryWarning(missingSlugs, url));
+      } catch (err) {
+        ctx.logger.error("approval-created: partial-delivery warning post failed — card may look complete but is missing content", {
+          approvalId,
+          destinationChannelId,
+          missingSlugs,
+          error: String(err),
+        });
+      }
+    }
+  }
+  const postsBatchDelivered = deliveredSlugs.size > 0;
+  if (!postsBatchDelivered && effectiveContent) {
     const chunks = chunkBySection(stripSecrets(effectiveContent));
     for (const chunk of chunks) {
       try {
