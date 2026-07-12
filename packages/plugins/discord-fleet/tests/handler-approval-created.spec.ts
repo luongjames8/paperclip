@@ -1105,4 +1105,53 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);
     expect(postToChannel).not.toHaveBeenCalled();
   });
+
+  // codex P2: summary/recommendedAction/risks must reach Discord alongside
+  // postsBatch embeds — renderPostsBatchEmbeds only carries per-post fields.
+  it("summary/recommendedAction/risks post via postToChannel ALONGSIDE the postsBatch embeds (not swallowed)", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        payload: {
+          summary: "Weekly posts batch for 2026-07-13",
+          recommendedAction: "Approve all 13 posts",
+          risks: ["One image URL is a placeholder"],
+          postsBatch: validPostsBatch(),
+        },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({});
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const guidanceCall = (postToChannel as any).mock.calls[0][2] as string;
+    expect(guidanceCall).toContain("Weekly posts batch for 2026-07-13");
+    expect(guidanceCall).toContain("Approve all 13 posts");
+    expect(guidanceCall).toContain("One image URL is a placeholder");
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1); // postsBatch embeds still post
+  });
+
+  it("no guidance fields set → postToChannel is not called for postsBatch (unchanged from before)", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ postsBatch: validPostsBatch() });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postToChannel).not.toHaveBeenCalled();
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+  });
 });

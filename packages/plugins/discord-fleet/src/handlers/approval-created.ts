@@ -62,6 +62,30 @@ export const POSTING_MARKER_PREFIX = "approval-posting:";
 export const POSTING_STALE_MS = 2 * 60 * 1000;
 const CONTENT_CHUNK_MAX = 1900;
 
+const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+
+// Composes the "guidance" header block: summary, recommendedAction, risks —
+// the fields the web UI treats as first-class. Extracted from
+// resolveApprovalContent (GH #501 codex P2) so the postsBatch structured
+// render path can post this guidance ALONGSIDE the per-post embeds — those
+// embeds only carry image/hook/platform-copy fields, so without this,
+// summary/recommendedAction/risks would silently disappear from Discord for
+// any approval that has BOTH postsBatch and guidance fields set. Returns ""
+// when none of the three fields are present.
+export function resolveApprovalGuidance(payload: {
+  summary?: unknown;
+  recommendedAction?: unknown;
+  risks?: unknown;
+  [key: string]: unknown;
+}): string {
+  const header: string[] = [];
+  if (str(payload.summary)) header.push(str(payload.summary));
+  if (str(payload.recommendedAction)) header.push(`**Recommended:** ${str(payload.recommendedAction)}`);
+  const risks = Array.isArray(payload.risks) ? payload.risks.map(str).filter(Boolean) : [];
+  if (risks.length) header.push(`**Risks:** ${risks.join("; ")}`);
+  return header.join("\n");
+}
+
 // Resolve the reviewable content string from an approval payload.
 // Composes the operator-facing card text. Header block: summary,
 // recommendedAction, risks — the fields the web UI treats as first-class but
@@ -79,13 +103,8 @@ export function resolveApprovalContent(payload: {
   risks?: unknown;
   [key: string]: unknown;
 }): string {
-  const s = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
-  const header: string[] = [];
-  if (s(payload.summary)) header.push(s(payload.summary));
-  if (s(payload.recommendedAction)) header.push(`**Recommended:** ${s(payload.recommendedAction)}`);
-  const risks = Array.isArray(payload.risks) ? payload.risks.map(s).filter(Boolean) : [];
-  if (risks.length) header.push(`**Risks:** ${risks.join("; ")}`);
-  const body = s(payload.proposedComment) || s(payload.details) || s(payload.description) || s(payload.body) || "";
+  const header = resolveApprovalGuidance(payload);
+  const body = str(payload.proposedComment) || str(payload.details) || str(payload.description) || str(payload.body) || "";
   // Render-everything backstop (live incident 2026-07-04: an agent shipped the
   // whole artifact in payload.note — a field NO allowlist reads — and the card
   // was blank while the content sat in paperclip). Any unknown payload key with
@@ -109,7 +128,7 @@ export function resolveApprovalContent(payload: {
       if (items.length) extras.push(`**${k}:** ${items.join("; ")}`);
     }
   }
-  return [header.join("\n"), body, extras.join("\n")].filter(Boolean).join("\n\n");
+  return [header, body, extras.join("\n")].filter(Boolean).join("\n\n");
 }
 
 function chunkBySection(text: string): string[] {
@@ -333,6 +352,11 @@ export async function handleApprovalCreated(
   // on both so a future server change that includes it on the event still
   // works without this handler needing an update.
   let postsBatch = parsePostsBatchPayload(payload.postsBatch);
+  // postsBatchGuidance (codex P2): summary/recommendedAction/risks, resolved
+  // the SAME way effectiveContent is — the postsBatch structured embeds only
+  // carry per-post image/hook/platform fields, so without this, guidance set
+  // alongside postsBatch would silently disappear from Discord.
+  let postsBatchGuidance = resolveApprovalGuidance(payload);
   if (paperclip) {
     try {
       const fullApproval = await paperclip.getApprovalById(approvalId);
@@ -342,6 +366,8 @@ export async function handleApprovalCreated(
           effectiveContent = full;
           ctx.logger.info("approval-created: content resolved from the stored approval payload", { approvalId });
         }
+        const fullGuidance = resolveApprovalGuidance(fullApproval.payload);
+        if (fullGuidance) postsBatchGuidance = fullGuidance;
         if (!postsBatch) {
           postsBatch = parsePostsBatchPayload(fullApproval.payload.postsBatch);
         }
@@ -412,6 +438,23 @@ export async function handleApprovalCreated(
   // same plaintext path instead of leaving the card header-only.
   let postsBatchDelivered = false;
   if (postsBatch) {
+    // Guidance (summary/recommendedAction/risks) posts BEFORE the per-post
+    // embeds — renderPostsBatchEmbeds only carries image/hook/platform-copy
+    // fields, so this is the only place that approval-level guidance reaches
+    // Discord for a structured card (codex P2). Posted regardless of whether
+    // the embeds themselves succeed below — a transient embed-send failure
+    // must not also swallow guidance that already sent successfully.
+    if (postsBatchGuidance) {
+      try {
+        await postToChannel(client, destinationChannelId, truncate(stripSecrets(postsBatchGuidance), CONTENT_CHUNK_MAX));
+      } catch (err) {
+        ctx.logger.warn("approval-created: postsBatch guidance post failed", {
+          approvalId,
+          destinationChannelId,
+          error: String(err),
+        });
+      }
+    }
     const embeds = renderPostsBatchEmbeds(postsBatch);
     for (const group of chunkEmbedsForDiscord(embeds)) {
       try {

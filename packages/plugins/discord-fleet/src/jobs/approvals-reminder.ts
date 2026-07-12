@@ -8,7 +8,7 @@ import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
-import { resolveApprovalContent, PENDING_APPROVALS_KEY } from "../handlers/approval-created.js";
+import { resolveApprovalContent, resolveApprovalGuidance, PENDING_APPROVALS_KEY } from "../handlers/approval-created.js";
 import { parsePostsBatchPayload, renderPostsBatchEmbeds } from "../render/posts-batch.js";
 import { chunkEmbedsForDiscord } from "../render/issue-docs.js";
 import { PaperclipApiError } from "../api/paperclip.js";
@@ -273,6 +273,12 @@ export async function runApprovalsReminder(
     // postsBatch structured render (GH #501) — mirrors handleApprovalCreated's
     // detection: same contract, same degrade-to-plaintext-on-miss semantics.
     const postsBatch = parsePostsBatchPayload(approvalPayloadUnknown?.postsBatch);
+    // postsBatchGuidance (codex P2): summary/recommendedAction/risks — the
+    // structured embeds only carry per-post fields, so without this,
+    // guidance set alongside postsBatch would disappear from the reminder.
+    // approval.payload is already the FULL stored payload (unlike
+    // handleApprovalCreated's partial event), so no separate fetch needed.
+    const postsBatchGuidance = resolveApprovalGuidance(approvalPayloadUnknown ?? {});
     // Issue-digest fallback — same agent-independent floor as approval-created:
     // the linked issue's comment trail is runtime-guaranteed; compose from it
     // when the payload yields nothing.
@@ -311,6 +317,19 @@ export async function runApprovalsReminder(
     // plaintext path rather than leave the reminder header-only.
     let postsBatchDelivered = false;
     if (postsBatch) {
+      // Guidance posts BEFORE the per-post embeds, regardless of whether the
+      // embeds themselves succeed below (codex P2 — see handleApprovalCreated).
+      if (postsBatchGuidance) {
+        try {
+          await postToChannel(client, destinationChannelId, truncate(stripSecrets(postsBatchGuidance), CONTENT_CHUNK_MAX));
+        } catch (err) {
+          ctx.logger.warn("approvals-reminder: postsBatch guidance post failed", {
+            approvalId: approval.id,
+            destinationChannelId,
+            error: String(err),
+          });
+        }
+      }
       const embeds = renderPostsBatchEmbeds(postsBatch);
       for (const group of chunkEmbedsForDiscord(embeds)) {
         try {

@@ -248,8 +248,16 @@ function validPostsBatch() {
 }
 
 describe("runApprovalsReminder — postsBatch structured render (GH #501)", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    // clearAllMocks resets call history but NOT a mockRejectedValue set by an
+    // earlier test — restore rest.js mocks to their module-level defaults so
+    // e.g. the "total delivery failure" test's postEmbedsToChannel rejection
+    // can't leak into a later test in this describe block.
+    const { postToChannel, postEmbedToChannel, postEmbedsToChannel } = await import("../src/discord/rest.js");
+    (postToChannel as any).mockResolvedValue("msg-id-123");
+    (postEmbedToChannel as any).mockResolvedValue("msg-id-456");
+    (postEmbedsToChannel as any).mockResolvedValue("msg-id-457");
   });
 
   it("structured postsBatch on the stored approval → posts embeds via postEmbedsToChannel, not plaintext", async () => {
@@ -318,5 +326,51 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
 
     expect(postEmbedsToChannel).toHaveBeenCalled();
     expect(postToChannel).toHaveBeenCalled();
+  });
+
+  // codex P2: summary/recommendedAction/risks must reach Discord alongside
+  // postsBatch embeds in the reminder path too.
+  it("summary/recommendedAction/risks post via postToChannel ALONGSIDE the postsBatch embeds (not swallowed)", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([approval({
+        payload: {
+          title: "Weekly posts batch",
+          summary: "Weekly posts batch for 2026-07-13",
+          recommendedAction: "Approve all 13 posts",
+          risks: ["One image URL is a placeholder"],
+          postsBatch: validPostsBatch(),
+        },
+      })]),
+      NOW,
+    );
+
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const guidanceCall = (postToChannel as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
+    expect(guidanceCall).toContain("Weekly posts batch for 2026-07-13");
+    expect(guidanceCall).toContain("Approve all 13 posts");
+    expect(guidanceCall).toContain("One image URL is a placeholder");
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+  });
+
+  it("no guidance fields set → postToChannel is not called for postsBatch (unchanged from before)", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", postsBatch: validPostsBatch() } })]),
+      NOW,
+    );
+
+    expect(postToChannel).not.toHaveBeenCalled();
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
   });
 });
