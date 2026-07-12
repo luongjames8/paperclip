@@ -1154,4 +1154,35 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
     expect(postToChannel).not.toHaveBeenCalled();
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
   });
+
+  // codex P2: a platform copy longer than Discord's 1024-char embed field
+  // limit must post as a plaintext follow-up (the FULL text), not just a
+  // truncated field value.
+  it("platform copy >1024 chars posts a plaintext follow-up with the FULL text", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const longCopy = "Long-form Facebook copy. ".repeat(60); // well over 1024 chars
+    const batchWithLongCopy = {
+      version: 1,
+      items: [{
+        slug: "tokyo-trifecta", day: "Mon", postTime: null,
+        imageUrl: "https://hinomaru.one/images/tours/trifecta-card.avif",
+        hook: "Three neighborhoods.",
+        platforms: { facebook: longCopy },
+      }],
+    };
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ postsBatch: batchWithLongCopy });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const overflowCall = (postToChannel as any).mock.calls[0][2] as string;
+    expect(overflowCall).toContain("tokyo-trifecta");
+    expect(overflowCall).toContain("Facebook");
+    expect(overflowCall).toContain(longCopy);
+  });
 });

@@ -373,4 +373,35 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     expect(postToChannel).not.toHaveBeenCalled();
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
   });
+
+  // codex P2: mirrors handleApprovalCreated's overflow fix.
+  it("platform copy >1024 chars posts a plaintext follow-up with the FULL text", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const longCopy = "Long-form Facebook copy. ".repeat(60);
+    const batchWithLongCopy = {
+      version: 1,
+      items: [{
+        slug: "tokyo-trifecta", day: "Mon", postTime: null,
+        imageUrl: "https://hinomaru.one/images/tours/trifecta-card.avif",
+        hook: "Three neighborhoods.",
+        platforms: { facebook: longCopy },
+      }],
+    };
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", postsBatch: batchWithLongCopy } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const overflowCall = (postToChannel as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
+    expect(overflowCall).toContain("tokyo-trifecta");
+    expect(overflowCall).toContain("Facebook");
+    expect(overflowCall).toContain(longCopy);
+  });
 });

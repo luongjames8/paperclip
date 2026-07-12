@@ -168,7 +168,7 @@ describe("parsePostsBatchPayload", () => {
 describe("renderPostsBatchEmbeds", () => {
   it("renders one embed per post with distinct image.url", () => {
     const payload = validPayload();
-    const embeds = renderPostsBatchEmbeds(payload);
+    const { embeds } = renderPostsBatchEmbeds(payload);
 
     expect(embeds).toHaveLength(2);
     expect(embeds[0].image?.url).toBe(payload.items[0].imageUrl);
@@ -177,26 +177,26 @@ describe("renderPostsBatchEmbeds", () => {
 
   it("title includes day/postTime/slug when present", () => {
     const payload = validPayload();
-    const embeds = renderPostsBatchEmbeds(payload);
+    const { embeds } = renderPostsBatchEmbeds(payload);
     expect(embeds[0].title).toContain("Mon");
     expect(embeds[0].title).toContain("tokyo-trifecta");
   });
 
   it("title falls back to 'Post N/total' when day/postTime/slug are all absent", () => {
     const payload = validPayload({ items: [{ slug: "", day: null, postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h", platforms: {} }] });
-    const embeds = renderPostsBatchEmbeds(payload);
+    const { embeds } = renderPostsBatchEmbeds(payload);
     expect(embeds[0].title).toBe("Post 1/1");
   });
 
   it("description is the hook text", () => {
     const payload = validPayload();
-    const embeds = renderPostsBatchEmbeds(payload);
+    const { embeds } = renderPostsBatchEmbeds(payload);
     expect(embeds[0].description).toBe(payload.items[0].hook);
   });
 
   it("each present platform becomes its own field; absent platforms produce no field", () => {
     const payload = validPayload();
-    const embeds = renderPostsBatchEmbeds(payload);
+    const { embeds } = renderPostsBatchEmbeds(payload);
 
     const fieldNames0 = embeds[0].fields?.map((f) => f.name) ?? [];
     expect(fieldNames0).toEqual(["Threads", "X", "Facebook"]);
@@ -207,13 +207,57 @@ describe("renderPostsBatchEmbeds", () => {
 
   it("footer includes position and weekOf", () => {
     const payload = validPayload();
-    const embeds = renderPostsBatchEmbeds(payload);
+    const { embeds } = renderPostsBatchEmbeds(payload);
     expect(embeds[0].footer?.text).toContain("1/2");
     expect(embeds[0].footer?.text).toContain("2026-07-13");
   });
 
-  it("0 items → 0 embeds", () => {
-    const embeds = renderPostsBatchEmbeds(validPayload({ items: [] }));
+  it("0 items → 0 embeds, 0 overflow", () => {
+    const { embeds, overflow } = renderPostsBatchEmbeds(validPayload({ items: [] }));
     expect(embeds).toEqual([]);
+    expect(overflow).toEqual([]);
+  });
+
+  // codex P2: a platform copy longer than Discord's 1024-char embed field
+  // limit must never be silently truncated with no trace — the field shows
+  // a marked preview, and the FULL text comes back via `overflow` for the
+  // caller to post as a plaintext follow-up.
+  describe("platform-copy overflow (>1024 chars)", () => {
+    it("field value is truncated with a '(full text below)' marker in the name", () => {
+      const longCopy = "x".repeat(1500);
+      const payload = validPayload({
+        items: [{ slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h", platforms: { threads: longCopy } }],
+      });
+      const { embeds, overflow } = renderPostsBatchEmbeds(payload);
+
+      expect(embeds[0].fields?.[0].name).toBe("Threads (full text below)");
+      expect(embeds[0].fields?.[0].value.length).toBeLessThanOrEqual(1024);
+      expect(overflow).toHaveLength(1);
+      expect(overflow[0]).toEqual({ itemSlug: "a", platformLabel: "Threads", fullText: longCopy });
+    });
+
+    it("platform copy at or under 1024 chars produces no overflow and an unmarked field name", () => {
+      const shortCopy = "x".repeat(1024);
+      const payload = validPayload({
+        items: [{ slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h", platforms: { threads: shortCopy } }],
+      });
+      const { embeds, overflow } = renderPostsBatchEmbeds(payload);
+
+      expect(embeds[0].fields?.[0].name).toBe("Threads");
+      expect(overflow).toEqual([]);
+    });
+
+    it("multiple overflowing platforms on the same item each produce their own overflow entry", () => {
+      const payload = validPayload({
+        items: [{
+          slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h",
+          platforms: { threads: "t".repeat(1200), facebook: "f".repeat(1300) },
+        }],
+      });
+      const { overflow } = renderPostsBatchEmbeds(payload);
+
+      expect(overflow).toHaveLength(2);
+      expect(overflow.map((o) => o.platformLabel).sort()).toEqual(["Facebook", "Threads"]);
+    });
   });
 });

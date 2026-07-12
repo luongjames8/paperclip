@@ -120,24 +120,54 @@ const PLATFORM_LABELS: Record<keyof PostsBatchPlatformCopy, string> = {
   gbp: "GBP",
 };
 
+// Discord's hard limit on an embed field's `value` — not a stylistic choice,
+// exceeding it makes Discord reject the whole embed send.
+const EMBED_FIELD_VALUE_MAX = 1024;
+
+// A platform copy that overflows the embed field limit (codex P2: long-form
+// Facebook/GBP copy silently truncated with no overflow visibility, and the
+// successful structured send suppressed the plaintext proposedComment
+// fallback that used to carry the full text). Caller posts these as
+// plaintext follow-up messages after the embed group — mirrors carousel-
+// batch's "an image is never silently dropped" philosophy for text.
+export interface PostsBatchPlatformOverflow {
+  itemSlug: string;
+  platformLabel: string;
+  fullText: string;
+}
+
+export interface RenderedPostsBatch {
+  embeds: APIEmbed[];
+  overflow: PostsBatchPlatformOverflow[];
+}
+
 /**
  * Render one embed per post: image + hook as the description header,
  * followed by each present platform's copy as its own field (never a
  * shared/merged blob — the operator reviews per-platform copy the same way
  * the source proposedComment markdown lays it out under ### Threads / ### X /
- * ### Facebook headings).
+ * ### Facebook headings). A platform copy longer than Discord's 1024-char
+ * embed field limit gets a truncated-with-marker preview in the field PLUS
+ * its full text returned in `overflow` for the caller to post as a
+ * plaintext follow-up — never silently cut with no trace.
  */
-export function renderPostsBatchEmbeds(payload: PostsBatchPayload): APIEmbed[] {
+export function renderPostsBatchEmbeds(payload: PostsBatchPayload): RenderedPostsBatch {
   const total = payload.items.length;
-  return payload.items.map((item, i) => {
+  const overflow: PostsBatchPlatformOverflow[] = [];
+  const embeds = payload.items.map((item, i) => {
     const headingParts = [item.day, item.postTime].filter((v): v is string => Boolean(v));
     const titleParts = [headingParts.join(" — "), item.slug].filter(Boolean);
     const fields = (Object.keys(PLATFORM_LABELS) as Array<keyof PostsBatchPlatformCopy>)
       .filter((key) => item.platforms[key])
-      .map((key) => ({
-        name: PLATFORM_LABELS[key],
-        value: safe(item.platforms[key] as string, 1024),
-      }));
+      .map((key) => {
+        const text = item.platforms[key] as string;
+        const label = PLATFORM_LABELS[key];
+        if (text.length > EMBED_FIELD_VALUE_MAX) {
+          overflow.push({ itemSlug: item.slug, platformLabel: label, fullText: text });
+          return { name: `${label} (full text below)`, value: safe(text, EMBED_FIELD_VALUE_MAX) };
+        }
+        return { name: label, value: safe(text, EMBED_FIELD_VALUE_MAX) };
+      });
     return enforceEmbedLimits({
       title: safe(titleParts.join(" · ") || `Post ${i + 1}/${total}`, 256),
       description: safe(item.hook, 2000),
@@ -146,4 +176,5 @@ export function renderPostsBatchEmbeds(payload: PostsBatchPayload): APIEmbed[] {
       fields: fields.length > 0 ? fields : undefined,
     });
   });
+  return { embeds, overflow };
 }

@@ -4,7 +4,7 @@ import type { CompanyConfig, DiscordFleetConfig } from "../config/schema.js";
 import type { PaperclipClient } from "../api/paperclip.js";
 import { postEmbedToChannel, postEmbedsToChannel, postToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
-import { truncate } from "../render/plain.js";
+import { truncate, chunkText } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
@@ -330,7 +330,7 @@ export async function runApprovalsReminder(
           });
         }
       }
-      const embeds = renderPostsBatchEmbeds(postsBatch);
+      const { embeds, overflow } = renderPostsBatchEmbeds(postsBatch);
       for (const group of chunkEmbedsForDiscord(embeds)) {
         try {
           await postEmbedsToChannel(client, destinationChannelId, group);
@@ -341,6 +341,25 @@ export async function runApprovalsReminder(
             destinationChannelId,
             error: String(err),
           });
+        }
+      }
+      // Platform copy longer than Discord's 1024-char embed field limit
+      // (codex P2) — post the FULL text as a plaintext follow-up (mirrors
+      // handleApprovalCreated).
+      for (const item of overflow) {
+        const chunks = chunkText(stripSecrets(item.fullText), CONTENT_CHUNK_MAX);
+        for (const chunk of chunks) {
+          try {
+            await postToChannel(client, destinationChannelId, `**${item.itemSlug} — ${item.platformLabel} (full text)**\n${chunk}`);
+          } catch (err) {
+            ctx.logger.warn("approvals-reminder: postsBatch platform-copy overflow post failed", {
+              approvalId: approval.id,
+              destinationChannelId,
+              itemSlug: item.itemSlug,
+              platformLabel: item.platformLabel,
+              error: String(err),
+            });
+          }
         }
       }
     }

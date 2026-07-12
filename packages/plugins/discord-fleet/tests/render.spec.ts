@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { truncate } from "../src/render/plain.js";
+import { truncate, chunkText } from "../src/render/plain.js";
 import { enforceEmbedLimits, buildApprovalActionRow, APPROVAL_BUTTON_PREFIX, buildApprovalEmbed, buildCarouselAnchorEmbed } from "../src/render/embeds.js";
 import { ButtonStyle, ComponentType } from "discord.js";
 
@@ -15,6 +15,33 @@ describe("render helpers", () => {
     const result = truncate(text, 1900, url);
     expect(result.length).toBeLessThanOrEqual(1900);
     expect(result.endsWith(url)).toBe(true);
+  });
+
+  it("chunkText: text ≤maxLen passes through as a single chunk, unchanged", () => {
+    const text = "a".repeat(1900);
+    expect(chunkText(text)).toEqual([text]);
+  });
+
+  it("chunkText: splits at a paragraph boundary when one is available before maxLen", () => {
+    const text = "a".repeat(1000) + "\n\n" + "b".repeat(1000);
+    const chunks = chunkText(text, 1500);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toBe("a".repeat(1000));
+    expect(chunks[1]).toBe("b".repeat(1000));
+  });
+
+  it("chunkText: NOTHING is dropped — every char of the input appears across the chunks", () => {
+    const text = "x".repeat(5000);
+    const chunks = chunkText(text, 1500);
+    expect(chunks.join("")).toBe(text);
+    chunks.forEach((c) => expect(c.length).toBeLessThanOrEqual(1500));
+  });
+
+  it("chunkText: a single paragraph longer than maxLen with no earlier \\n\\n hard-splits at maxLen", () => {
+    const text = "a".repeat(3000); // no paragraph breaks at all
+    const chunks = chunkText(text, 1500);
+    expect(chunks.join("")).toBe(text);
+    expect(chunks[0].length).toBe(1500);
   });
 
   it("enforceEmbedLimits: embed ≤6000 chars is unchanged", () => {
