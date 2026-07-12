@@ -13,9 +13,16 @@ vi.mock("../src/discord/rest.js", () => ({
   postEmbedsToChannel: vi.fn().mockResolvedValue("msg-id-5"),
 }));
 
-vi.mock("../src/render/issue-docs.js", () => ({
-  renderIssueDocs: vi.fn().mockReturnValue([]),
-}));
+vi.mock("../src/render/issue-docs.js", async (importOriginal) => {
+  // importOriginal keeps real exports (chunkEmbedsForDiscord, etc.) that the
+  // postsBatch structured-render path also uses — only renderIssueDocs is
+  // stubbed for this file's rich-renderer-integration assertions.
+  const actual = await importOriginal<typeof import("../src/render/issue-docs.js")>();
+  return {
+    ...actual,
+    renderIssueDocs: vi.fn().mockReturnValue([]),
+  };
+});
 
 vi.mock("../src/api/paperclip.js", () => ({
   PaperclipClient: vi.fn().mockImplementation(() => ({
@@ -26,13 +33,20 @@ vi.mock("../src/api/paperclip.js", () => ({
   })),
 }));
 
-vi.mock("../src/render/embeds.js", () => ({
-  buildApprovalEmbed: vi.fn().mockReturnValue({ title: "approval embed" }),
-  buildSeedIssueEmbed: vi.fn().mockReturnValue({ title: "seed embed" }),
-  buildBlockedEmbed: vi.fn().mockReturnValue({ title: "blocked embed" }),
-  buildApprovalActionRow: vi.fn().mockReturnValue({ type: 1, components: [] }),
-  APPROVAL_BUTTON_PREFIX: { approve: "approval-approve:", reject: "approval-reject:" },
-}));
+vi.mock("../src/render/embeds.js", async (importOriginal) => {
+  // importOriginal keeps real exports (safe, enforceEmbedLimits, etc.) that
+  // ../src/render/posts-batch.js depends on — only the build*Embed/ActionRow
+  // helpers below are stubbed for this file's assertions.
+  const actual = await importOriginal<typeof import("../src/render/embeds.js")>();
+  return {
+    ...actual,
+    buildApprovalEmbed: vi.fn().mockReturnValue({ title: "approval embed" }),
+    buildSeedIssueEmbed: vi.fn().mockReturnValue({ title: "seed embed" }),
+    buildBlockedEmbed: vi.fn().mockReturnValue({ title: "blocked embed" }),
+    buildApprovalActionRow: vi.fn().mockReturnValue({ type: 1, components: [] }),
+    APPROVAL_BUTTON_PREFIX: { approve: "approval-approve:", reject: "approval-reject:" },
+  };
+});
 
 function makeConfig(): DiscordFleetConfig {
   return {
@@ -894,5 +908,379 @@ describe("handleApprovalCreated — full-approval fetch fallback", () => {
       stateKey: `${POSTED_MARKER_PREFIX}appr-nofetch`,
     });
     expect(typeof posted).toBe("string");
+  });
+});
+
+// ─── postsBatch structured render contract (GH #501) ─────────────────────────
+//
+// Mirrors carouselBatch's philosophy on request_confirmation interactions:
+// a structured payload.postsBatch (version 1, items[]) renders as one embed
+// per post via postEmbedsToChannel INSTEAD of the plaintext chunkBySection
+// path. Absent/malformed postsBatch degrades to the existing plaintext path
+// unchanged — legacy cards (and any card whose editor hasn't shipped
+// postsBatch yet) render exactly as before this change.
+
+function validPostsBatch() {
+  return {
+    version: 1,
+    weekOf: "2026-07-13",
+    items: [
+      {
+        slug: "tokyo-trifecta",
+        day: "Mon",
+        postTime: "Mon 2026-07-13 12:00 Taipei",
+        imageUrl: "https://hinomaru.one/images/tours/trifecta-card.avif",
+        hook: "Three neighborhoods, three completely different Tokyos.",
+        platforms: { threads: "Three neighborhoods...", x: "Three neighborhoods (short)..." },
+      },
+    ],
+  };
+}
+
+describe("handleApprovalCreated — postsBatch structured render (GH #501)", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // clearAllMocks resets call history but NOT a mockImplementation/queued
+    // mockResolvedValueOnce chain set by an earlier test — restore every mock
+    // this describe block depends on to its module-level default (see the
+    // top-of-file vi.mock calls) so one test's override (e.g. "total delivery
+    // failure" setting postEmbedsToChannel to always reject) can't leak into
+    // a LATER test in this same describe block/file.
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue(null),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+      addApprovalComment: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { postToThread, postToChannel, postEmbedToThread, postEmbedToChannel, postEmbedsToChannel } = await import("../src/discord/rest.js");
+    (postToThread as any).mockResolvedValue("msg-id-1");
+    (postToChannel as any).mockResolvedValue("msg-id-2");
+    (postEmbedToThread as any).mockResolvedValue("msg-id-3");
+    (postEmbedToChannel as any).mockResolvedValue("msg-id-4");
+    (postEmbedsToChannel as any).mockResolvedValue("msg-id-5");
+  });
+
+  it("structured postsBatch on the event payload → posts embeds via postEmbedsToChannel, not plaintext", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "## raw markdown fallback text, should NOT be posted when postsBatch parses",
+      postsBatch: validPostsBatch(),
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1); // header
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1); // one group of postsBatch embeds
+    expect(postToChannel).not.toHaveBeenCalled(); // plaintext path skipped entirely
+  });
+
+  it("structured postsBatch found only on the FULL fetched approval (event payload is partial) → still renders as embeds", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        payload: { proposedComment: "prose fallback", postsBatch: validPostsBatch() },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    // Event payload has NO postsBatch (matches the real server: approval.created
+    // activity only carries title + proposedComment) — only the fetched approval has it.
+    const event = makeApprovalCreatedEvent({ proposedComment: "event-payload prose" });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  it("malformed postsBatch (wrong version) degrades to the plaintext path — proposedComment still posts", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "## plaintext fallback body",
+      postsBatch: { version: 2, items: [] },
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
+
+  it("absent postsBatch (legacy card) degrades to the plaintext path unchanged", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ proposedComment: "legacy prose artifact, 28887 chars in production" });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
+
+  it("postsBatch embed group post failure is logged and does not throw (best-effort, matches rich-doc path semantics)", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+    (postEmbedsToChannel as any).mockRejectedValue(new Error("discord 400: invalid image url"));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ postsBatch: validPostsBatch() });
+    await expect(handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig())).resolves.not.toThrow();
+  });
+
+  // codex P2: when postsBatch parses but EVERY postEmbedsToChannel call fails,
+  // the operator must not be left with a header-only card — the plaintext
+  // path (effectiveContent) is the floor that was always posted before this
+  // change (see "CHANGE 1" in the rich-renderer-integration describe block).
+  it("total postsBatch delivery failure (every embed group post fails) falls back to the plaintext path", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+    (postEmbedsToChannel as any).mockRejectedValue(new Error("discord 400: invalid image url"));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "plaintext fallback content, should post since postsBatch totally failed to deliver",
+      postsBatch: validPostsBatch(),
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).toHaveBeenCalled(); // structured attempt was made
+    expect(postToChannel).toHaveBeenCalled(); // fell back to plaintext since nothing delivered
+  });
+
+  // DELIVERY-COMPLETENESS (codex P2, round 6): a bare "at least one group
+  // delivered" boolean used to gate the plaintext fallback ONLY — it never
+  // surfaced a later group's failure to the operator at all. The three tests
+  // below pin the per-unit (deliveredSlugs/missingSlugs) replacement across
+  // its three distinguishable outcomes: transient failure that self-heals via
+  // the retry, residual failure after the retry (must warn), and the
+  // no-groups-exist edge (must NOT be treated as a partial failure).
+  const threeItemBatch = {
+    version: 1 as const,
+    items: [
+      { slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h".repeat(2000), platforms: {} },
+      { slug: "b", day: "Tue", postTime: null, imageUrl: "https://x.example.com/b.jpg", hook: "h".repeat(2000), platforms: {} },
+      { slug: "c", day: "Wed", postTime: null, imageUrl: "https://x.example.com/c.jpg", hook: "h".repeat(2000), platforms: {} },
+    ],
+  };
+
+  it("PARTIAL postsBatch delivery where the failed group's RETRY succeeds — self-heals, no warning, no plaintext fallback", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+    // 3 large-hook items pack into 2 groups (~2040 chars/embed vs
+    // EMBED_TOTAL_MAX=6000 caps 2 per group). Group 1 succeeds; group 2 fails
+    // once then succeeds on the built-in retry (3rd call falls through to the
+    // module's default mockResolvedValue).
+    (postEmbedsToChannel as any)
+      .mockResolvedValueOnce("msg-1")
+      .mockRejectedValueOnce(new Error("discord 5xx transient"));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "plaintext fallback content, should NOT post — everything delivered after retry",
+      postsBatch: threeItemBatch,
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    // 2 groups + 1 retry of the failed group = 3 calls.
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(3);
+    // Everything delivered (after retry) → no partial-delivery warning, no plaintext fallback.
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  it("PARTIAL postsBatch delivery where a group's retry ALSO fails — posts the unsuppressable warning naming the missing slugs, does NOT fall back to full plaintext", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+    // Group 1 succeeds; group 2 fails on both the initial attempt and the retry.
+    (postEmbedsToChannel as any)
+      .mockResolvedValueOnce("msg-1")
+      .mockRejectedValueOnce(new Error("discord 5xx transient"))
+      .mockRejectedValueOnce(new Error("discord 5xx transient (retry)"));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "plaintext fallback content, should NOT post — this is a PARTIAL failure, not total",
+      postsBatch: threeItemBatch,
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(3);
+    // Residual failure after retry → the loud, unsuppressable warning fires...
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const warningCall = (postToChannel as any).mock.calls[0];
+    expect(warningCall[2]).toContain("failed to deliver");
+    // ...naming the slug(s) that make up the failed group (group 2 = "c" per
+    // the packing above: group 1 = [a, b], group 2 = [c]).
+    expect(warningCall[2]).toContain("c");
+    // ...but this is a PARTIAL failure (some content delivered), so the full
+    // proposedComment plaintext fallback must NOT also fire — that would
+    // duplicate posts a/b that already delivered successfully.
+    expect(warningCall[2]).not.toContain("plaintext fallback content");
+  });
+
+  it("postsBatch with an EMPTY items array is not a partial-failure case — falls through to plaintext unchanged", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "plaintext fallback content — SHOULD post since postsBatch.items is empty",
+      postsBatch: { version: 1 as const, items: [] },
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    // No groups, no overflow → no embed calls, no warning, straight to plaintext.
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    const calls = (postToChannel as any).mock.calls.map((c: any[]) => c[2]);
+    expect(calls.some((body: string) => body.includes("plaintext fallback content"))).toBe(true);
+    expect(calls.some((body: string) => body.includes("failed to deliver"))).toBe(false);
+  });
+
+  // codex P2: summary/recommendedAction/risks must reach Discord alongside
+  // postsBatch embeds — renderPostsBatchEmbeds only carries per-post fields.
+  it("summary/recommendedAction/risks post via postToChannel ALONGSIDE the postsBatch embeds (not swallowed)", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        payload: {
+          summary: "Weekly posts batch for 2026-07-13",
+          recommendedAction: "Approve all 13 posts",
+          risks: ["One image URL is a placeholder"],
+          postsBatch: validPostsBatch(),
+        },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({});
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const guidanceCall = (postToChannel as any).mock.calls[0][2] as string;
+    expect(guidanceCall).toContain("Weekly posts batch for 2026-07-13");
+    expect(guidanceCall).toContain("Approve all 13 posts");
+    expect(guidanceCall).toContain("One image URL is a placeholder");
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1); // postsBatch embeds still post
+  });
+
+  // DELIVERY-COMPLETENESS (codex P2, round 6): guidance is part of the card's
+  // visible content too — a residual guidance-post failure (both the initial
+  // attempt and its retry fail) must surface via the unsuppressable warning,
+  // not vanish into a log line while the embeds post successfully underneath it.
+  it("guidance post failure (both attempts) is tracked and surfaces via the partial-delivery warning, even though the embeds succeed", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+    (postToChannel as any)
+      .mockRejectedValueOnce(new Error("discord 5xx transient"))
+      .mockRejectedValueOnce(new Error("discord 5xx transient (retry)"));
+
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        payload: {
+          summary: "Weekly posts batch for 2026-07-13",
+          postsBatch: validPostsBatch(),
+        },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({});
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    // Embeds still post successfully (independent of the guidance failure).
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    // postToChannel: 1st call = guidance attempt (fails), 2nd = guidance retry
+    // (fails), 3rd = the partial-delivery warning.
+    expect(postToChannel).toHaveBeenCalledTimes(3);
+    const warningCall = (postToChannel as any).mock.calls[2][2] as string;
+    expect(warningCall).toContain("failed to deliver");
+    expect(warningCall).toContain("guidance");
+  });
+
+  it("no guidance fields set → postToChannel is not called for postsBatch (unchanged from before)", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ postsBatch: validPostsBatch() });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postToChannel).not.toHaveBeenCalled();
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+  });
+
+  // codex P2: a platform copy longer than Discord's 1024-char embed field
+  // limit must post as a plaintext follow-up (the FULL text), not just a
+  // truncated field value.
+  it("platform copy >1024 chars posts a plaintext follow-up with the FULL text", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const longCopy = "Long-form Facebook copy. ".repeat(60); // well over 1024 chars
+    const batchWithLongCopy = {
+      version: 1,
+      items: [{
+        slug: "tokyo-trifecta", day: "Mon", postTime: null,
+        imageUrl: "https://hinomaru.one/images/tours/trifecta-card.avif",
+        hook: "Three neighborhoods.",
+        platforms: { facebook: longCopy },
+      }],
+    };
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ postsBatch: batchWithLongCopy });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const overflowCall = (postToChannel as any).mock.calls[0][2] as string;
+    expect(overflowCall).toContain("tokyo-trifecta");
+    expect(overflowCall).toContain("Facebook");
+    expect(overflowCall).toContain(longCopy);
   });
 });

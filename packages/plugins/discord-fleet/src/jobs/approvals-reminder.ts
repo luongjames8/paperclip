@@ -2,13 +2,19 @@ import type { Client } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { CompanyConfig, DiscordFleetConfig } from "../config/schema.js";
 import type { PaperclipClient } from "../api/paperclip.js";
-import { postEmbedToChannel, postToChannel } from "../discord/rest.js";
+import { postEmbedToChannel, postEmbedsToChannel, postToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
-import { resolveApprovalContent, PENDING_APPROVALS_KEY } from "../handlers/approval-created.js";
+import { resolveApprovalContent, resolveApprovalGuidance, PENDING_APPROVALS_KEY } from "../handlers/approval-created.js";
+import {
+  parsePostsBatchPayload,
+  chunkPostsBatchForDiscord,
+  renderOverflowMessages,
+  buildPartialDeliveryWarning,
+} from "../render/posts-batch.js";
 import { PaperclipApiError } from "../api/paperclip.js";
 import { safeParseMs } from "../util/safe.js";
 
@@ -268,6 +274,15 @@ export async function runApprovalsReminder(
     // work if they SEE the payload (2026-07-04: content in payload.note was
     // invisible here because only three fields were forwarded).
     let reviewableContent = resolveApprovalContent(approvalPayloadUnknown ?? {});
+    // postsBatch structured render (GH #501) — mirrors handleApprovalCreated's
+    // detection: same contract, same degrade-to-plaintext-on-miss semantics.
+    const postsBatch = parsePostsBatchPayload(approvalPayloadUnknown?.postsBatch);
+    // postsBatchGuidance (codex P2): summary/recommendedAction/risks — the
+    // structured embeds only carry per-post fields, so without this,
+    // guidance set alongside postsBatch would disappear from the reminder.
+    // approval.payload is already the FULL stored payload (unlike
+    // handleApprovalCreated's partial event), so no separate fetch needed.
+    const postsBatchGuidance = resolveApprovalGuidance(approvalPayloadUnknown ?? {});
     // Issue-digest fallback — same agent-independent floor as approval-created:
     // the linked issue's comment trail is runtime-guaranteed; compose from it
     // when the payload yields nothing.
@@ -300,7 +315,87 @@ export async function runApprovalsReminder(
         });
       }
     }
-    if (reviewableContent) {
+    // DELIVERY-COMPLETENESS (codex P2, round 6) — mirrors handleApprovalCreated's
+    // fix exactly (see that function's comment for the full rationale): PER-UNIT
+    // tracking (deliveredSlugs/missingSlugs) instead of one boolean that a
+    // single successful group could flip true while later groups silently
+    // failed. Any residual failure after one retry is always surfaced via an
+    // unsuppressable partial-delivery warning naming exactly what's missing.
+    const deliveredSlugs = new Set<string>();
+    const missingSlugs: string[] = [];
+    const postSendWithRetry = async (send: () => Promise<unknown>, label: string, logFields: Record<string, unknown>): Promise<boolean> => {
+      try {
+        await send();
+        return true;
+      } catch (err) {
+        ctx.logger.warn(`approvals-reminder: ${label} post failed; retrying once`, { ...logFields, error: String(err) });
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          await send();
+          return true;
+        } catch (err2) {
+          ctx.logger.warn(`approvals-reminder: ${label} post failed after retry`, { ...logFields, error: String(err2) });
+          return false;
+        }
+      }
+    };
+    if (postsBatch) {
+      // Guidance posts BEFORE the per-post embeds, regardless of whether the
+      // embeds themselves succeed below (codex P2 — see handleApprovalCreated).
+      // Routed through postSendWithRetry + missingSlugs (DELIVERY-COMPLETENESS,
+      // round 6 — see handleApprovalCreated's comment for the full rationale).
+      if (postsBatchGuidance) {
+        const ok = await postSendWithRetry(
+          () => postToChannel(client, destinationChannelId, truncate(stripSecrets(postsBatchGuidance), CONTENT_CHUNK_MAX)),
+          "postsBatch guidance",
+          { approvalId: approval.id, destinationChannelId },
+        );
+        if (!ok) missingSlugs.push("guidance (summary/recommendedAction/risks)");
+      }
+      const { groups, overflow } = chunkPostsBatchForDiscord(postsBatch);
+      for (const group of groups) {
+        const ok = await postSendWithRetry(
+          () => postEmbedsToChannel(client, destinationChannelId, group.embeds),
+          "postsBatch embed group",
+          { approvalId: approval.id, destinationChannelId, slugs: group.slugs },
+        );
+        if (ok) for (const slug of group.slugs) deliveredSlugs.add(slug);
+        else missingSlugs.push(...group.slugs);
+      }
+      // Platform copy longer than Discord's 1024-char embed field limit
+      // (codex P2) — post the FULL text as a plaintext follow-up (mirrors
+      // handleApprovalCreated). renderOverflowMessages reserves header budget
+      // BEFORE chunking (codex P2, round 2) — see that function's doc.
+      for (const item of overflow) {
+        const messages = renderOverflowMessages(item, CONTENT_CHUNK_MAX);
+        for (let i = 0; i < messages.length; i++) {
+          const message = messages[i];
+          const label = `postsBatch platform-copy overflow (${item.itemSlug}/${item.platformLabel} ${i + 1}/${messages.length})`;
+          const ok = await postSendWithRetry(
+            () => postToChannel(client, destinationChannelId, stripSecrets(message)),
+            label,
+            { approvalId: approval.id, destinationChannelId, itemSlug: item.itemSlug, platformLabel: item.platformLabel },
+          );
+          if (!ok) missingSlugs.push(`${item.itemSlug} (${item.platformLabel} full text ${i + 1}/${messages.length})`);
+        }
+      }
+      // Unsuppressable: posts on ANY residual failure, regardless of how many
+      // groups/overflow messages succeeded around it.
+      if (missingSlugs.length > 0) {
+        try {
+          await postToChannel(client, destinationChannelId, buildPartialDeliveryWarning(missingSlugs, url));
+        } catch (err) {
+          ctx.logger.error("approvals-reminder: partial-delivery warning post failed — reminder may look complete but is missing content", {
+            approvalId: approval.id,
+            destinationChannelId,
+            missingSlugs,
+            error: String(err),
+          });
+        }
+      }
+    }
+    const postsBatchDelivered = deliveredSlugs.size > 0;
+    if (!postsBatchDelivered && reviewableContent) {
       const chunks = chunkBySection(stripSecrets(reviewableContent));
       for (const chunk of chunks) {
         try {

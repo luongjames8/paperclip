@@ -68,6 +68,38 @@ describe("ApprovalPayloadRenderer", () => {
     });
   });
 
+  it("renders proposedComment via MarkdownBody, not a raw <pre> block (GH #501)", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            title: "Weekly posts batch",
+            proposedComment: "## Section heading\n**Bold field**\n![alt](https://example.com/img.jpg)",
+          }}
+        />,
+      );
+    });
+
+    // The mocked MarkdownBody renders children verbatim into a plain <div> —
+    // asserting there is NO <pre> ancestor for the proposedComment text is
+    // what actually pins "not raw preformatted text" (a <pre> would also
+    // contain this string, so a content-only assertion can't distinguish
+    // the old <pre> rendering from the new MarkdownBody rendering).
+    const proposedCommentText = "Section heading";
+    const preElements = Array.from(container.querySelectorAll("pre"));
+    const rawPreRender = preElements.some((el) => el.textContent?.includes(proposedCommentText));
+    expect(rawPreRender).toBe(false);
+    expect(container.textContent).toContain("## Section heading");
+    expect(container.textContent).toContain("![alt](https://example.com/img.jpg)");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("can hide the repeated title when the card header already shows it", () => {
     const root = createRoot(container);
 
