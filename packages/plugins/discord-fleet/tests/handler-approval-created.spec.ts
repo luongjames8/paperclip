@@ -1070,40 +1070,98 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
     expect(postToChannel).toHaveBeenCalled(); // fell back to plaintext since nothing delivered
   });
 
-  it("PARTIAL postsBatch delivery (at least one embed group succeeds) does NOT fall back to plaintext", async () => {
+  // DELIVERY-COMPLETENESS (codex P2, round 6): a bare "at least one group
+  // delivered" boolean used to gate the plaintext fallback ONLY — it never
+  // surfaced a later group's failure to the operator at all. The three tests
+  // below pin the per-unit (deliveredSlugs/missingSlugs) replacement across
+  // its three distinguishable outcomes: transient failure that self-heals via
+  // the retry, residual failure after the retry (must warn), and the
+  // no-groups-exist edge (must NOT be treated as a partial failure).
+  const threeItemBatch = {
+    version: 1 as const,
+    items: [
+      { slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h".repeat(2000), platforms: {} },
+      { slug: "b", day: "Tue", postTime: null, imageUrl: "https://x.example.com/b.jpg", hook: "h".repeat(2000), platforms: {} },
+      { slug: "c", day: "Wed", postTime: null, imageUrl: "https://x.example.com/c.jpg", hook: "h".repeat(2000), platforms: {} },
+    ],
+  };
+
+  it("PARTIAL postsBatch delivery where the failed group's RETRY succeeds — self-heals, no warning, no plaintext fallback", async () => {
     const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
     const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
     const { renderIssueDocs } = await import("../src/render/issue-docs.js");
     (renderIssueDocs as any).mockReturnValue([]);
+    // 3 large-hook items pack into 2 groups (~2040 chars/embed vs
+    // EMBED_TOTAL_MAX=6000 caps 2 per group). Group 1 succeeds; group 2 fails
+    // once then succeeds on the built-in retry (3rd call falls through to the
+    // module's default mockResolvedValue).
     (postEmbedsToChannel as any)
       .mockResolvedValueOnce("msg-1")
       .mockRejectedValueOnce(new Error("discord 5xx transient"));
 
     const harness = createTestHarness({ manifest });
-    // Two items → chunkEmbedsForDiscord may still pack them into one group
-    // (well under the 10-embed/6000-char caps), so force two groups via a
-    // large enough item set is unnecessary — this payload's chunking behavior
-    // isn't the point here; the mock resolves once then rejects once
-    // regardless of how many groups postEmbedsToChannel is actually called
-    // with, so this test only needs postEmbedsToChannel called >= 2 times to
-    // be meaningful. Two items with distinct large hooks keep them in
-    // separate chunks so postEmbedsToChannel is called twice.
-    const twoItemBatch = {
-      version: 1 as const,
-      items: [
-        { slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h".repeat(2000), platforms: {} },
-        { slug: "b", day: "Tue", postTime: null, imageUrl: "https://x.example.com/b.jpg", hook: "h".repeat(2000), platforms: {} },
-        { slug: "c", day: "Wed", postTime: null, imageUrl: "https://x.example.com/c.jpg", hook: "h".repeat(2000), platforms: {} },
-      ],
-    };
     const event = makeApprovalCreatedEvent({
-      proposedComment: "plaintext fallback content, should NOT post since one group delivered",
-      postsBatch: twoItemBatch,
+      proposedComment: "plaintext fallback content, should NOT post — everything delivered after retry",
+      postsBatch: threeItemBatch,
     });
     await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
 
-    expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);
+    // 2 groups + 1 retry of the failed group = 3 calls.
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(3);
+    // Everything delivered (after retry) → no partial-delivery warning, no plaintext fallback.
     expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  it("PARTIAL postsBatch delivery where a group's retry ALSO fails — posts the unsuppressable warning naming the missing slugs, does NOT fall back to full plaintext", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+    // Group 1 succeeds; group 2 fails on both the initial attempt and the retry.
+    (postEmbedsToChannel as any)
+      .mockResolvedValueOnce("msg-1")
+      .mockRejectedValueOnce(new Error("discord 5xx transient"))
+      .mockRejectedValueOnce(new Error("discord 5xx transient (retry)"));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "plaintext fallback content, should NOT post — this is a PARTIAL failure, not total",
+      postsBatch: threeItemBatch,
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(3);
+    // Residual failure after retry → the loud, unsuppressable warning fires...
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const warningCall = (postToChannel as any).mock.calls[0];
+    expect(warningCall[2]).toContain("failed to deliver");
+    // ...naming the slug(s) that make up the failed group (group 2 = "c" per
+    // the packing above: group 1 = [a, b], group 2 = [c]).
+    expect(warningCall[2]).toContain("c");
+    // ...but this is a PARTIAL failure (some content delivered), so the full
+    // proposedComment plaintext fallback must NOT also fire — that would
+    // duplicate posts a/b that already delivered successfully.
+    expect(warningCall[2]).not.toContain("plaintext fallback content");
+  });
+
+  it("postsBatch with an EMPTY items array is not a partial-failure case — falls through to plaintext unchanged", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "plaintext fallback content — SHOULD post since postsBatch.items is empty",
+      postsBatch: { version: 1 as const, items: [] },
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    // No groups, no overflow → no embed calls, no warning, straight to plaintext.
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    const calls = (postToChannel as any).mock.calls.map((c: any[]) => c[2]);
+    expect(calls.some((body: string) => body.includes("plaintext fallback content"))).toBe(true);
+    expect(calls.some((body: string) => body.includes("failed to deliver"))).toBe(false);
   });
 
   // codex P2: summary/recommendedAction/risks must reach Discord alongside
@@ -1139,6 +1197,46 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
     expect(guidanceCall).toContain("Approve all 13 posts");
     expect(guidanceCall).toContain("One image URL is a placeholder");
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(1); // postsBatch embeds still post
+  });
+
+  // DELIVERY-COMPLETENESS (codex P2, round 6): guidance is part of the card's
+  // visible content too — a residual guidance-post failure (both the initial
+  // attempt and its retry fail) must surface via the unsuppressable warning,
+  // not vanish into a log line while the embeds post successfully underneath it.
+  it("guidance post failure (both attempts) is tracked and surfaces via the partial-delivery warning, even though the embeds succeed", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+    (postToChannel as any)
+      .mockRejectedValueOnce(new Error("discord 5xx transient"))
+      .mockRejectedValueOnce(new Error("discord 5xx transient (retry)"));
+
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        payload: {
+          summary: "Weekly posts batch for 2026-07-13",
+          postsBatch: validPostsBatch(),
+        },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({});
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    // Embeds still post successfully (independent of the guidance failure).
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    // postToChannel: 1st call = guidance attempt (fails), 2nd = guidance retry
+    // (fails), 3rd = the partial-delivery warning.
+    expect(postToChannel).toHaveBeenCalledTimes(3);
+    const warningCall = (postToChannel as any).mock.calls[2][2] as string;
+    expect(warningCall).toContain("failed to deliver");
+    expect(warningCall).toContain("guidance");
   });
 
   it("no guidance fields set → postToChannel is not called for postsBatch (unchanged from before)", async () => {

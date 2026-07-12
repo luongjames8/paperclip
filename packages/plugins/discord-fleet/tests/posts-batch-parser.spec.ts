@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { parsePostsBatchPayload, renderPostsBatchEmbeds, renderOverflowMessages, type PostsBatchPayload, type PostsBatchPlatformOverflow } from "../src/render/posts-batch.js";
+import {
+  parsePostsBatchPayload,
+  renderPostsBatchEmbeds,
+  renderOverflowMessages,
+  chunkPostsBatchForDiscord,
+  buildPartialDeliveryWarning,
+  type PostsBatchPayload,
+  type PostsBatchPlatformOverflow,
+} from "../src/render/posts-batch.js";
 
 function validPayload(overrides: Partial<PostsBatchPayload> = {}): PostsBatchPayload {
   return {
@@ -379,5 +387,119 @@ describe("renderOverflowMessages", () => {
 
   it("FAILS CLOSED (throws) when maxLen is too small to fit even the reserved header — never silently ships an oversized message", () => {
     expect(() => renderOverflowMessages(overflowItem("some text"), 5)).toThrow(/maxLen.*smaller than the reserved header budget/);
+  });
+});
+
+// ─── chunkPostsBatchForDiscord — DELIVERY-COMPLETENESS primitive (codex P2,
+// round 6): per-group slug identity so a caller whose send fails can name
+// exactly what's missing, rather than losing that information the moment
+// items are packed into opaque APIEmbed[] groups. ─────────────────────────
+describe("chunkPostsBatchForDiscord", () => {
+  function itemWithHookLen(slug: string, hookLen: number) {
+    return {
+      slug,
+      day: null,
+      postTime: null,
+      imageUrl: `https://x.example.com/${slug}.jpg`,
+      hook: "h".repeat(hookLen),
+      platforms: {},
+    };
+  }
+
+  it("empty items → zero groups, zero overflow (not a failure case, just nothing to send)", () => {
+    const { groups, overflow } = chunkPostsBatchForDiscord({ version: 1, items: [] });
+    expect(groups).toEqual([]);
+    expect(overflow).toEqual([]);
+  });
+
+  it("small batch (well under caps) packs into ONE group carrying every item's slug", () => {
+    const payload: PostsBatchPayload = {
+      version: 1,
+      items: [itemWithHookLen("a", 50), itemWithHookLen("b", 50)],
+    };
+    const { groups } = chunkPostsBatchForDiscord(payload);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].slugs).toEqual(["a", "b"]);
+    expect(groups[0].embeds).toHaveLength(2);
+  });
+
+  it("a batch exceeding EMBED_TOTAL_MAX (6000 chars) per group splits into multiple groups, each carrying only ITS OWN items' slugs", () => {
+    // ~2040 chars/embed (2000-char hook + title/footer overhead) → 2 embeds
+    // per group before a 3rd would push past 6000.
+    const payload: PostsBatchPayload = {
+      version: 1,
+      items: [itemWithHookLen("a", 2000), itemWithHookLen("b", 2000), itemWithHookLen("c", 2000)],
+    };
+    const { groups } = chunkPostsBatchForDiscord(payload);
+    expect(groups.length).toBeGreaterThan(1);
+    // Every slug appears in EXACTLY one group — no item duplicated or dropped
+    // across the split, and each group's slugs.length matches its embeds.length.
+    const allSlugs = groups.flatMap((g) => g.slugs);
+    expect(allSlugs.sort()).toEqual(["a", "b", "c"]);
+    for (const g of groups) {
+      expect(g.slugs.length).toBe(g.embeds.length);
+    }
+  });
+
+  it("a batch exceeding 10 items per group splits on the embed-COUNT cap even when chars are small", () => {
+    const items = Array.from({ length: 25 }, (_, i) => itemWithHookLen(`slug-${i}`, 10));
+    const { groups } = chunkPostsBatchForDiscord({ version: 1, items });
+    expect(groups.length).toBe(3); // 10 + 10 + 5
+    expect(groups[0].slugs).toHaveLength(10);
+    expect(groups[1].slugs).toHaveLength(10);
+    expect(groups[2].slugs).toHaveLength(5);
+    expect(groups.flatMap((g) => g.slugs)).toEqual(items.map((i) => i.slug));
+  });
+
+  it("overflow is passed through unchanged from renderPostsBatchEmbeds (platform copy > 1024 chars)", () => {
+    const payload: PostsBatchPayload = {
+      version: 1,
+      items: [
+        {
+          slug: "a",
+          day: null,
+          postTime: null,
+          imageUrl: "https://x.example.com/a.jpg",
+          hook: "short hook",
+          platforms: { facebook: "f".repeat(1500) },
+        },
+      ],
+    };
+    const { overflow } = chunkPostsBatchForDiscord(payload);
+    expect(overflow).toHaveLength(1);
+    expect(overflow[0].itemSlug).toBe("a");
+    expect(overflow[0].fullText).toHaveLength(1500);
+  });
+});
+
+// ─── buildPartialDeliveryWarning — the unsuppressable marker that makes
+// DELIVERY-COMPLETENESS hold by construction: posted whenever missingSlugs is
+// non-empty, regardless of how many other units succeeded. ────────────────
+describe("buildPartialDeliveryWarning", () => {
+  it("names every missing slug and links to the full batch", () => {
+    const msg = buildPartialDeliveryWarning(["tokyo-trifecta", "layover"], "https://paperclip.example.com/hin/approvals/abc123");
+    expect(msg).toContain("tokyo-trifecta");
+    expect(msg).toContain("layover");
+    expect(msg).toContain("https://paperclip.example.com/hin/approvals/abc123");
+    expect(msg).toContain("failed to deliver");
+    // Loud/unmissable marker — visually distinct from a normal content post.
+    expect(msg).toMatch(/^⚠️/);
+  });
+
+  it("singular vs plural count phrasing", () => {
+    const one = buildPartialDeliveryWarning(["a"], "https://x.example.com/y");
+    expect(one).toContain("1 post group failed");
+    const many = buildPartialDeliveryWarning(["a", "b", "c"], "https://x.example.com/y");
+    expect(many).toContain("3 post groups failed");
+  });
+
+  it("never throws and stays within the message budget even for a pathologically long missing-slug list", () => {
+    const manySlugs = Array.from({ length: 500 }, (_, i) => `very-long-slug-name-number-${i}`);
+    const msg = buildPartialDeliveryWarning(manySlugs, "https://x.example.com/y");
+    expect(msg.length).toBeLessThanOrEqual(1900);
+    expect(msg).toContain("failed to deliver");
+    // The link must survive truncation of the slug list (link is appended
+    // after the (possibly truncated) list, on its own line).
+    expect(msg).toContain("https://x.example.com/y");
   });
 });

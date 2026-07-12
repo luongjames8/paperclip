@@ -9,8 +9,12 @@ import { stripSecrets } from "../render/secrets.js";
 import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
 import { resolveApprovalContent, resolveApprovalGuidance, PENDING_APPROVALS_KEY } from "../handlers/approval-created.js";
-import { parsePostsBatchPayload, renderPostsBatchEmbeds, renderOverflowMessages } from "../render/posts-batch.js";
-import { chunkEmbedsForDiscord } from "../render/issue-docs.js";
+import {
+  parsePostsBatchPayload,
+  chunkPostsBatchForDiscord,
+  renderOverflowMessages,
+  buildPartialDeliveryWarning,
+} from "../render/posts-batch.js";
 import { PaperclipApiError } from "../api/paperclip.js";
 import { safeParseMs } from "../util/safe.js";
 
@@ -311,58 +315,86 @@ export async function runApprovalsReminder(
         });
       }
     }
-    // postsBatchDelivered mirrors handleApprovalCreated's fallback semantics
-    // (codex P2): a total structured-render failure (postsBatch parses but
-    // every postEmbedsToChannel call fails) must fall through to the
-    // plaintext path rather than leave the reminder header-only.
-    let postsBatchDelivered = false;
+    // DELIVERY-COMPLETENESS (codex P2, round 6) — mirrors handleApprovalCreated's
+    // fix exactly (see that function's comment for the full rationale): PER-UNIT
+    // tracking (deliveredSlugs/missingSlugs) instead of one boolean that a
+    // single successful group could flip true while later groups silently
+    // failed. Any residual failure after one retry is always surfaced via an
+    // unsuppressable partial-delivery warning naming exactly what's missing.
+    const deliveredSlugs = new Set<string>();
+    const missingSlugs: string[] = [];
+    const postSendWithRetry = async (send: () => Promise<unknown>, label: string, logFields: Record<string, unknown>): Promise<boolean> => {
+      try {
+        await send();
+        return true;
+      } catch (err) {
+        ctx.logger.warn(`approvals-reminder: ${label} post failed; retrying once`, { ...logFields, error: String(err) });
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          await send();
+          return true;
+        } catch (err2) {
+          ctx.logger.warn(`approvals-reminder: ${label} post failed after retry`, { ...logFields, error: String(err2) });
+          return false;
+        }
+      }
+    };
     if (postsBatch) {
       // Guidance posts BEFORE the per-post embeds, regardless of whether the
       // embeds themselves succeed below (codex P2 — see handleApprovalCreated).
+      // Routed through postSendWithRetry + missingSlugs (DELIVERY-COMPLETENESS,
+      // round 6 — see handleApprovalCreated's comment for the full rationale).
       if (postsBatchGuidance) {
-        try {
-          await postToChannel(client, destinationChannelId, truncate(stripSecrets(postsBatchGuidance), CONTENT_CHUNK_MAX));
-        } catch (err) {
-          ctx.logger.warn("approvals-reminder: postsBatch guidance post failed", {
-            approvalId: approval.id,
-            destinationChannelId,
-            error: String(err),
-          });
-        }
+        const ok = await postSendWithRetry(
+          () => postToChannel(client, destinationChannelId, truncate(stripSecrets(postsBatchGuidance), CONTENT_CHUNK_MAX)),
+          "postsBatch guidance",
+          { approvalId: approval.id, destinationChannelId },
+        );
+        if (!ok) missingSlugs.push("guidance (summary/recommendedAction/risks)");
       }
-      const { embeds, overflow } = renderPostsBatchEmbeds(postsBatch);
-      for (const group of chunkEmbedsForDiscord(embeds)) {
-        try {
-          await postEmbedsToChannel(client, destinationChannelId, group);
-          postsBatchDelivered = true;
-        } catch (err) {
-          ctx.logger.warn("approvals-reminder: postsBatch embed group post failed", {
-            approvalId: approval.id,
-            destinationChannelId,
-            error: String(err),
-          });
-        }
+      const { groups, overflow } = chunkPostsBatchForDiscord(postsBatch);
+      for (const group of groups) {
+        const ok = await postSendWithRetry(
+          () => postEmbedsToChannel(client, destinationChannelId, group.embeds),
+          "postsBatch embed group",
+          { approvalId: approval.id, destinationChannelId, slugs: group.slugs },
+        );
+        if (ok) for (const slug of group.slugs) deliveredSlugs.add(slug);
+        else missingSlugs.push(...group.slugs);
       }
       // Platform copy longer than Discord's 1024-char embed field limit
       // (codex P2) — post the FULL text as a plaintext follow-up (mirrors
       // handleApprovalCreated). renderOverflowMessages reserves header budget
       // BEFORE chunking (codex P2, round 2) — see that function's doc.
       for (const item of overflow) {
-        for (const message of renderOverflowMessages(item, CONTENT_CHUNK_MAX)) {
-          try {
-            await postToChannel(client, destinationChannelId, stripSecrets(message));
-          } catch (err) {
-            ctx.logger.warn("approvals-reminder: postsBatch platform-copy overflow post failed", {
-              approvalId: approval.id,
-              destinationChannelId,
-              itemSlug: item.itemSlug,
-              platformLabel: item.platformLabel,
-              error: String(err),
-            });
-          }
+        const messages = renderOverflowMessages(item, CONTENT_CHUNK_MAX);
+        for (let i = 0; i < messages.length; i++) {
+          const message = messages[i];
+          const label = `postsBatch platform-copy overflow (${item.itemSlug}/${item.platformLabel} ${i + 1}/${messages.length})`;
+          const ok = await postSendWithRetry(
+            () => postToChannel(client, destinationChannelId, stripSecrets(message)),
+            label,
+            { approvalId: approval.id, destinationChannelId, itemSlug: item.itemSlug, platformLabel: item.platformLabel },
+          );
+          if (!ok) missingSlugs.push(`${item.itemSlug} (${item.platformLabel} full text ${i + 1}/${messages.length})`);
+        }
+      }
+      // Unsuppressable: posts on ANY residual failure, regardless of how many
+      // groups/overflow messages succeeded around it.
+      if (missingSlugs.length > 0) {
+        try {
+          await postToChannel(client, destinationChannelId, buildPartialDeliveryWarning(missingSlugs, url));
+        } catch (err) {
+          ctx.logger.error("approvals-reminder: partial-delivery warning post failed — reminder may look complete but is missing content", {
+            approvalId: approval.id,
+            destinationChannelId,
+            missingSlugs,
+            error: String(err),
+          });
         }
       }
     }
+    const postsBatchDelivered = deliveredSlugs.size > 0;
     if (!postsBatchDelivered && reviewableContent) {
       const chunks = chunkBySection(stripSecrets(reviewableContent));
       for (const chunk of chunks) {

@@ -328,6 +328,69 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     expect(postToChannel).toHaveBeenCalled();
   });
 
+  // DELIVERY-COMPLETENESS (codex P2, round 6): mirrors handleApprovalCreated's
+  // fix — a group failing after an earlier group succeeded must not be
+  // silently absorbed by a boolean that only tracks "did ANYTHING deliver."
+  // 3 large-hook items pack into 2 groups (same packing math as the
+  // handler-approval-created.spec.ts sibling test); group 1 succeeds, group 2
+  // fails on both its initial attempt and its retry.
+  function threeItemPostsBatch() {
+    return {
+      version: 1 as const,
+      weekOf: "2026-07-13",
+      items: [
+        { slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h".repeat(2000), platforms: {} },
+        { slug: "b", day: "Tue", postTime: null, imageUrl: "https://x.example.com/b.jpg", hook: "h".repeat(2000), platforms: {} },
+        { slug: "c", day: "Wed", postTime: null, imageUrl: "https://x.example.com/c.jpg", hook: "h".repeat(2000), platforms: {} },
+      ],
+    };
+  }
+
+  it("PARTIAL postsBatch delivery in the reminder path — posts the unsuppressable warning naming the missing slugs, does NOT fall back to full plaintext", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce("msg-1")
+      .mockRejectedValueOnce(new Error("discord 5xx transient"))
+      .mockRejectedValueOnce(new Error("discord 5xx transient (retry)"));
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "plaintext fallback content, should NOT post — this is a PARTIAL failure", postsBatch: threeItemPostsBatch() } })]),
+      NOW,
+    );
+
+    // 2 groups + 1 retry of the failed group = 3 calls.
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(3);
+    // Residual failure after retry → the loud, unsuppressable warning fires...
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const warningCall = (postToChannel as any).mock.calls[0];
+    expect(warningCall[2]).toContain("failed to deliver");
+    expect(warningCall[2]).toContain("c");
+    // ...but the full proposedComment plaintext fallback must NOT also fire.
+    expect(warningCall[2]).not.toContain("plaintext fallback content");
+  });
+
+  it("postsBatch with an EMPTY items array in the reminder path is not a partial-failure case — falls through to plaintext unchanged", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "plaintext fallback content — SHOULD post since postsBatch.items is empty", postsBatch: { version: 1, items: [] } } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    const calls = (postToChannel as any).mock.calls.map((c: any[]) => c[2]);
+    expect(calls.some((body: string) => body.includes("plaintext fallback content"))).toBe(true);
+    expect(calls.some((body: string) => body.includes("failed to deliver"))).toBe(false);
+  });
+
   // codex P2: summary/recommendedAction/risks must reach Discord alongside
   // postsBatch embeds in the reminder path too.
   it("summary/recommendedAction/risks post via postToChannel ALONGSIDE the postsBatch embeds (not swallowed)", async () => {

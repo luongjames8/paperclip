@@ -12,8 +12,13 @@ import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
 import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
-import { renderIssueDocs, chunkEmbedsForDiscord, type IssueDocsBundle } from "../render/issue-docs.js";
-import { parsePostsBatchPayload, renderPostsBatchEmbeds, renderOverflowMessages } from "../render/posts-batch.js";
+import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
+import {
+  parsePostsBatchPayload,
+  chunkPostsBatchForDiscord,
+  renderOverflowMessages,
+  buildPartialDeliveryWarning,
+} from "../render/posts-batch.js";
 import { PaperclipClient } from "../api/paperclip.js";
 import { postDeliveryFailureFallback } from "./delivery-fallback.js";
 
@@ -429,44 +434,81 @@ export async function handleApprovalCreated(
   // the existing plaintext path — legacy cards (and any card whose editor
   // hasn't shipped postsBatch yet) render exactly as before.
   //
-  // postsBatchDelivered tracks whether AT LEAST ONE embed group actually
-  // posted (codex P2): if postsBatch parses but every postEmbedsToChannel
-  // call fails (Discord-side embed/image validation, transient 5xx, etc.),
-  // falling silent here would regress the pre-existing floor — effectiveContent
-  // was ALWAYS posted before this change (see the "CHANGE 1" plaintext-always
-  // path below). A total structured-render failure now falls through to that
-  // same plaintext path instead of leaving the card header-only.
-  let postsBatchDelivered = false;
+  // DELIVERY-COMPLETENESS (codex P2, round 6): a bare "did anything post"
+  // boolean flipped true by the FIRST successful embed group hid every LATER
+  // group's failure — for a >10-post weekly batch, chunkPostsBatchForDiscord
+  // splits into multiple Discord messages, and a transient failure on group 2
+  // used to leave the operator an approvable card showing only group 1 with
+  // no indication anything was missing. Fixed by tracking PER-UNIT delivery
+  // (deliveredSlugs/missingSlugs) instead of one scalar, so the invariant —
+  // "the operator must never see an approvable card whose visible content is
+  // a silent subset of the batch" — holds regardless of which specific
+  // groups/overflow messages fail, not just the all-or-nothing case:
+  //   - every group/overflow-send gets one retry (mirrors the existing
+  //     content-chunk retry-once pattern below) so a transient hiccup
+  //     self-heals within this same call;
+  //   - any RESIDUAL failure (after retry) is always tracked by slug in
+  //     missingSlugs, never just logged-and-dropped;
+  //   - if missingSlugs is non-empty when the loop ends, an unsuppressable
+  //     buildPartialDeliveryWarning message posts naming exactly what's
+  //     missing + the deep link to the full record — independent of whatever
+  //     else succeeded, so it can never be silently skipped by a later
+  //     success or an earlier one;
+  //   - deliveredSlugs.size > 0 is what the plaintext-fallback gate below
+  //     checks (unchanged semantics from the old boolean for the TOTAL
+  //     failure case: 0 delivered still falls through to full plaintext,
+  //     which is correct — with nothing delivered there is no "missing
+  //     range" narrower than the whole batch).
+  const deliveredSlugs = new Set<string>();
+  const missingSlugs: string[] = [];
+  // postSendWithRetry: one retry after a short pause, mirroring the
+  // plaintext-chunk retry pattern below — factored out so the embed-group and
+  // overflow-message loops (below) don't each duplicate the try/retry/catch
+  // shape a third and fourth time.
+  const postSendWithRetry = async (send: () => Promise<unknown>, label: string, logFields: Record<string, unknown>): Promise<boolean> => {
+    try {
+      await send();
+      return true;
+    } catch (err) {
+      ctx.logger.warn(`approval-created: ${label} post failed; retrying once`, { ...logFields, error: String(err) });
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        await send();
+        return true;
+      } catch (err2) {
+        ctx.logger.warn(`approval-created: ${label} post failed after retry`, { ...logFields, error: String(err2) });
+        return false;
+      }
+    }
+  };
   if (postsBatch) {
     // Guidance (summary/recommendedAction/risks) posts BEFORE the per-post
     // embeds — renderPostsBatchEmbeds only carries image/hook/platform-copy
     // fields, so this is the only place that approval-level guidance reaches
     // Discord for a structured card (codex P2). Posted regardless of whether
     // the embeds themselves succeed below — a transient embed-send failure
-    // must not also swallow guidance that already sent successfully.
+    // must not also swallow guidance that already sent successfully. Routed
+    // through postSendWithRetry + missingSlugs like every other unit
+    // (DELIVERY-COMPLETENESS, round 6): guidance is part of the card's
+    // visible content too, so a residual guidance-post failure must surface
+    // via the same unsuppressable warning, not vanish into a log line.
     if (postsBatchGuidance) {
-      try {
-        await postToChannel(client, destinationChannelId, truncate(stripSecrets(postsBatchGuidance), CONTENT_CHUNK_MAX));
-      } catch (err) {
-        ctx.logger.warn("approval-created: postsBatch guidance post failed", {
-          approvalId,
-          destinationChannelId,
-          error: String(err),
-        });
-      }
+      const ok = await postSendWithRetry(
+        () => postToChannel(client, destinationChannelId, truncate(stripSecrets(postsBatchGuidance), CONTENT_CHUNK_MAX)),
+        "postsBatch guidance",
+        { approvalId, destinationChannelId },
+      );
+      if (!ok) missingSlugs.push("guidance (summary/recommendedAction/risks)");
     }
-    const { embeds, overflow } = renderPostsBatchEmbeds(postsBatch);
-    for (const group of chunkEmbedsForDiscord(embeds)) {
-      try {
-        await postEmbedsToChannel(client, destinationChannelId, group);
-        postsBatchDelivered = true;
-      } catch (err) {
-        ctx.logger.warn("approval-created: postsBatch embed group post failed", {
-          approvalId,
-          destinationChannelId,
-          error: String(err),
-        });
-      }
+    const { groups, overflow } = chunkPostsBatchForDiscord(postsBatch);
+    for (const group of groups) {
+      const ok = await postSendWithRetry(
+        () => postEmbedsToChannel(client, destinationChannelId, group.embeds),
+        "postsBatch embed group",
+        { approvalId, destinationChannelId, slugs: group.slugs },
+      );
+      if (ok) for (const slug of group.slugs) deliveredSlugs.add(slug);
+      else missingSlugs.push(...group.slugs);
     }
     // Platform copy longer than Discord's 1024-char embed field limit (codex
     // P2) — the embed field already shows a truncated preview; post the FULL
@@ -477,21 +519,36 @@ export async function handleApprovalCreated(
     // own truncate) — every returned string already fits within
     // CONTENT_CHUNK_MAX including its header.
     for (const item of overflow) {
-      for (const message of renderOverflowMessages(item, CONTENT_CHUNK_MAX)) {
-        try {
-          await postToChannel(client, destinationChannelId, stripSecrets(message));
-        } catch (err) {
-          ctx.logger.warn("approval-created: postsBatch platform-copy overflow post failed", {
-            approvalId,
-            destinationChannelId,
-            itemSlug: item.itemSlug,
-            platformLabel: item.platformLabel,
-            error: String(err),
-          });
-        }
+      const messages = renderOverflowMessages(item, CONTENT_CHUNK_MAX);
+      for (let i = 0; i < messages.length; i++) {
+        const message = messages[i];
+        const label = `postsBatch platform-copy overflow (${item.itemSlug}/${item.platformLabel} ${i + 1}/${messages.length})`;
+        const ok = await postSendWithRetry(
+          () => postToChannel(client, destinationChannelId, stripSecrets(message)),
+          label,
+          { approvalId, destinationChannelId, itemSlug: item.itemSlug, platformLabel: item.platformLabel },
+        );
+        if (!ok) missingSlugs.push(`${item.itemSlug} (${item.platformLabel} full text ${i + 1}/${messages.length})`);
+      }
+    }
+    // Unsuppressable: posts on ANY residual failure, regardless of how many
+    // groups/overflow messages succeeded around it. Never gated by
+    // deliveredSlugs — a partial batch (some delivered, some missing) must
+    // surface this exactly as loudly as an all-failed one.
+    if (missingSlugs.length > 0) {
+      try {
+        await postToChannel(client, destinationChannelId, buildPartialDeliveryWarning(missingSlugs, url));
+      } catch (err) {
+        ctx.logger.error("approval-created: partial-delivery warning post failed — card may look complete but is missing content", {
+          approvalId,
+          destinationChannelId,
+          missingSlugs,
+          error: String(err),
+        });
       }
     }
   }
+  const postsBatchDelivered = deliveredSlugs.size > 0;
   if (!postsBatchDelivered && effectiveContent) {
     const chunks = chunkBySection(stripSecrets(effectiveContent));
     for (const chunk of chunks) {

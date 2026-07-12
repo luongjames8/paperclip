@@ -1,7 +1,18 @@
 import type { APIEmbed } from "discord.js";
-import { enforceEmbedLimits, safe } from "./embeds.js";
+import { EMBED_TOTAL_MAX, embedCharCount, enforceEmbedLimits, safe } from "./embeds.js";
 import { stripSecrets } from "./secrets.js";
 import { chunkText } from "./plain.js";
+
+// Discord's per-message embed count cap — mirrors issue-docs.ts's
+// EMBED_PER_MESSAGE_MAX (kept as a separate constant here rather than an
+// import: issue-docs.ts's chunkEmbedsForDiscord is a GENERIC APIEmbed[] ->
+// APIEmbed[][] packer shared by confirmation-sweep.ts and renderIssueDocs;
+// changing its signature to carry item identity would ripple into those
+// unrelated callers for no benefit. chunkPostsBatchForDiscord below
+// duplicates its packing RULE only (same two limits), not its code, so a
+// postsBatch embed group's originating slugs are known at the send site
+// without reverse-parsing embed titles.
+const EMBED_PER_MESSAGE_MAX = 10;
 
 // ─── Structured payload contract for the weekly posts-batch approval card —
 // mirrors carouselBatch's philosophy (./carousel-batch.ts): a machine-built
@@ -180,6 +191,62 @@ export function renderPostsBatchEmbeds(payload: PostsBatchPayload): RenderedPost
   return { embeds, overflow };
 }
 
+export interface PostsBatchEmbedGroup {
+  embeds: APIEmbed[];
+  // Slugs of the items packed into this group, in the same order as `embeds`
+  // (each embed is exactly one item — renderPostsBatchEmbeds is a 1:1 map).
+  // Lets a caller that fails to send this group report EXACTLY which posts
+  // are missing, without reverse-parsing embed titles (title format is
+  // presentation, not an identity contract).
+  slugs: string[];
+}
+
+export interface ChunkedPostsBatch {
+  groups: PostsBatchEmbedGroup[];
+  overflow: PostsBatchPlatformOverflow[];
+}
+
+/**
+ * renderPostsBatchEmbeds + Discord-message-sized packing (≤10 embeds, ≤6000
+ * chars per message — same rule as issue-docs.ts's chunkEmbedsForDiscord,
+ * duplicated rather than reused so item identity survives packing: see the
+ * EMBED_PER_MESSAGE_MAX comment above for why the generic packer isn't
+ * extended instead). Each returned group carries the slugs of the posts it
+ * contains, so a caller whose send for that group fails (even after retry)
+ * can name exactly which posts are missing in a partial-delivery warning —
+ * the DELIVERY-COMPLETENESS invariant ("the operator must never see an
+ * approvable card whose visible content is a silent subset of the batch")
+ * requires per-group identity, not just a per-batch success/failure bit
+ * (codex P2, round 6: a bare boolean flipped true by group 1's success hid
+ * every later group's failure).
+ */
+export function chunkPostsBatchForDiscord(payload: PostsBatchPayload): ChunkedPostsBatch {
+  const { embeds, overflow } = renderPostsBatchEmbeds(payload);
+  const slugs = payload.items.map((item) => item.slug);
+  const groups: PostsBatchEmbedGroup[] = [];
+  let batchEmbeds: APIEmbed[] = [];
+  let batchSlugs: string[] = [];
+  let chars = 0;
+  for (let i = 0; i < embeds.length; i++) {
+    const e = embeds[i];
+    const c = embedCharCount(e);
+    if (
+      batchEmbeds.length >= EMBED_PER_MESSAGE_MAX ||
+      (batchEmbeds.length > 0 && chars + c > EMBED_TOTAL_MAX)
+    ) {
+      groups.push({ embeds: batchEmbeds, slugs: batchSlugs });
+      batchEmbeds = [];
+      batchSlugs = [];
+      chars = 0;
+    }
+    batchEmbeds.push(e);
+    batchSlugs.push(slugs[i]);
+    chars += c;
+  }
+  if (batchEmbeds.length > 0) groups.push({ embeds: batchEmbeds, slugs: batchSlugs });
+  return { groups, overflow };
+}
+
 // Plaintext message budget — matches CONTENT_CHUNK_MAX in both callers
 // (approval-created.ts, approvals-reminder.ts) and postToChannel's own
 // default truncate() cap (rest.ts), so a message this function returns is
@@ -235,4 +302,28 @@ export function renderOverflowMessages(item: PostsBatchPlatformOverflow, maxLen 
     throw new Error(`renderOverflowMessages: header reservation exceeded (total=${total}) — widen the digit-width bound`);
   }
   return bodyChunks.map((body, i) => headerFor(i + 1, total) + body);
+}
+
+// Both callers pass truncate/postToChannel's default budget for this — kept
+// as a local constant (not exported) since it only bounds THIS function's
+// own output, unlike CONTENT_CHUNK_MAX which both call sites share across
+// several message kinds.
+const WARNING_MESSAGE_MAX = 1900;
+
+/**
+ * Build the loud, unsuppressable delivery-completeness warning: posted
+ * whenever ANY unit (embed group or overflow message) failed to deliver even
+ * after a retry, REGARDLESS of how many other units succeeded around it.
+ * This is what makes the DELIVERY-COMPLETENESS invariant hold by
+ * construction — the caller doesn't need to reason about which combination
+ * of groups/overflow succeeded, just "is missingSlugs non-empty."
+ *
+ * Never suppressed by a successful plaintext fallback or vice versa: the
+ * caller posts this unconditionally on any residual failure, independent of
+ * whatever else it does with effectiveContent/reviewableContent.
+ */
+export function buildPartialDeliveryWarning(missingSlugs: string[], issueUrl: string): string {
+  const n = missingSlugs.length;
+  const list = safe(missingSlugs.join(", "), WARNING_MESSAGE_MAX - 200);
+  return `⚠️ **${n} post group${n === 1 ? "" : "s"} failed to deliver** — missing: ${list}\nFull batch: ${issueUrl}`;
 }
