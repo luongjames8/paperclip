@@ -12,7 +12,8 @@ import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
 import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
-import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
+import { renderIssueDocs, chunkEmbedsForDiscord, type IssueDocsBundle } from "../render/issue-docs.js";
+import { parsePostsBatchPayload, renderPostsBatchEmbeds } from "../render/posts-batch.js";
 import { PaperclipClient } from "../api/paperclip.js";
 import { postDeliveryFailureFallback } from "./delivery-fallback.js";
 
@@ -39,6 +40,8 @@ interface ApprovalCreatedPayload {
   proposedComment?: unknown;
   details?: unknown;
   description?: unknown;
+  // Structured posts-batch render contract (GH #501) — see ../render/posts-batch.js.
+  postsBatch?: unknown;
 }
 
 // PENDING is a shared list wiped daily by jobs/digest.ts (pre-existing
@@ -321,6 +324,15 @@ export async function handleApprovalCreated(
   // is available and let its payload win; the event payload is just the hint
   // that arrives when the API is down.
   let effectiveContent = reviewableContent;
+  // postsBatch (GH #501): a structured, machine-built render contract that
+  // rides ALONGSIDE proposedComment — same shape-guard philosophy as
+  // carouselBatch on request_confirmation interactions (see
+  // ../render/posts-batch.ts). The approval.created EVENT payload is
+  // partial (server only puts title + proposedComment on it), so postsBatch
+  // is really only ever found on the FULL fetched approval below — checked
+  // on both so a future server change that includes it on the event still
+  // works without this handler needing an update.
+  let postsBatch = parsePostsBatchPayload(payload.postsBatch);
   if (paperclip) {
     try {
       const fullApproval = await paperclip.getApprovalById(approvalId);
@@ -329,6 +341,9 @@ export async function handleApprovalCreated(
         if (full) {
           effectiveContent = full;
           ctx.logger.info("approval-created: content resolved from the stored approval payload", { approvalId });
+        }
+        if (!postsBatch) {
+          postsBatch = parsePostsBatchPayload(fullApproval.payload.postsBatch);
         }
       }
     } catch (err) {
@@ -382,7 +397,25 @@ export async function handleApprovalCreated(
     }
   }
 
-  if (effectiveContent) {
+  // postsBatch structured render (GH #501): one embed per post (image + hook
+  // + per-platform copy) instead of the plaintext chunkBySection path below.
+  // A contract miss (absent/malformed postsBatch) falls straight through to
+  // the existing plaintext path — legacy cards (and any card whose editor
+  // hasn't shipped postsBatch yet) render exactly as before.
+  if (postsBatch) {
+    const embeds = renderPostsBatchEmbeds(postsBatch);
+    for (const group of chunkEmbedsForDiscord(embeds)) {
+      try {
+        await postEmbedsToChannel(client, destinationChannelId, group);
+      } catch (err) {
+        ctx.logger.warn("approval-created: postsBatch embed group post failed", {
+          approvalId,
+          destinationChannelId,
+          error: String(err),
+        });
+      }
+    }
+  } else if (effectiveContent) {
     const chunks = chunkBySection(stripSecrets(effectiveContent));
     for (const chunk of chunks) {
       try {

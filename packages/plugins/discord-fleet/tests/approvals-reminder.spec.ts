@@ -225,3 +225,78 @@ describe("runApprovalsReminder", () => {
     expect(reminders["approval-1"]).toBeUndefined();
   });
 });
+
+// ─── postsBatch structured render contract (GH #501) ─────────────────────────
+// Mirrors handleApprovalCreated's detection: same contract, same
+// degrade-to-plaintext-on-miss semantics — see handler-approval-created.spec.ts.
+
+function validPostsBatch() {
+  return {
+    version: 1,
+    weekOf: "2026-07-13",
+    items: [
+      {
+        slug: "tokyo-trifecta",
+        day: "Mon",
+        postTime: "Mon 2026-07-13 12:00 Taipei",
+        imageUrl: "https://hinomaru.one/images/tours/trifecta-card.avif",
+        hook: "Three neighborhoods, three completely different Tokyos.",
+        platforms: { threads: "Three neighborhoods..." },
+      },
+    ],
+  };
+}
+
+describe("runApprovalsReminder — postsBatch structured render (GH #501)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("structured postsBatch on the stored approval → posts embeds via postEmbedsToChannel, not plaintext", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "prose fallback, should NOT post", postsBatch: validPostsBatch() } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  it("malformed postsBatch degrades to the plaintext path — reviewableContent still posts", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "## plaintext body", postsBatch: { version: 2 } } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
+
+  it("absent postsBatch (legacy card) degrades to the plaintext path unchanged", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "legacy prose artifact" } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
+});

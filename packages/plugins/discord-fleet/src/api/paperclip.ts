@@ -47,6 +47,8 @@ export interface PaperclipApproval {
     proposedComment?: unknown;
     details?: unknown;
     description?: unknown;
+    // Structured posts-batch render contract (GH #501) — see ../render/posts-batch.js.
+    postsBatch?: unknown;
   } | null;
 }
 

@@ -2,13 +2,15 @@ import type { Client } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { CompanyConfig, DiscordFleetConfig } from "../config/schema.js";
 import type { PaperclipClient } from "../api/paperclip.js";
-import { postEmbedToChannel, postToChannel } from "../discord/rest.js";
+import { postEmbedToChannel, postEmbedsToChannel, postToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
 import { resolveApprovalContent, PENDING_APPROVALS_KEY } from "../handlers/approval-created.js";
+import { parsePostsBatchPayload, renderPostsBatchEmbeds } from "../render/posts-batch.js";
+import { chunkEmbedsForDiscord } from "../render/issue-docs.js";
 import { PaperclipApiError } from "../api/paperclip.js";
 import { safeParseMs } from "../util/safe.js";
 
@@ -268,6 +270,9 @@ export async function runApprovalsReminder(
     // work if they SEE the payload (2026-07-04: content in payload.note was
     // invisible here because only three fields were forwarded).
     let reviewableContent = resolveApprovalContent(approvalPayloadUnknown ?? {});
+    // postsBatch structured render (GH #501) — mirrors handleApprovalCreated's
+    // detection: same contract, same degrade-to-plaintext-on-miss semantics.
+    const postsBatch = parsePostsBatchPayload(approvalPayloadUnknown?.postsBatch);
     // Issue-digest fallback — same agent-independent floor as approval-created:
     // the linked issue's comment trail is runtime-guaranteed; compose from it
     // when the payload yields nothing.
@@ -300,7 +305,20 @@ export async function runApprovalsReminder(
         });
       }
     }
-    if (reviewableContent) {
+    if (postsBatch) {
+      const embeds = renderPostsBatchEmbeds(postsBatch);
+      for (const group of chunkEmbedsForDiscord(embeds)) {
+        try {
+          await postEmbedsToChannel(client, destinationChannelId, group);
+        } catch (err) {
+          ctx.logger.warn("approvals-reminder: postsBatch embed group post failed", {
+            approvalId: approval.id,
+            destinationChannelId,
+            error: String(err),
+          });
+        }
+      }
+    } else if (reviewableContent) {
       const chunks = chunkBySection(stripSecrets(reviewableContent));
       for (const chunk of chunks) {
         try {

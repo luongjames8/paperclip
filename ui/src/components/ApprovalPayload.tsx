@@ -258,9 +258,7 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
           <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
             Proposed comment
           </p>
-          <pre className="max-h-48 overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-muted-foreground whitespace-pre-wrap">
-            {proposedComment}
-          </pre>
+          <MarkdownBody className="text-sm">{proposedComment}</MarkdownBody>
         </div>
       )}
       {showBody && (

@@ -13,9 +13,16 @@ vi.mock("../src/discord/rest.js", () => ({
   postEmbedsToChannel: vi.fn().mockResolvedValue("msg-id-5"),
 }));
 
-vi.mock("../src/render/issue-docs.js", () => ({
-  renderIssueDocs: vi.fn().mockReturnValue([]),
-}));
+vi.mock("../src/render/issue-docs.js", async (importOriginal) => {
+  // importOriginal keeps real exports (chunkEmbedsForDiscord, etc.) that the
+  // postsBatch structured-render path also uses — only renderIssueDocs is
+  // stubbed for this file's rich-renderer-integration assertions.
+  const actual = await importOriginal<typeof import("../src/render/issue-docs.js")>();
+  return {
+    ...actual,
+    renderIssueDocs: vi.fn().mockReturnValue([]),
+  };
+});
 
 vi.mock("../src/api/paperclip.js", () => ({
   PaperclipClient: vi.fn().mockImplementation(() => ({
@@ -26,13 +33,20 @@ vi.mock("../src/api/paperclip.js", () => ({
   })),
 }));
 
-vi.mock("../src/render/embeds.js", () => ({
-  buildApprovalEmbed: vi.fn().mockReturnValue({ title: "approval embed" }),
-  buildSeedIssueEmbed: vi.fn().mockReturnValue({ title: "seed embed" }),
-  buildBlockedEmbed: vi.fn().mockReturnValue({ title: "blocked embed" }),
-  buildApprovalActionRow: vi.fn().mockReturnValue({ type: 1, components: [] }),
-  APPROVAL_BUTTON_PREFIX: { approve: "approval-approve:", reject: "approval-reject:" },
-}));
+vi.mock("../src/render/embeds.js", async (importOriginal) => {
+  // importOriginal keeps real exports (safe, enforceEmbedLimits, etc.) that
+  // ../src/render/posts-batch.js depends on — only the build*Embed/ActionRow
+  // helpers below are stubbed for this file's assertions.
+  const actual = await importOriginal<typeof import("../src/render/embeds.js")>();
+  return {
+    ...actual,
+    buildApprovalEmbed: vi.fn().mockReturnValue({ title: "approval embed" }),
+    buildSeedIssueEmbed: vi.fn().mockReturnValue({ title: "seed embed" }),
+    buildBlockedEmbed: vi.fn().mockReturnValue({ title: "blocked embed" }),
+    buildApprovalActionRow: vi.fn().mockReturnValue({ type: 1, components: [] }),
+    APPROVAL_BUTTON_PREFIX: { approve: "approval-approve:", reject: "approval-reject:" },
+  };
+});
 
 function makeConfig(): DiscordFleetConfig {
   return {
@@ -894,5 +908,136 @@ describe("handleApprovalCreated — full-approval fetch fallback", () => {
       stateKey: `${POSTED_MARKER_PREFIX}appr-nofetch`,
     });
     expect(typeof posted).toBe("string");
+  });
+});
+
+// ─── postsBatch structured render contract (GH #501) ─────────────────────────
+//
+// Mirrors carouselBatch's philosophy on request_confirmation interactions:
+// a structured payload.postsBatch (version 1, items[]) renders as one embed
+// per post via postEmbedsToChannel INSTEAD of the plaintext chunkBySection
+// path. Absent/malformed postsBatch degrades to the existing plaintext path
+// unchanged — legacy cards (and any card whose editor hasn't shipped
+// postsBatch yet) render exactly as before this change.
+
+function validPostsBatch() {
+  return {
+    version: 1,
+    weekOf: "2026-07-13",
+    items: [
+      {
+        slug: "tokyo-trifecta",
+        day: "Mon",
+        postTime: "Mon 2026-07-13 12:00 Taipei",
+        imageUrl: "https://hinomaru.one/images/tours/trifecta-card.avif",
+        hook: "Three neighborhoods, three completely different Tokyos.",
+        platforms: { threads: "Three neighborhoods...", x: "Three neighborhoods (short)..." },
+      },
+    ],
+  };
+}
+
+describe("handleApprovalCreated — postsBatch structured render (GH #501)", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // clearAllMocks resets call history but NOT a mockImplementation set by an
+    // earlier test — restore PaperclipClient to the module-level default (see
+    // the top-of-file vi.mock) so a prior test's override (e.g. "full fetched
+    // approval has postsBatch") can't leak a stale getApprovalById result into
+    // a later test in this describe block.
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue(null),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+      addApprovalComment: vi.fn().mockResolvedValue(undefined),
+    }));
+  });
+
+  it("structured postsBatch on the event payload → posts embeds via postEmbedsToChannel, not plaintext", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "## raw markdown fallback text, should NOT be posted when postsBatch parses",
+      postsBatch: validPostsBatch(),
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1); // header
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1); // one group of postsBatch embeds
+    expect(postToChannel).not.toHaveBeenCalled(); // plaintext path skipped entirely
+  });
+
+  it("structured postsBatch found only on the FULL fetched approval (event payload is partial) → still renders as embeds", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    (PaperclipClient as any).mockImplementation(() => ({
+      getApprovalById: vi.fn().mockResolvedValue({
+        id: "appr-001",
+        payload: { proposedComment: "prose fallback", postsBatch: validPostsBatch() },
+      }),
+      getApprovalIssues: vi.fn().mockResolvedValue([]),
+      listIssueDocuments: vi.fn().mockResolvedValue([]),
+    }));
+
+    const harness = createTestHarness({ manifest });
+    // Event payload has NO postsBatch (matches the real server: approval.created
+    // activity only carries title + proposedComment) — only the fetched approval has it.
+    const event = makeApprovalCreatedEvent({ proposedComment: "event-payload prose" });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  it("malformed postsBatch (wrong version) degrades to the plaintext path — proposedComment still posts", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "## plaintext fallback body",
+      postsBatch: { version: 2, items: [] },
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
+
+  it("absent postsBatch (legacy card) degrades to the plaintext path unchanged", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ proposedComment: "legacy prose artifact, 28887 chars in production" });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
+
+  it("postsBatch embed group post failure is logged and does not throw (best-effort, matches rich-doc path semantics)", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+    (postEmbedsToChannel as any).mockRejectedValue(new Error("discord 400: invalid image url"));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({ postsBatch: validPostsBatch() });
+    await expect(handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig())).resolves.not.toThrow();
   });
 });
