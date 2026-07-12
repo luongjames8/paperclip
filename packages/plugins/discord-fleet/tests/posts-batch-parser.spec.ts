@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parsePostsBatchPayload, renderPostsBatchEmbeds, type PostsBatchPayload } from "../src/render/posts-batch.js";
+import { parsePostsBatchPayload, renderPostsBatchEmbeds, renderOverflowMessages, type PostsBatchPayload, type PostsBatchPlatformOverflow } from "../src/render/posts-batch.js";
 
 function validPayload(overrides: Partial<PostsBatchPayload> = {}): PostsBatchPayload {
   return {
@@ -259,5 +259,125 @@ describe("renderPostsBatchEmbeds", () => {
       expect(overflow).toHaveLength(2);
       expect(overflow.map((o) => o.platformLabel).sort()).toEqual(["Facebook", "Threads"]);
     });
+  });
+});
+
+// ─── renderOverflowMessages — adversarial coverage (codex P2, round 2 of the
+// SAME finding: chunking the body to the full message budget THEN prepending
+// a header could push the total past the budget and get the tail silently
+// cut by postToChannel's own truncate). The invariant every test here checks:
+// EVERY returned string's length is <= maxLen, and the concatenation of every
+// returned string's BODY portion (header stripped) reconstructs fullText
+// exactly — nothing lost, nothing duplicated, regardless of length. ─────────
+
+function overflowItem(fullText: string, itemSlug = "tokyo-trifecta", platformLabel = "Facebook"): PostsBatchPlatformOverflow {
+  return { itemSlug, platformLabel, fullText };
+}
+
+// Strips this function's own header format to recover the body portion of
+// a rendered message, so tests can verify body reconstruction independent
+// of the header's exact wording.
+function stripHeader(message: string): string {
+  const nl = message.indexOf("\n");
+  return nl === -1 ? message : message.slice(nl + 1);
+}
+
+describe("renderOverflowMessages", () => {
+  it("short text (fits in one message) → single message, header + full text, within maxLen", () => {
+    const text = "Short Facebook copy.";
+    const messages = renderOverflowMessages(overflowItem(text), 1900);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].length).toBeLessThanOrEqual(1900);
+    expect(messages[0]).toContain(text);
+    expect(messages[0]).toContain("tokyo-trifecta");
+    expect(messages[0]).toContain("Facebook");
+    expect(messages[0]).toContain("1/1");
+  });
+
+  it("EVERY returned message is <= maxLen INCLUDING its header — the exact bug codex found", () => {
+    // Sized so the OLD buggy code (chunk to full 1900 budget, then prepend a
+    // ~50-char header) would overflow: a 1900-char chunk + header > 1900.
+    const text = "y".repeat(3700);
+    const messages = renderOverflowMessages(overflowItem(text), 1900);
+    expect(messages.length).toBeGreaterThan(1);
+    for (const m of messages) {
+      expect(m.length).toBeLessThanOrEqual(1900);
+    }
+  });
+
+  it("nothing is dropped — concatenated BODY across all messages reconstructs fullText exactly", () => {
+    const text = Array.from({ length: 50 }, (_, i) => `Paragraph ${i} of long-form platform copy.`).join("\n\n");
+    const messages = renderOverflowMessages(overflowItem(text), 500);
+    const reconstructed = messages.map(stripHeader).join("");
+    expect(reconstructed).toBe(text);
+  });
+
+  it("every message carries a header (a reader landing on any single message can identify it)", () => {
+    const text = "z".repeat(5000);
+    const messages = renderOverflowMessages(overflowItem(text), 500);
+    expect(messages.length).toBeGreaterThan(5);
+    for (const m of messages) {
+      expect(m).toContain("tokyo-trifecta");
+      expect(m).toContain("Facebook");
+      expect(m).toMatch(/\(full text \d+\/\d+\)/);
+    }
+  });
+
+  it("chunk numbering is internally consistent (N always <= total M, every N from 1..M appears exactly once)", () => {
+    const text = "w".repeat(10000);
+    const messages = renderOverflowMessages(overflowItem(text), 300);
+    const numbering = messages.map((m) => {
+      const match = /\(full text (\d+)\/(\d+)\)/.exec(m);
+      if (!match) throw new Error(`message missing numbering: ${m.slice(0, 50)}`);
+      return { n: Number(match[1]), total: Number(match[2]) };
+    });
+    const total = numbering[0].total;
+    expect(numbering.every((x) => x.total === total)).toBe(true);
+    expect(numbering.map((x) => x.n)).toEqual(Array.from({ length: total }, (_, i) => i + 1));
+    expect(total).toBe(messages.length);
+  });
+
+  it("boundary: fullText exactly at the body budget → exactly 1 message, no off-by-one split", () => {
+    // With a small maxLen, compute the actual body budget by probing: a
+    // 1-char text always yields exactly 1 message; grow until 2 messages
+    // appear, then verify the boundary text (budget-length) still yields 1.
+    const maxLen = 200;
+    let budget = 1;
+    while (renderOverflowMessages(overflowItem("q".repeat(budget)), maxLen).length === 1) budget++;
+    const boundaryText = "q".repeat(budget - 1);
+    const messages = renderOverflowMessages(overflowItem(boundaryText), maxLen);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].length).toBeLessThanOrEqual(maxLen);
+  });
+
+  it("long itemSlug/platformLabel (widening the header) never pushes a message over maxLen", () => {
+    const longSlug = "a-very-long-slug-name-that-takes-up-a-lot-of-header-space".repeat(3);
+    const text = "b".repeat(2500);
+    const messages = renderOverflowMessages(overflowItem(text, longSlug, "Facebook"), 1900);
+    for (const m of messages) {
+      expect(m.length).toBeLessThanOrEqual(1900);
+    }
+    // Still reconstructs the full body despite the wider header eating more
+    // of the per-message budget.
+    expect(messages.map(stripHeader).join("")).toBe(text);
+  });
+
+  it("empty fullText → single message with just the header (never zero messages — an overflow entry always exists because SOME text overflowed)", () => {
+    const messages = renderOverflowMessages(overflowItem(""));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("1/1");
+  });
+
+  it("respects a custom maxLen (not hardcoded to 1900)", () => {
+    const text = "c".repeat(400);
+    const messages = renderOverflowMessages(overflowItem(text), 100);
+    expect(messages.length).toBeGreaterThan(1);
+    for (const m of messages) {
+      expect(m.length).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it("FAILS CLOSED (throws) when maxLen is too small to fit even the reserved header — never silently ships an oversized message", () => {
+    expect(() => renderOverflowMessages(overflowItem("some text"), 5)).toThrow(/maxLen.*smaller than the reserved header budget/);
   });
 });

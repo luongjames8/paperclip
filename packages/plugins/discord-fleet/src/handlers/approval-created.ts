@@ -8,12 +8,12 @@ import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import type { ChannelTypeRoute, DiscordFleetConfig } from "../config/schema.js";
 import { postEmbedToChannel, postEmbedsToChannel, postToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalEmbed } from "../render/embeds.js";
-import { truncate, chunkText } from "../render/plain.js";
+import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
 import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
 import { renderIssueDocs, chunkEmbedsForDiscord, type IssueDocsBundle } from "../render/issue-docs.js";
-import { parsePostsBatchPayload, renderPostsBatchEmbeds } from "../render/posts-batch.js";
+import { parsePostsBatchPayload, renderPostsBatchEmbeds, renderOverflowMessages } from "../render/posts-batch.js";
 import { PaperclipClient } from "../api/paperclip.js";
 import { postDeliveryFailureFallback } from "./delivery-fallback.js";
 
@@ -471,11 +471,15 @@ export async function handleApprovalCreated(
     // Platform copy longer than Discord's 1024-char embed field limit (codex
     // P2) — the embed field already shows a truncated preview; post the FULL
     // text as a plaintext follow-up so nothing is silently cut with no trace.
+    // renderOverflowMessages reserves header budget BEFORE chunking (codex
+    // P2, round 2: chunking to the full message budget then prepending a
+    // header could itself overflow and get silently cut by postToChannel's
+    // own truncate) — every returned string already fits within
+    // CONTENT_CHUNK_MAX including its header.
     for (const item of overflow) {
-      const chunks = chunkText(stripSecrets(item.fullText), CONTENT_CHUNK_MAX);
-      for (const chunk of chunks) {
+      for (const message of renderOverflowMessages(item, CONTENT_CHUNK_MAX)) {
         try {
-          await postToChannel(client, destinationChannelId, `**${item.itemSlug} — ${item.platformLabel} (full text)**\n${chunk}`);
+          await postToChannel(client, destinationChannelId, stripSecrets(message));
         } catch (err) {
           ctx.logger.warn("approval-created: postsBatch platform-copy overflow post failed", {
             approvalId,

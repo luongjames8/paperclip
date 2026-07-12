@@ -1,6 +1,7 @@
 import type { APIEmbed } from "discord.js";
 import { enforceEmbedLimits, safe } from "./embeds.js";
 import { stripSecrets } from "./secrets.js";
+import { chunkText } from "./plain.js";
 
 // ─── Structured payload contract for the weekly posts-batch approval card —
 // mirrors carouselBatch's philosophy (./carousel-batch.ts): a machine-built
@@ -177,4 +178,61 @@ export function renderPostsBatchEmbeds(payload: PostsBatchPayload): RenderedPost
     });
   });
   return { embeds, overflow };
+}
+
+// Plaintext message budget — matches CONTENT_CHUNK_MAX in both callers
+// (approval-created.ts, approvals-reminder.ts) and postToChannel's own
+// default truncate() cap (rest.ts), so a message this function returns is
+// never subject to postToChannel's truncate() actually cutting anything
+// (that call becomes a pure no-op safety net, never load-bearing).
+const OVERFLOW_MESSAGE_MAX = 1900;
+
+/**
+ * Render a platform-copy overflow entry into one or more FINAL, ready-to-post
+ * message strings — every string this returns already fits within `maxLen`
+ * INCLUDING its header, so the caller's postToChannel (which itself truncates
+ * to the same default) never needs to cut anything (codex P2, round 2 of this
+ * finding: the previous version chunked the body to the full budget FIRST,
+ * then prepended a header, which could push the total past the budget and
+ * get the tail silently truncated by postToChannel).
+ *
+ * The header (`**slug — platform (full text N/M)**`) is reserved space on
+ * EVERY chunk, not just the first — a reader landing on chunk 2 of 3 with no
+ * header has no way to tell which post/platform it belongs to, which is as
+ * much a "silently lost information" failure as a truncated tail.
+ */
+export function renderOverflowMessages(item: PostsBatchPlatformOverflow, maxLen = OVERFLOW_MESSAGE_MAX): string[] {
+  const headerFor = (n: number, total: number) => `**${item.itemSlug} — ${item.platformLabel} (full text ${n}/${total})**\n`;
+  // Reserve budget for up to 4-digit chunk numbering (N/M both <= 9999) —
+  // ~9999 chunks at ~1900 chars/chunk is ~19M chars of single-platform copy,
+  // several orders of magnitude beyond any plausible content (the entire
+  // 13-post proposedComment artifact this feature replaces is 28,887 chars
+  // TOTAL). Reserving for a bound this generous, rather than measuring the
+  // real header after chunking, sidesteps the header-length/chunk-count
+  // circular dependency (more chunks -> more digits -> longer header ->
+  // fewer chunks fit -> ...) without an iterative solver for an input class
+  // that will never occur.
+  const maxHeaderLen = headerFor(9999, 9999).length;
+  // FAIL CLOSED on a maxLen too small to even fit the reserved header — both
+  // real callers pass CONTENT_CHUNK_MAX (1900), always vastly larger than
+  // maxHeaderLen (tens of chars for any realistic slug/platform label), but
+  // a future misuse passing a tiny maxLen must be a loud error, never a
+  // silently-oversized message (the exact failure class this function
+  // exists to close).
+  if (maxLen < maxHeaderLen) {
+    throw new Error(`renderOverflowMessages: maxLen (${maxLen}) is smaller than the reserved header budget (${maxHeaderLen}) — cannot fit even an empty body`);
+  }
+  const bodyBudget = maxLen - maxHeaderLen;
+  const bodyChunks = chunkText(item.fullText, bodyBudget);
+  const total = bodyChunks.length;
+  // Fail-closed backstop for the reservation bound itself: if some future
+  // caller ever hands this a fullText long enough to blow past 9999 chunks,
+  // the ACTUAL header for a >9999 total would be wider than reserved —
+  // asserted here so a regression in either constant is loud in tests
+  // rather than silently reintroducing the truncation bug this function
+  // exists to close.
+  if (headerFor(total, total).length > maxHeaderLen) {
+    throw new Error(`renderOverflowMessages: header reservation exceeded (total=${total}) — widen the digit-width bound`);
+  }
+  return bodyChunks.map((body, i) => headerFor(i + 1, total) + body);
 }

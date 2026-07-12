@@ -22,19 +22,28 @@ describe("render helpers", () => {
     expect(chunkText(text)).toEqual([text]);
   });
 
-  it("chunkText: splits at a paragraph boundary when one is available before maxLen", () => {
+  it("chunkText: splits at a paragraph boundary when one is available before maxLen — the '\\n\\n' separator is PRESERVED (attached to the start of the next chunk), never dropped", () => {
     const text = "a".repeat(1000) + "\n\n" + "b".repeat(1000);
     const chunks = chunkText(text, 1500);
     expect(chunks).toHaveLength(2);
     expect(chunks[0]).toBe("a".repeat(1000));
-    expect(chunks[1]).toBe("b".repeat(1000));
+    expect(chunks[1]).toBe("\n\n" + "b".repeat(1000));
+    // The join must reconstruct the ORIGINAL text exactly — this is the
+    // codex P2 (round 2) regression: an earlier version silently dropped
+    // the "\n\n" separator at every paragraph-boundary split.
+    expect(chunks.join("")).toBe(text);
   });
 
-  it("chunkText: NOTHING is dropped — every char of the input appears across the chunks", () => {
-    const text = "x".repeat(5000);
-    const chunks = chunkText(text, 1500);
-    expect(chunks.join("")).toBe(text);
-    chunks.forEach((c) => expect(c.length).toBeLessThanOrEqual(1500));
+  it("chunkText: NOTHING is dropped — chunks.join('') reconstructs the input EXACTLY, for both paragraph-boundary and hard splits", () => {
+    const noBoundaries = "x".repeat(5000);
+    const noBoundaryChunks = chunkText(noBoundaries, 1500);
+    expect(noBoundaryChunks.join("")).toBe(noBoundaries);
+    noBoundaryChunks.forEach((c) => expect(c.length).toBeLessThanOrEqual(1500));
+
+    const withBoundaries = Array.from({ length: 10 }, (_, i) => `Paragraph ${i}. `.repeat(50)).join("\n\n");
+    const boundaryChunks = chunkText(withBoundaries, 400);
+    expect(boundaryChunks.join("")).toBe(withBoundaries);
+    boundaryChunks.forEach((c) => expect(c.length).toBeLessThanOrEqual(400));
   });
 
   it("chunkText: a single paragraph longer than maxLen with no earlier \\n\\n hard-splits at maxLen", () => {
