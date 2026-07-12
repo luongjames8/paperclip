@@ -402,11 +402,21 @@ export async function handleApprovalCreated(
   // A contract miss (absent/malformed postsBatch) falls straight through to
   // the existing plaintext path — legacy cards (and any card whose editor
   // hasn't shipped postsBatch yet) render exactly as before.
+  //
+  // postsBatchDelivered tracks whether AT LEAST ONE embed group actually
+  // posted (codex P2): if postsBatch parses but every postEmbedsToChannel
+  // call fails (Discord-side embed/image validation, transient 5xx, etc.),
+  // falling silent here would regress the pre-existing floor — effectiveContent
+  // was ALWAYS posted before this change (see the "CHANGE 1" plaintext-always
+  // path below). A total structured-render failure now falls through to that
+  // same plaintext path instead of leaving the card header-only.
+  let postsBatchDelivered = false;
   if (postsBatch) {
     const embeds = renderPostsBatchEmbeds(postsBatch);
     for (const group of chunkEmbedsForDiscord(embeds)) {
       try {
         await postEmbedsToChannel(client, destinationChannelId, group);
+        postsBatchDelivered = true;
       } catch (err) {
         ctx.logger.warn("approval-created: postsBatch embed group post failed", {
           approvalId,
@@ -415,7 +425,8 @@ export async function handleApprovalCreated(
         });
       }
     }
-  } else if (effectiveContent) {
+  }
+  if (!postsBatchDelivered && effectiveContent) {
     const chunks = chunkBySection(stripSecrets(effectiveContent));
     for (const chunk of chunks) {
       try {

@@ -940,11 +940,12 @@ function validPostsBatch() {
 describe("handleApprovalCreated — postsBatch structured render (GH #501)", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
-    // clearAllMocks resets call history but NOT a mockImplementation set by an
-    // earlier test — restore PaperclipClient to the module-level default (see
-    // the top-of-file vi.mock) so a prior test's override (e.g. "full fetched
-    // approval has postsBatch") can't leak a stale getApprovalById result into
-    // a later test in this describe block.
+    // clearAllMocks resets call history but NOT a mockImplementation/queued
+    // mockResolvedValueOnce chain set by an earlier test — restore every mock
+    // this describe block depends on to its module-level default (see the
+    // top-of-file vi.mock calls) so one test's override (e.g. "total delivery
+    // failure" setting postEmbedsToChannel to always reject) can't leak into
+    // a LATER test in this same describe block/file.
     const { PaperclipClient } = await import("../src/api/paperclip.js");
     (PaperclipClient as any).mockImplementation(() => ({
       getApprovalById: vi.fn().mockResolvedValue(null),
@@ -952,6 +953,12 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
       listIssueDocuments: vi.fn().mockResolvedValue([]),
       addApprovalComment: vi.fn().mockResolvedValue(undefined),
     }));
+    const { postToThread, postToChannel, postEmbedToThread, postEmbedToChannel, postEmbedsToChannel } = await import("../src/discord/rest.js");
+    (postToThread as any).mockResolvedValue("msg-id-1");
+    (postToChannel as any).mockResolvedValue("msg-id-2");
+    (postEmbedToThread as any).mockResolvedValue("msg-id-3");
+    (postEmbedToChannel as any).mockResolvedValue("msg-id-4");
+    (postEmbedsToChannel as any).mockResolvedValue("msg-id-5");
   });
 
   it("structured postsBatch on the event payload → posts embeds via postEmbedsToChannel, not plaintext", async () => {
@@ -1039,5 +1046,63 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
     const harness = createTestHarness({ manifest });
     const event = makeApprovalCreatedEvent({ postsBatch: validPostsBatch() });
     await expect(handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig())).resolves.not.toThrow();
+  });
+
+  // codex P2: when postsBatch parses but EVERY postEmbedsToChannel call fails,
+  // the operator must not be left with a header-only card — the plaintext
+  // path (effectiveContent) is the floor that was always posted before this
+  // change (see "CHANGE 1" in the rich-renderer-integration describe block).
+  it("total postsBatch delivery failure (every embed group post fails) falls back to the plaintext path", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+    (postEmbedsToChannel as any).mockRejectedValue(new Error("discord 400: invalid image url"));
+
+    const harness = createTestHarness({ manifest });
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "plaintext fallback content, should post since postsBatch totally failed to deliver",
+      postsBatch: validPostsBatch(),
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).toHaveBeenCalled(); // structured attempt was made
+    expect(postToChannel).toHaveBeenCalled(); // fell back to plaintext since nothing delivered
+  });
+
+  it("PARTIAL postsBatch delivery (at least one embed group succeeds) does NOT fall back to plaintext", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    const { renderIssueDocs } = await import("../src/render/issue-docs.js");
+    (renderIssueDocs as any).mockReturnValue([]);
+    (postEmbedsToChannel as any)
+      .mockResolvedValueOnce("msg-1")
+      .mockRejectedValueOnce(new Error("discord 5xx transient"));
+
+    const harness = createTestHarness({ manifest });
+    // Two items → chunkEmbedsForDiscord may still pack them into one group
+    // (well under the 10-embed/6000-char caps), so force two groups via a
+    // large enough item set is unnecessary — this payload's chunking behavior
+    // isn't the point here; the mock resolves once then rejects once
+    // regardless of how many groups postEmbedsToChannel is actually called
+    // with, so this test only needs postEmbedsToChannel called >= 2 times to
+    // be meaningful. Two items with distinct large hooks keep them in
+    // separate chunks so postEmbedsToChannel is called twice.
+    const twoItemBatch = {
+      version: 1 as const,
+      items: [
+        { slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h".repeat(2000), platforms: {} },
+        { slug: "b", day: "Tue", postTime: null, imageUrl: "https://x.example.com/b.jpg", hook: "h".repeat(2000), platforms: {} },
+        { slug: "c", day: "Wed", postTime: null, imageUrl: "https://x.example.com/c.jpg", hook: "h".repeat(2000), platforms: {} },
+      ],
+    };
+    const event = makeApprovalCreatedEvent({
+      proposedComment: "plaintext fallback content, should NOT post since one group delivered",
+      postsBatch: twoItemBatch,
+    });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);
+    expect(postToChannel).not.toHaveBeenCalled();
   });
 });

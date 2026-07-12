@@ -299,4 +299,24 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     expect(postEmbedsToChannel).not.toHaveBeenCalled();
     expect(postToChannel).toHaveBeenCalled();
   });
+
+  // codex P2 (mirrors handleApprovalCreated's fix): a total structured-render
+  // delivery failure must fall back to the plaintext path, not leave the
+  // reminder header-only.
+  it("total postsBatch delivery failure (every embed group post fails) falls back to the plaintext path", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("discord 400: invalid image url"));
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "plaintext fallback content", postsBatch: validPostsBatch() } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
 });

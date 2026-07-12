@@ -305,11 +305,17 @@ export async function runApprovalsReminder(
         });
       }
     }
+    // postsBatchDelivered mirrors handleApprovalCreated's fallback semantics
+    // (codex P2): a total structured-render failure (postsBatch parses but
+    // every postEmbedsToChannel call fails) must fall through to the
+    // plaintext path rather than leave the reminder header-only.
+    let postsBatchDelivered = false;
     if (postsBatch) {
       const embeds = renderPostsBatchEmbeds(postsBatch);
       for (const group of chunkEmbedsForDiscord(embeds)) {
         try {
           await postEmbedsToChannel(client, destinationChannelId, group);
+          postsBatchDelivered = true;
         } catch (err) {
           ctx.logger.warn("approvals-reminder: postsBatch embed group post failed", {
             approvalId: approval.id,
@@ -318,7 +324,8 @@ export async function runApprovalsReminder(
           });
         }
       }
-    } else if (reviewableContent) {
+    }
+    if (!postsBatchDelivered && reviewableContent) {
       const chunks = chunkBySection(stripSecrets(reviewableContent));
       for (const chunk of chunks) {
         try {

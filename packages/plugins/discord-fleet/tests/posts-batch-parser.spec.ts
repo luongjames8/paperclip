@@ -121,6 +121,25 @@ describe("parsePostsBatchPayload", () => {
     ).toBeNull();
   });
 
+  // codex P1: an imageUrl containing a secret-shaped token must be rejected —
+  // the structured render path (renderPostsBatchEmbeds) sends imageUrl straight
+  // to embed.image.url with no stripSecrets pass, unlike the plaintext
+  // degrade path (which always runs stripSecrets(effectiveContent) first) and
+  // issue-docs.ts's sibling isUrlEmbeddable (which already rejects
+  // stripSecrets(url) !== url).
+  it("imageUrl containing a secret-shaped token → whole payload null (never reaches Discord raw)", () => {
+    expect(
+      parsePostsBatchPayload(
+        validPayload({ items: [{ slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/pcp_ABCDEFGHIJKLMNOPQRST12.jpg", hook: "h", platforms: {} }] }),
+      ),
+    ).toBeNull();
+    expect(
+      parsePostsBatchPayload(
+        validPayload({ items: [{ slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/img.jpg?token=ghp_" + "a".repeat(36), hook: "h", platforms: {} }] }),
+      ),
+    ).toBeNull();
+  });
+
   it("wrong-typed day/postTime → null", () => {
     expect(parsePostsBatchPayload({ ...validPayload(), items: [{ slug: "a", day: 5, postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h" }] })).toBeNull();
     expect(parsePostsBatchPayload({ ...validPayload(), items: [{ slug: "a", day: "Mon", postTime: 5, imageUrl: "https://x.example.com/a.jpg", hook: "h" }] })).toBeNull();

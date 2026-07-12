@@ -1,5 +1,6 @@
 import type { APIEmbed } from "discord.js";
 import { enforceEmbedLimits, safe } from "./embeds.js";
+import { stripSecrets } from "./secrets.js";
 
 // ─── Structured payload contract for the weekly posts-batch approval card —
 // mirrors carouselBatch's philosophy (./carousel-batch.ts): a machine-built
@@ -49,8 +50,18 @@ export interface PostsBatchPayload {
 // one bad URL makes the WHOLE payload malformed (never render N-1 posts and
 // silently drop the Nth), so the caller falls through to the visible
 // plaintext degrade path like any other contract miss.
+//
+// Also rejects a URL containing any stripSecrets-matched token (codex P1):
+// the plaintext degrade path always runs its content through
+// stripSecrets(effectiveContent) before posting, and issue-docs.ts's sibling
+// isUrlEmbeddable already rejects a URL whose value changes after secret
+// stripping — this path renders straight to embed.image.url with no
+// stripSecrets pass at all, so an imageUrl that happens to contain a
+// secret-shaped token (accidental paste, malformed R2 path, etc.) would
+// otherwise reach Discord raw.
 function isRenderableImageUrl(s: unknown): boolean {
   if (typeof s !== "string") return false;
+  if (stripSecrets(s) !== s) return false;
   try {
     const u = new URL(s);
     return u.protocol === "http:" || u.protocol === "https:";
