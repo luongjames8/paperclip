@@ -291,6 +291,34 @@ function stripHeader(message: string): string {
 }
 
 describe("renderOverflowMessages", () => {
+  it("maxLen EQUAL to the reserved header budget throws loudly — bodyBudget 0 used to reach chunkText(text, 0), an INFINITE LOOP (codex P2, round 7)", () => {
+    const item = overflowItem("some body text");
+    // Mirror the function's own reservation: headerFor(9999, 9999).length.
+    const reservedHeaderLen = `**${item.itemSlug} — ${item.platformLabel} (full text 9999/9999)**\n`.length;
+    // Pre-fix the strict `<` guard let equality through and the call NEVER returned.
+    expect(() => renderOverflowMessages(item, reservedHeaderLen)).toThrow(/no body budget/);
+    expect(() => renderOverflowMessages(item, reservedHeaderLen - 1)).toThrow(/no body budget/);
+    // One char of body budget is the minimum workable maxLen — must terminate.
+    const messages = renderOverflowMessages(item, reservedHeaderLen + 1);
+    expect(messages.map(stripHeader).join("")).toBe("some body text");
+  });
+
+  it("slug longer than 200 chars is rejected at the PARSER boundary (a ~1.9k-char slug made the reserved header swallow the whole budget upstream of the loop guard; codex P2, round 7)", () => {
+    const itemWith = (slug: string) => ({
+      slug,
+      day: null,
+      postTime: null,
+      imageUrl: "https://hinomaru.one/images/tours/layover-hero.jpg",
+      hook: "Have 8+ hours at Haneda? You can actually see Tokyo.",
+      platforms: { gbp: "Have 8+ hours at Haneda? You can actually see Tokyo." },
+    });
+    expect(parsePostsBatchPayload(validPayload({ items: [itemWith("s".repeat(201))] }))).toBeNull();
+    expect(parsePostsBatchPayload(validPayload({ items: [itemWith("")] }))).toBeNull();
+    const ok = parsePostsBatchPayload(validPayload({ items: [itemWith("s".repeat(200))] }));
+    expect(ok).not.toBeNull();
+    expect(ok!.items[0].slug).toHaveLength(200);
+  });
+
   it("short text (fits in one message) → single message, header + full text, within maxLen", () => {
     const text = "Short Facebook copy.";
     const messages = renderOverflowMessages(overflowItem(text), 1900);
@@ -386,7 +414,7 @@ describe("renderOverflowMessages", () => {
   });
 
   it("FAILS CLOSED (throws) when maxLen is too small to fit even the reserved header — never silently ships an oversized message", () => {
-    expect(() => renderOverflowMessages(overflowItem("some text"), 5)).toThrow(/maxLen.*smaller than the reserved header budget/);
+    expect(() => renderOverflowMessages(overflowItem("some text"), 5)).toThrow(/maxLen.*no body budget/);
   });
 });
 

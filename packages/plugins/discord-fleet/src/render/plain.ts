@@ -41,6 +41,14 @@ export function truncate(text: string, maxLen = 1900, trailingUrl?: string): str
 // preceding chunk ends right before "\n\n" (never exceeds maxLen since cut
 // <= maxLen), the "\n\n" itself opens the next chunk — satisfies both.
 export function chunkText(text: string, maxLen = 1900): string[] {
+  // A non-positive maxLen cannot make progress: lastIndexOf("\n\n", 0)
+  // misses, end = 0, slice(0) leaves `remaining` unchanged — an INFINITE
+  // LOOP (codex P2, posts-batch round 7: a computed bodyBudget of 0 reached
+  // this exact state). Throw loudly instead — every caller computes its
+  // budget and must fail closed, never spin.
+  if (maxLen < 1) {
+    throw new Error(`chunkText: maxLen must be >= 1, got ${maxLen}`);
+  }
   if (text.length <= maxLen) return [text];
   const chunks: string[] = [];
   let remaining = text;
