@@ -1521,6 +1521,9 @@ describeEmbeddedPostgres("authorization service", () => {
     })).resolves.toMatchObject({
       allowed: false,
       reason: "deny_scope",
+    });
+  });
+
   // ─── Malformed/stale X-Paperclip-Run-Id on access.decide() (codex round 4)
   // ───────────────────────────────────────────────────────────────────────
   //
