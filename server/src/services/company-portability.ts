@@ -869,11 +869,12 @@ function normalizeRoutineExtension(value: unknown): CompanyPortabilityIssueRouti
     concurrencyPolicy: asString(value.concurrencyPolicy),
     catchUpPolicy: asString(value.catchUpPolicy),
     variables,
-    // Carried raw here; validated in ONE place (resolveImportedRoutineDefinition)
-    // so the yaml-extension and manifest-file paths share the same gate.
-    executionPolicy: isPlainRecord(value.executionPolicy)
-      ? (value.executionPolicy as unknown as CompanyPortabilityRoutineExecutionPolicy)
-      : null,
+    // Carried RAW whenever the key is present — including non-object values — so the
+    // single validation point (resolveImportedRoutineDefinition) errors loudly on any
+    // malformed shape. Nulling non-objects here would silently drop the gate.
+    executionPolicy: value.executionPolicy == null
+      ? null
+      : (value.executionPolicy as unknown as CompanyPortabilityRoutineExecutionPolicy),
     triggers,
   };
   return stripEmptyValues(routine) ? routine : null;
