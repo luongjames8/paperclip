@@ -2267,6 +2267,61 @@ describe("company portability", () => {
     expect(policy?.stages[0]?.participants[0]?.agentId).toMatch(/^agent-imported-\d+-editorbot$/);
   });
 
+  it("fails the import loudly when a portable policy carries unsupported keys", async () => {
+    const portability = companyPortabilityService({} as any);
+    companySvc.create.mockResolvedValue({ id: "company-imported", name: "Imported Paperclip" });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/writerbot/AGENTS.md": ["---", 'name: "WriterBot"', "---", "", "You write.", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      "tasks/weekly-article/TASK.md": [
+        "---",
+        'name: "Weekly Article"',
+        'project: "launch"',
+        'assignee: "writerbot"',
+        "recurring: true",
+        "---",
+        "",
+        "Draft.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  weekly-article:",
+        "    executionPolicy:",
+        "      monitor:",
+        '        nextCheckAt: "2027-01-01T00:00:00.000Z"',
+        "      stages:",
+        "        - type: review",
+        "          participants:",
+        '            - type: agent',
+        '              agentSlug: "writerbot"',
+        "",
+      ].join("\n"),
+    };
+
+    await expect(portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1")).rejects.toThrow(/invalid executionPolicy/);
+  });
+
   it("fails the import loudly when a policy participant slug is not part of the package", async () => {
     const portability = companyPortabilityService({} as any);
     companySvc.create.mockResolvedValue({ id: "company-imported", name: "Imported Paperclip" });
