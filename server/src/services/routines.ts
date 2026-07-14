@@ -520,10 +520,13 @@ async function normalizeRoutineExecutionPolicyForPersistence(
     );
   }
   const participantAgentIds = new Set<string>();
+  const participantUserIds = new Set<string>();
   for (const stage of normalized.stages) {
     for (const participant of stage.participants) {
       if (participant.type === "agent" && participant.agentId) {
         participantAgentIds.add(participant.agentId);
+      } else if (participant.type === "user" && participant.userId) {
+        participantUserIds.add(participant.userId);
       }
     }
   }
@@ -539,6 +542,26 @@ async function normalizeRoutineExecutionPolicyForPersistence(
         cause: error instanceof Error ? error.message : String(error),
         ...(error instanceof HttpError && error.details !== undefined ? { details: error.details } : {}),
       });
+    }
+  }
+  for (const userId of participantUserIds) {
+    // Same membership test issueService.update applies when the stage transition later
+    // writes this value as assigneeUserId — reject at author time instead of stranding
+    // the routine-born issue mid-handoff.
+    const membership = await db
+      .select({ id: companyMemberships.id })
+      .from(companyMemberships)
+      .where(
+        and(
+          eq(companyMemberships.companyId, companyId),
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, userId),
+          eq(companyMemberships.status, "active"),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+    if (!membership) {
+      throw unprocessable("Execution policy has a user participant that is not an active company member", { userId });
     }
   }
   // Persist the engine-normalized shape: participants deduped and stage/participant
@@ -2517,6 +2540,9 @@ export function routineService(
             catchUpPolicy: routineSnapshot.catchUpPolicy,
             variables: routineSnapshot.variables,
             env: routineSnapshot.env,
+            // ?? null: pre-executionPolicy snapshots have no key, and a revision that
+            // recorded no policy must restore to no policy.
+            executionPolicy: routineSnapshot.executionPolicy ?? null,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
             updatedAt: now,

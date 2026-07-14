@@ -1918,6 +1918,44 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       )).rejects.toMatchObject({ status: 422 });
     });
 
+    it("rejects user participants that are not active company members", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      await expect(svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "approval", participants: [{ type: "user", userId: randomUUID() }] }],
+          },
+        }) as never,
+        {},
+      )).rejects.toMatchObject({ status: 422 });
+    });
+
+    it("restores the revision's executionPolicy when restoring an older revision", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      const firstRevisionId = routine.latestRevisionId!;
+      const policy = routine.executionPolicy;
+      expect(policy?.stages).toHaveLength(1);
+
+      const updated = await svc.update(routine.id, { executionPolicy: null } as never, {});
+      expect(updated?.executionPolicy).toBeNull();
+
+      const restored = await svc.restoreRevision(routine.id, firstRevisionId, {});
+      expect(restored.routine.executionPolicy).toEqual(policy);
+    });
+
     it("rejects stages that issue-level normalization would silently drop", async () => {
       const { companyId, agentId, svc } = await seedFixture();
       await expect(svc.create(
