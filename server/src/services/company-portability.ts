@@ -25,10 +25,12 @@ import type {
   CompanyPortabilityIssueRoutineManifestEntry,
   CompanyPortabilityIssueRoutineTriggerManifestEntry,
   CompanyPortabilityIssueManifestEntry,
+  CompanyPortabilityRoutineExecutionPolicy,
   CompanyPortabilitySidebarOrder,
   CompanyPortabilitySkillManifestEntry,
   CompanySkill,
   AgentEnvConfig,
+  RoutineExecutionPolicy,
   RoutineVariable,
 } from "@paperclipai/shared";
 import {
@@ -48,6 +50,7 @@ import {
   issueCommentMetadataSchema,
   issueCommentPresentationSchema,
   normalizeAgentUrlKey,
+  portabilityRoutineExecutionPolicySchema,
 } from "@paperclipai/shared";
 import {
   readPaperclipSkillSyncPreference,
@@ -866,9 +869,65 @@ function normalizeRoutineExtension(value: unknown): CompanyPortabilityIssueRouti
     concurrencyPolicy: asString(value.concurrencyPolicy),
     catchUpPolicy: asString(value.catchUpPolicy),
     variables,
+    // Carried raw here; validated in ONE place (resolveImportedRoutineDefinition)
+    // so the yaml-extension and manifest-file paths share the same gate.
+    executionPolicy: isPlainRecord(value.executionPolicy)
+      ? (value.executionPolicy as unknown as CompanyPortabilityRoutineExecutionPolicy)
+      : null,
     triggers,
   };
   return stripEmptyValues(routine) ? routine : null;
+}
+
+// Agent participants travel by slug: agent ids don't survive cross-company import.
+// A participant whose agent isn't part of the export keeps a null slug — the import
+// side fails that routine loudly rather than silently dropping its gate.
+function exportRoutineExecutionPolicy(
+  policy: RoutineExecutionPolicy,
+  agentIdToSlug: Map<string, string>,
+): CompanyPortabilityRoutineExecutionPolicy {
+  return {
+    ...(policy.mode && policy.mode !== "normal" ? { mode: policy.mode } : {}),
+    stages: policy.stages.map((stage) => ({
+      type: stage.type,
+      participants: stage.participants.map((participant) =>
+        participant.type === "agent"
+          ? { type: "agent" as const, agentSlug: (participant.agentId && agentIdToSlug.get(participant.agentId)) || null }
+          : { type: "user" as const, userId: participant.userId ?? null }),
+    })),
+  };
+}
+
+function translateImportedRoutineExecutionPolicy(
+  policy: CompanyPortabilityRoutineExecutionPolicy,
+  taskSlug: string,
+  importedSlugToAgentId: Map<string, string>,
+  existingSlugToAgentId: Map<string, string>,
+) {
+  return {
+    mode: policy.mode ?? "normal",
+    stages: policy.stages.map((stage) => ({
+      type: stage.type,
+      approvalsNeeded: 1 as const,
+      participants: stage.participants.map((participant) => {
+        if (participant.type === "agent") {
+          const agentId = participant.agentSlug
+            ? importedSlugToAgentId.get(participant.agentSlug) ?? existingSlugToAgentId.get(participant.agentSlug) ?? null
+            : null;
+          if (!agentId) {
+            throw unprocessable(
+              `Recurring task ${taskSlug} has an execution policy participant referencing agent "${participant.agentSlug ?? "(unknown)"}" that is not part of this import or the target company`,
+            );
+          }
+          return { type: "agent" as const, agentId };
+        }
+        if (!participant.userId) {
+          throw unprocessable(`Recurring task ${taskSlug} has a user execution policy participant without a userId`);
+        }
+        return { type: "user" as const, userId: participant.userId };
+      }),
+    })),
+  };
 }
 
 function buildRoutineManifestFromLiveRoutine(routine: RoutineLike): CompanyPortabilityIssueRoutineManifestEntry {
@@ -1386,14 +1445,30 @@ function resolvePortableRoutineDefinition(
       concurrencyPolicy: issue.routine.concurrencyPolicy,
       catchUpPolicy: issue.routine.catchUpPolicy,
       variables: issue.routine.variables ?? null,
+      executionPolicy: issue.routine.executionPolicy ?? null,
       triggers: [...issue.routine.triggers],
     }
     : {
       concurrencyPolicy: null,
       catchUpPolicy: null,
       variables: null,
+      executionPolicy: null as CompanyPortabilityRoutineExecutionPolicy | null,
       triggers: [] as CompanyPortabilityIssueRoutineTriggerManifestEntry[],
     };
+
+  if (routine.executionPolicy != null) {
+    const parsedPolicy = portabilityRoutineExecutionPolicySchema.safeParse(routine.executionPolicy);
+    if (parsedPolicy.success) {
+      routine.executionPolicy = parsedPolicy.data;
+    } else {
+      // Loud, not silent: a malformed policy means a review gate the operator believes
+      // in would vanish on import.
+      errors.push(
+        `Recurring task ${issue.slug} has an invalid executionPolicy: ${parsedPolicy.error.issues.map((entry) => entry.message).join("; ")}`,
+      );
+      routine.executionPolicy = null;
+    }
+  }
 
   if (routine.concurrencyPolicy && !ROUTINE_CONCURRENCY_POLICIES.includes(routine.concurrencyPolicy as any)) {
     errors.push(`Recurring task ${issue.slug} uses unsupported routine concurrencyPolicy "${routine.concurrencyPolicy}".`);
@@ -3731,6 +3806,9 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         concurrencyPolicy: routine.concurrencyPolicy !== "coalesce_if_active" ? routine.concurrencyPolicy : undefined,
         catchUpPolicy: routine.catchUpPolicy !== "skip_missed" ? routine.catchUpPolicy : undefined,
         variables: (routine.variables ?? []).length > 0 ? routine.variables : undefined,
+        executionPolicy: routine.executionPolicy
+          ? exportRoutineExecutionPolicy(routine.executionPolicy, idToSlug)
+          : undefined,
         triggers: routine.triggers.map((trigger) => stripEmptyValues({
           kind: trigger.kind,
           label: trigger.label ?? null,
@@ -4849,6 +4927,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
               concurrencyPolicy: null,
               catchUpPolicy: null,
               variables: null,
+              executionPolicy: null,
               triggers: [],
             };
             const createdRoutine = await routines.create(targetCompany.id, {
@@ -4873,6 +4952,14 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
                   ? routineDefinition.catchUpPolicy as typeof ROUTINE_CATCH_UP_POLICIES[number]
                   : "skip_missed",
               variables: routineDefinition.variables ?? [],
+              executionPolicy: routineDefinition.executionPolicy
+                ? translateImportedRoutineExecutionPolicy(
+                    routineDefinition.executionPolicy,
+                    manifestIssue.slug,
+                    importedSlugToAgentId,
+                    existingSlugToAgentId,
+                  )
+                : undefined,
             }, {
               agentId: null,
               userId: actorUserId ?? null,
