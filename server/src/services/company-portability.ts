@@ -865,19 +865,25 @@ function normalizeRoutineExtension(value: unknown): CompanyPortabilityIssueRouti
       .map((entry) => normalizeRoutineVariableExtension(entry))
       .filter((entry): entry is RoutineVariable => entry !== null)
     : null;
+  // Present-and-non-null rides RAW — including non-object AND empty shapes ({}, [],
+  // {stages: []}) — so the single validation point (resolveImportedRoutineDefinition)
+  // errors loudly on any malformed value. Nothing between here and that gate may null,
+  // strip, or empty-collapse the value: a package author who WROTE an executionPolicy
+  // must get an error or a policy, never a silent no-gate import.
+  const hasExecutionPolicy = value.executionPolicy != null;
   const routine = {
     concurrencyPolicy: asString(value.concurrencyPolicy),
     catchUpPolicy: asString(value.catchUpPolicy),
     variables,
-    // Carried RAW whenever the key is present — including non-object values — so the
-    // single validation point (resolveImportedRoutineDefinition) errors loudly on any
-    // malformed shape. Nulling non-objects here would silently drop the gate.
-    executionPolicy: value.executionPolicy == null
-      ? null
-      : (value.executionPolicy as unknown as CompanyPortabilityRoutineExecutionPolicy),
+    executionPolicy: hasExecutionPolicy
+      ? (value.executionPolicy as unknown as CompanyPortabilityRoutineExecutionPolicy)
+      : null,
     triggers,
   };
-  return stripEmptyValues(routine) ? routine : null;
+  // stripEmptyValues is only a presence heuristic for "did this entry configure
+  // anything" — an empty-shaped executionPolicy must NOT let the whole entry (and
+  // with it the malformed policy) vanish before the gate.
+  return hasExecutionPolicy || stripEmptyValues(routine) ? routine : null;
 }
 
 // Agent participants travel by slug: agent ids don't survive cross-company import.
