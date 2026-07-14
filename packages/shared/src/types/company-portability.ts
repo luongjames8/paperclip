@@ -1,6 +1,6 @@
 import type { AgentEnvConfig } from "./secrets.js";
 import type { RoutineVariable } from "./routine.js";
-import type { IssueCommentAuthorType } from "../constants.js";
+import type { IssueCommentAuthorType, IssueExecutionPolicyMode, IssueExecutionStageType } from "../constants.js";
 import type { IssueCommentMetadata, IssueCommentPresentation } from "./issue.js";
 
 export interface CompanyPortabilityInclude {
@@ -90,10 +90,30 @@ export interface CompanyPortabilityIssueRoutineTriggerManifestEntry {
   replayWindowSec: number | null;
 }
 
+// Portable form of RoutineExecutionPolicy: agent participants travel by SLUG
+// (agent ids don't survive cross-company import); stage/participant ids are not
+// carried — the target company mints fresh ids at routine create.
+export interface CompanyPortabilityRoutineExecutionPolicyParticipant {
+  type: "agent" | "user";
+  agentSlug?: string | null;
+  userId?: string | null;
+}
+
+export interface CompanyPortabilityRoutineExecutionPolicyStage {
+  type: IssueExecutionStageType;
+  participants: CompanyPortabilityRoutineExecutionPolicyParticipant[];
+}
+
+export interface CompanyPortabilityRoutineExecutionPolicy {
+  mode?: IssueExecutionPolicyMode;
+  stages: CompanyPortabilityRoutineExecutionPolicyStage[];
+}
+
 export interface CompanyPortabilityIssueRoutineManifestEntry {
   concurrencyPolicy: string | null;
   catchUpPolicy: string | null;
   variables?: RoutineVariable[] | null;
+  executionPolicy?: CompanyPortabilityRoutineExecutionPolicy | null;
   triggers: CompanyPortabilityIssueRoutineTriggerManifestEntry[];
 }
 

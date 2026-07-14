@@ -191,6 +191,8 @@ export {
   portabilityIncludeSchema,
   portabilityEnvInputSchema,
   portabilityCompanyManifestEntrySchema,
+  portabilityRoutineExecutionPolicySchema,
+  portabilityRoutineExecutionPolicyParticipantSchema,
   portabilitySidebarOrderSchema,
   portabilityAgentManifestEntrySchema,
   portabilitySkillManifestEntrySchema,
