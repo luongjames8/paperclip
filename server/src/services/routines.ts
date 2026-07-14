@@ -501,6 +501,35 @@ function routineRevisionSnapshotRoutine(routine: RoutineRow): RoutineRevisionSna
   };
 }
 
+// Agent actors may never CHANGE a routine's execution policy — participants become
+// assignees at stage handoff, so policy authoring is a board governance act. Routes
+// carry their own friendlier 403s + the board tasks:assign gate, but this service-level
+// backstop is the choke point every write path (create, update, revision restore, and
+// any future caller) flows through, so no route can forget the rule again.
+// Key-sorted stringify: jsonb round-trips do not preserve key order, so a plain
+// JSON.stringify comparison would flag an unchanged policy as a change.
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function assertActorMayChangeExecutionPolicy(
+  actor: Actor,
+  previous: RoutineExecutionPolicy | null | undefined,
+  next: RoutineExecutionPolicy | null | undefined,
+) {
+  if (!actor.agentId) return;
+  if (canonicalJson(previous ?? null) !== canonicalJson(next ?? null)) {
+    throw forbidden("Agents cannot change a routine execution policy");
+  }
+}
+
 // Author-time strictness for the routine execution-policy template. Unlike the
 // issue-level surface (where normalizeIssueExecutionPolicy silently drops a stage
 // whose participants are all malformed, and a nonexistent agentId strands the issue
@@ -2024,6 +2053,7 @@ export function routineService(
       );
       assertRoutineVariableDefinitions(variables);
       const executionPolicy = await normalizeRoutineExecutionPolicyForPersistence(db, companyId, input.executionPolicy);
+      assertActorMayChangeExecutionPolicy(actor, null, executionPolicy);
       const status = normalizeDraftRoutineStatus(input.status, input.assigneeAgentId);
       const responsibleUserId = await resolveRoutineResponsibleUserId(db, companyId, actor.userId, input.parentIssueId ?? null);
       if (!responsibleUserId) {
@@ -2089,6 +2119,9 @@ export function routineService(
       const nextExecutionPolicy = patch.executionPolicy === undefined
         ? existing.executionPolicy ?? null
         : await normalizeRoutineExecutionPolicyForPersistence(db, existing.companyId, patch.executionPolicy);
+      if (patch.executionPolicy !== undefined) {
+        assertActorMayChangeExecutionPolicy(actor, existing.executionPolicy, nextExecutionPolicy);
+      }
       const requestedStatus = patch.status ?? existing.status;
       if (patch.status === "active") {
         assertRoutineCanEnable(patch.status, nextAssigneeAgentId);
@@ -2503,6 +2536,7 @@ export function routineService(
         existingRoutine.companyId,
         routineSnapshot.executionPolicy ?? null,
       );
+      assertActorMayChangeExecutionPolicy(actor, existingRoutine.executionPolicy, restoredExecutionPolicy);
 
       const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
