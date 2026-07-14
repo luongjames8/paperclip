@@ -580,7 +580,7 @@ describe("issue execution policy routes", () => {
       type: "agent",
       agentId: "22222222-2222-4222-8222-222222222222",
       companyId: "company-1",
-      runId: "run-1",
+      runId: null,
     }))
       .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/children")
       .send({
@@ -619,7 +619,7 @@ describe("issue execution policy routes", () => {
       type: "agent",
       agentId: "33333333-3333-4333-8333-333333333333",
       companyId: "company-1",
-      runId: "run-1",
+      runId: "99999999-9999-4999-8999-999999999999",
     }))
       .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/children")
       .send({

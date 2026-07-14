@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  createRoutineSchema,
+  routineExecutionPolicySchema,
   routineRevisionSnapshotV1Schema,
   routineVariableSchema,
   updateRoutineSchema,
@@ -109,5 +111,54 @@ describe("routine validators", () => {
       type: "date",
       defaultValue: 20240229,
     })).toThrow(/YYYY-MM-DD/);
+  });
+
+  describe("routine execution policy", () => {
+    const editorAgentId = "55555555-5555-4555-8555-555555555555";
+    const validPolicy = {
+      stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+    };
+
+    it("accepts stages+mode on routine create", () => {
+      const parsed = createRoutineSchema.parse({
+        title: "Weekly article",
+        executionPolicy: { ...validPolicy, mode: "normal" },
+      });
+      expect(parsed.executionPolicy?.stages).toHaveLength(1);
+      expect(parsed.executionPolicy?.stages[0]?.participants[0]?.agentId).toBe(editorAgentId);
+    });
+
+    it("rejects per-issue runtime fields like monitor", () => {
+      expect(() => routineExecutionPolicySchema.parse({
+        ...validPolicy,
+        monitor: { nextCheckAt: new Date(0).toISOString() },
+      })).toThrow();
+    });
+
+    it("rejects an empty stages array", () => {
+      expect(() => routineExecutionPolicySchema.parse({ stages: [] })).toThrow();
+    });
+
+    it("rejects a stage with no participants", () => {
+      expect(() => routineExecutionPolicySchema.parse({
+        stages: [{ type: "review", participants: [] }],
+      })).toThrow(/at least one participant/);
+    });
+
+    it("rejects duplicate caller-supplied stage ids", () => {
+      const stageId = "66666666-6666-4666-8666-666666666666";
+      expect(() => routineExecutionPolicySchema.parse({
+        stages: [
+          { id: stageId, type: "review", participants: [{ type: "agent", agentId: editorAgentId }] },
+          { id: stageId, type: "approval", participants: [{ type: "agent", agentId: editorAgentId }] },
+        ],
+      })).toThrow(/stage ids must be unique/);
+    });
+
+    it("rejects agent participants without an agentId", () => {
+      expect(() => routineExecutionPolicySchema.parse({
+        stages: [{ type: "review", participants: [{ type: "agent" }] }],
+      })).toThrow(/agentId/);
+    });
   });
 });

@@ -458,6 +458,9 @@ export type {
 export type {
   Routine,
   RoutineEnvConfig,
+  RoutineExecutionPolicy,
+  RoutineExecutionPolicyStage,
+  RoutineExecutionPolicyParticipant,
   RoutineManagedByPlugin,
   RoutineDescriptionDocument,
   RoutineVariable,

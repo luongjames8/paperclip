@@ -29,6 +29,7 @@ import type {
   CreateRoutine,
   CreateRoutineTrigger,
   Routine,
+  RoutineExecutionPolicy,
   RoutineDetail,
   RoutineDescriptionDocument,
   RoutineListItem,
@@ -54,11 +55,12 @@ import {
   syncRoutineVariablesWithTemplate,
 } from "@paperclipai/shared";
 import { trackRoutineRun } from "@paperclipai/shared/telemetry";
-import { conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { issueService } from "./issues.js";
+import { normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { secretService } from "./secrets.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
@@ -494,8 +496,107 @@ function routineRevisionSnapshotRoutine(routine: RoutineRow): RoutineRevisionSna
     catchUpPolicy: routine.catchUpPolicy as RoutineRevisionSnapshotV1["routine"]["catchUpPolicy"],
     variables: routine.variables ?? [],
     env: routine.env ?? null,
+    executionPolicy: routine.executionPolicy ?? null,
     responsibleUserId: routine.responsibleUserId ?? null,
   };
+}
+
+// Agent actors may never CHANGE a routine's execution policy — participants become
+// assignees at stage handoff, so policy authoring is a board governance act. Routes
+// carry their own friendlier 403s + the board tasks:assign gate, but this service-level
+// backstop is the choke point every write path (create, update, revision restore, and
+// any future caller) flows through, so no route can forget the rule again.
+// Key-sorted stringify: jsonb round-trips do not preserve key order, so a plain
+// JSON.stringify comparison would flag an unchanged policy as a change.
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function assertActorMayChangeExecutionPolicy(
+  actor: Actor,
+  previous: RoutineExecutionPolicy | null | undefined,
+  next: RoutineExecutionPolicy | null | undefined,
+) {
+  if (!actor.agentId) return;
+  if (canonicalJson(previous ?? null) !== canonicalJson(next ?? null)) {
+    throw forbidden("Agents cannot change a routine execution policy");
+  }
+}
+
+// Author-time strictness for the routine execution-policy template. Unlike the
+// issue-level surface (where normalizeIssueExecutionPolicy silently drops a stage
+// whose participants are all malformed, and a nonexistent agentId strands the issue
+// in_review until the liveness classifier notices), a routine template is validated
+// hard here: schema-invalid → 422, any stage that normalization would drop → 422,
+// any agent participant that isn't an assignable company agent → 422.
+async function normalizeRoutineExecutionPolicyForPersistence(
+  db: Db,
+  companyId: string,
+  input: RoutineExecutionPolicy | null | undefined,
+): Promise<RoutineExecutionPolicy | null> {
+  if (input == null) return null;
+  const normalized = normalizeIssueExecutionPolicy(input);
+  if (!normalized || normalized.stages.length !== input.stages.length) {
+    throw unprocessable(
+      "Every execution policy stage needs at least one participant with a valid agentId or userId",
+    );
+  }
+  const participantAgentIds = new Set<string>();
+  const participantUserIds = new Set<string>();
+  for (const stage of normalized.stages) {
+    for (const participant of stage.participants) {
+      if (participant.type === "agent" && participant.agentId) {
+        participantAgentIds.add(participant.agentId);
+      } else if (participant.type === "user" && participant.userId) {
+        participantUserIds.add(participant.userId);
+      }
+    }
+  }
+  for (const agentId of participantAgentIds) {
+    try {
+      await assertAssignableAgent(db, companyId, agentId, { kind: "work" });
+    } catch (error) {
+      // 422, not the helper's 404/409: the bad reference is in the request body, and a
+      // 404 here would masquerade as "routine not found". The helper's structured
+      // details ride along so the agent_not_assignable taxonomy isn't lost.
+      throw unprocessable("Execution policy has an agent participant that is not an assignable company agent", {
+        agentId,
+        cause: error instanceof Error ? error.message : String(error),
+        ...(error instanceof HttpError && error.details !== undefined ? { details: error.details } : {}),
+      });
+    }
+  }
+  for (const userId of participantUserIds) {
+    // Same membership test issueService.update applies when the stage transition later
+    // writes this value as assigneeUserId — reject at author time instead of stranding
+    // the routine-born issue mid-handoff.
+    const membership = await db
+      .select({ id: companyMemberships.id })
+      .from(companyMemberships)
+      .where(
+        and(
+          eq(companyMemberships.companyId, companyId),
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, userId),
+          eq(companyMemberships.status, "active"),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+    if (!membership) {
+      throw unprocessable("Execution policy has a user participant that is not an active company member", { userId });
+    }
+  }
+  // Persist the engine-normalized shape: participants deduped and stage/participant
+  // ids stamped by the same normalizer the issue runtime uses, so per-issue
+  // completedStageIds tracking survives every re-normalization.
+  return { mode: normalized.mode, stages: normalized.stages };
 }
 
 function routineRevisionSnapshotTrigger(trigger: RoutineTriggerRow): RoutineRevisionSnapshotV1["triggers"][number] {
@@ -1606,6 +1707,15 @@ export function routineService(
         }
 
         try {
+          // Validated at save time, but a participant can be terminated/removed later
+          // and a stale template would strand every spawned issue at stage entry.
+          // Revalidate ONLY here, on the path that actually creates an issue — after
+          // the idempotency-replay and coalesce short-circuits above, so replays of a
+          // previously accepted dispatch keep returning the recorded run. A stale
+          // template surfaces as a failed run (outer catch), durable in the runs list.
+          // Staleness AFTER spawn stays the runtime's job (stage drift repair + the
+          // invalid_review_participant liveness classifier).
+          await normalizeRoutineExecutionPolicyForPersistence(db, input.routine.companyId, input.routine.executionPolicy ?? null);
           createdIssue = await issueSvc.create(input.routine.companyId, {
             projectId,
             projectWorkspaceId,
@@ -1625,6 +1735,7 @@ export function routineService(
             originRunId: createdRun.id,
             originFingerprint: dispatchFingerprint,
             billingCode: issueBillingCode,
+            executionPolicy: (input.routine.executionPolicy as Record<string, unknown> | null) ?? null,
             executionWorkspaceId: input.executionWorkspaceId ?? null,
             executionWorkspacePreference: input.executionWorkspacePreference ?? null,
             executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
@@ -1941,6 +2052,8 @@ export function routineService(
         sanitizeRoutineVariableInputs(input.variables),
       );
       assertRoutineVariableDefinitions(variables);
+      const executionPolicy = await normalizeRoutineExecutionPolicyForPersistence(db, companyId, input.executionPolicy);
+      assertActorMayChangeExecutionPolicy(actor, null, executionPolicy);
       const status = normalizeDraftRoutineStatus(input.status, input.assigneeAgentId);
       const responsibleUserId = await resolveRoutineResponsibleUserId(db, companyId, actor.userId, input.parentIssueId ?? null);
       if (!responsibleUserId) {
@@ -1964,6 +2077,7 @@ export function routineService(
             catchUpPolicy: input.catchUpPolicy,
             variables,
             env,
+            executionPolicy,
             responsibleUserId,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,
@@ -2002,6 +2116,12 @@ export function routineService(
               strictMode: process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true",
               fieldPath: "env",
             });
+      const nextExecutionPolicy = patch.executionPolicy === undefined
+        ? existing.executionPolicy ?? null
+        : await normalizeRoutineExecutionPolicyForPersistence(db, existing.companyId, patch.executionPolicy);
+      if (patch.executionPolicy !== undefined) {
+        assertActorMayChangeExecutionPolicy(actor, existing.executionPolicy, nextExecutionPolicy);
+      }
       const requestedStatus = patch.status ?? existing.status;
       if (patch.status === "active") {
         assertRoutineCanEnable(patch.status, nextAssigneeAgentId);
@@ -2074,6 +2194,7 @@ export function routineService(
           catchUpPolicy: patch.catchUpPolicy ?? locked.catchUpPolicy,
           variables: nextVariables,
           env: nextEnv,
+          executionPolicy: nextExecutionPolicy,
           responsibleUserId: locked.responsibleUserId ?? responsibleUserId,
           updatedByAgentId: actor.agentId ?? null,
           updatedByUserId: actor.userId ?? null,
@@ -2124,6 +2245,7 @@ export function routineService(
             catchUpPolicy: candidate.catchUpPolicy,
             variables: candidate.variables,
             env: candidate.env,
+            executionPolicy: candidate.executionPolicy,
             responsibleUserId: candidate.responsibleUserId,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
@@ -2406,6 +2528,15 @@ export function routineService(
       const snapshot = targetRevision.snapshot as RoutineRevisionSnapshotV1;
       const routineSnapshot = snapshot.routine;
       await assertRestorableAssignee(existingRoutine.companyId, routineSnapshot.assigneeAgentId, actor);
+      // Restore is an authoring action: the snapshot's policy re-enters the live template,
+      // so it passes the same validation as create/update (participants may have been
+      // terminated/removed since the revision was taken).
+      const restoredExecutionPolicy = await normalizeRoutineExecutionPolicyForPersistence(
+        db,
+        existingRoutine.companyId,
+        routineSnapshot.executionPolicy ?? null,
+      );
+      assertActorMayChangeExecutionPolicy(actor, existingRoutine.executionPolicy, restoredExecutionPolicy);
 
       const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
@@ -2460,6 +2591,9 @@ export function routineService(
             catchUpPolicy: routineSnapshot.catchUpPolicy,
             variables: routineSnapshot.variables,
             env: routineSnapshot.env,
+            // Validated above; null when the snapshot predates executionPolicy or
+            // recorded none — a revision without a policy restores to no policy.
+            executionPolicy: restoredExecutionPolicy,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
             updatedAt: now,

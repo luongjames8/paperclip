@@ -156,6 +156,11 @@ export function routineRoutes(
     const companyId = req.params.companyId as string;
     await assertBoardCanAssignTasks(req, companyId);
     assertCanManageCompanyRoutine(req, companyId, req.body.assigneeAgentId);
+    // Same boundary as PATCH: policy participants are future assignees, and the
+    // board gate above no-ops for agent actors.
+    if (req.body.executionPolicy !== undefined && req.body.executionPolicy !== null && req.actor.type === "agent") {
+      throw forbidden("Agents cannot set a routine execution policy");
+    }
     const created = await svc.create(companyId, req.body, {
       agentId: req.actor.type === "agent" ? req.actor.agentId : null,
       userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,
@@ -375,6 +380,18 @@ export function routineRoutes(
       req.body.status === "active" &&
       routine.status !== "active";
     if (statusWillActivate) {
+      await assertBoardCanAssignTasks(req, routine.companyId);
+    }
+    // Policy participants become assignees when a routine-born issue enters their
+    // stage, so changing the template is an assignment act. Board actors need the
+    // same permission as retargeting the assignee; agent actors are rejected
+    // outright — assertBoardCanAssignTasks no-ops for agents, and letting a
+    // self-assigned agent author a policy naming other agents/users would bypass
+    // the "agents can only assign routines to themselves" boundary at stage handoff.
+    if (req.body.executionPolicy !== undefined) {
+      if (req.actor.type === "agent") {
+        throw forbidden("Agents cannot set a routine execution policy");
+      }
       await assertBoardCanAssignTasks(req, routine.companyId);
     }
     if (

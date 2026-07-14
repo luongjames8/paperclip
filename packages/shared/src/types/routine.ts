@@ -1,4 +1,6 @@
 import type {
+  IssueExecutionPolicyMode,
+  IssueExecutionStageType,
   IssueOriginKind,
   IssuePriority,
   RoutineCatchUpPolicy,
@@ -67,6 +69,27 @@ export interface RoutineVariable {
 
 export type RoutineEnvConfig = Record<string, EnvBinding>;
 
+export interface RoutineExecutionPolicyParticipant {
+  id?: string;
+  type: "agent" | "user";
+  agentId?: string | null;
+  userId?: string | null;
+}
+
+export interface RoutineExecutionPolicyStage {
+  id?: string;
+  type: IssueExecutionStageType;
+  approvalsNeeded?: 1;
+  participants: RoutineExecutionPolicyParticipant[];
+}
+
+// Template stamped onto every execution issue the routine spawns (stages+mode only —
+// per-issue runtime fields like monitor are rejected at the validator).
+export interface RoutineExecutionPolicy {
+  mode?: IssueExecutionPolicyMode;
+  stages: RoutineExecutionPolicyStage[];
+}
+
 export interface Routine {
   id: string;
   companyId: string;
@@ -84,6 +107,7 @@ export interface Routine {
   originId?: string | null;
   variables: RoutineVariable[];
   env?: RoutineEnvConfig | null;
+  executionPolicy?: RoutineExecutionPolicy | null;
   latestRevisionId: string | null;
   latestRevisionNumber: number;
   createdByAgentId: string | null;
@@ -127,6 +151,7 @@ export interface RoutineRevisionSnapshotRoutineV1 {
   originId?: string | null;
   variables: RoutineVariable[];
   env: RoutineEnvConfig | null;
+  executionPolicy: RoutineExecutionPolicy | null;
   responsibleUserId: string | null;
 }
 

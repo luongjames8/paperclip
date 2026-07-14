@@ -30,6 +30,10 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { issueService } from "../services/issues.ts";
+import {
+  applyIssueExecutionPolicyTransition,
+  normalizeIssueExecutionPolicy,
+} from "../services/issue-execution-policy.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import * as providerRegistry from "../secrets/provider-registry.ts";
 import { routineService } from "../services/routines.ts";
@@ -1865,6 +1869,274 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       originKind: "routine_execution",
       originId: routine.id,
       originRunId: run.id,
+    });
+  });
+
+  describe("routine execution policy template", () => {
+    function routineInput(overrides: Record<string, unknown>) {
+      return {
+        projectId: null,
+        goalId: null,
+        parentIssueId: null,
+        title: "weekly article",
+        description: null,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        ...overrides,
+      };
+    }
+
+    async function seedEditor(companyId: string) {
+      const editorAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: editorAgentId,
+        companyId,
+        name: "Editor",
+        role: "editor",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      return editorAgentId;
+    }
+
+    it("rejects agent participants that are not assignable company agents", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      await expect(svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: randomUUID() }] }],
+          },
+        }) as never,
+        {},
+      )).rejects.toMatchObject({ status: 422 });
+    });
+
+    it("rejects user participants that are not active company members", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      await expect(svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "approval", participants: [{ type: "user", userId: randomUUID() }] }],
+          },
+        }) as never,
+        {},
+      )).rejects.toMatchObject({ status: 422 });
+    });
+
+    it("restores the revision's executionPolicy when restoring an older revision", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      const firstRevisionId = routine.latestRevisionId!;
+      const policy = routine.executionPolicy;
+      expect(policy?.stages).toHaveLength(1);
+
+      const updated = await svc.update(routine.id, { executionPolicy: null } as never, {});
+      expect(updated?.executionPolicy).toBeNull();
+
+      const restored = await svc.restoreRevision(routine.id, firstRevisionId, {});
+      expect(restored.routine.executionPolicy).toEqual(policy);
+    });
+
+    it("fails dispatch when a saved policy participant is no longer assignable", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, editorAgentId));
+
+      const run = await svc.runRoutine(routine.id, { source: "manual" });
+      expect(run.status).toBe("failed");
+      expect(run.failureReason).toMatch(/not an assignable company agent/);
+    });
+
+    it("idempotent replays keep returning the recorded run after a participant goes stale", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      const first = await svc.runRoutine(routine.id, { source: "api", idempotencyKey: "replay-1" });
+      expect(first.status).toBe("issue_created");
+
+      await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, editorAgentId));
+
+      const replay = await svc.runRoutine(routine.id, { source: "api", idempotencyKey: "replay-1" });
+      expect(replay.id).toBe(first.id);
+      expect(replay.status).toBe("issue_created");
+    });
+
+    it("blocks agent actors from restoring a revision that changes the execution policy", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      const firstRevisionId = routine.latestRevisionId!;
+      await svc.update(routine.id, { executionPolicy: null } as never, {});
+
+      // Agent actor (the routine's own assignee) reinstating the policy via restore
+      // must hit the same board-only wall as POST/PATCH.
+      await expect(svc.restoreRevision(routine.id, firstRevisionId, { agentId }))
+        .rejects.toMatchObject({ status: 403 });
+
+      const restored = await svc.restoreRevision(routine.id, firstRevisionId, {});
+      expect(restored.routine.executionPolicy?.stages).toHaveLength(1);
+    });
+
+    it("lets agent actors restore revisions when the policy is unchanged", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          title: "policy stays",
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      const firstRevisionId = routine.latestRevisionId!;
+      await svc.update(routine.id, { description: "retitled only" } as never, {});
+
+      const restored = await svc.restoreRevision(routine.id, firstRevisionId, { agentId });
+      expect(restored.routine.executionPolicy).toEqual(routine.executionPolicy);
+    });
+
+    it("blocks agent actors from creating routines with an execution policy at the service layer", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      await expect(svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        { agentId },
+      )).rejects.toMatchObject({ status: 403 });
+    });
+
+    it("rejects restoring a revision whose policy participant is no longer assignable", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      const firstRevisionId = routine.latestRevisionId!;
+      await svc.update(routine.id, { executionPolicy: null } as never, {});
+      await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, editorAgentId));
+
+      await expect(svc.restoreRevision(routine.id, firstRevisionId, {})).rejects.toMatchObject({ status: 422 });
+    });
+
+    it("rejects stages that issue-level normalization would silently drop", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      await expect(svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: { stages: [{ type: "review", participants: [] }] },
+        }) as never,
+        {},
+      )).rejects.toThrow(/at least one participant/);
+    });
+
+    it("stamps the policy onto routine-born issues and the engine routes their completion into stage 1", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      const stageId = routine.executionPolicy?.stages[0]?.id;
+      expect(stageId).toBeTruthy();
+      expect(routine.executionPolicy?.stages[0]?.participants[0]?.id).toBeTruthy();
+
+      const run = await svc.runRoutine(routine.id, { source: "manual" });
+      expect(run.status).toBe("issue_created");
+      const issueRow = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, run.linkedIssueId!))
+        .then((rows) => rows[0]!);
+      expect(issueRow.executionPolicy).toEqual(routine.executionPolicy);
+
+      const transition = applyIssueExecutionPolicyTransition({
+        issue: issueRow as never,
+        policy: normalizeIssueExecutionPolicy(issueRow.executionPolicy),
+        requestedStatus: "done",
+        requestedAssigneePatch: {},
+        actor: { agentId, userId: null },
+      });
+      expect(transition.workflowControlledAssignment).toBe(true);
+      expect(transition.patch.status).toBe("in_review");
+      expect(transition.patch.assigneeAgentId).toBe(editorAgentId);
+      const nextState = transition.patch.executionState as {
+        status: string;
+        currentStageId: string | null;
+        currentParticipant: { agentId: string | null } | null;
+      };
+      expect(nextState.status).toBe("pending");
+      expect(nextState.currentStageId).toBe(stageId);
+      expect(nextState.currentParticipant?.agentId).toBe(editorAgentId);
     });
   });
 });
