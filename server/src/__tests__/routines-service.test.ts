@@ -1971,7 +1971,32 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       );
       await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, editorAgentId));
 
-      await expect(svc.runRoutine(routine.id, { source: "manual" })).rejects.toMatchObject({ status: 422 });
+      const run = await svc.runRoutine(routine.id, { source: "manual" });
+      expect(run.status).toBe("failed");
+      expect(run.failureReason).toMatch(/not an assignable company agent/);
+    });
+
+    it("idempotent replays keep returning the recorded run after a participant goes stale", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      const first = await svc.runRoutine(routine.id, { source: "api", idempotencyKey: "replay-1" });
+      expect(first.status).toBe("issue_created");
+
+      await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, editorAgentId));
+
+      const replay = await svc.runRoutine(routine.id, { source: "api", idempotencyKey: "replay-1" });
+      expect(replay.id).toBe(first.id);
+      expect(replay.status).toBe("issue_created");
     });
 
     it("rejects restoring a revision whose policy participant is no longer assignable", async () => {

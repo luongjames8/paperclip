@@ -1525,12 +1525,6 @@ export function routineService(
       throw unprocessable("Default agent required");
     }
     await assertAssignableAgent(db, input.routine.companyId, assigneeAgentId, { kind: "routine" });
-    // Same shape as the stale-assignee check above: the policy template was validated at
-    // save time, but a participant can be terminated or removed afterwards, and a stale
-    // template would strand every spawned issue at stage entry. Fail the dispatch before
-    // the run/issue exist. Staleness AFTER spawn stays the runtime's job (stage drift
-    // repair + the invalid_review_participant liveness classifier).
-    await normalizeRoutineExecutionPolicyForPersistence(db, input.routine.companyId, input.routine.executionPolicy ?? null);
     const automaticVariables: Record<string, string | number | boolean> = {};
     if (input.executionWorkspaceId && routineUsesWorkspaceBranch(input.routine)) {
       const workspace = await db
@@ -1684,6 +1678,15 @@ export function routineService(
         }
 
         try {
+          // Validated at save time, but a participant can be terminated/removed later
+          // and a stale template would strand every spawned issue at stage entry.
+          // Revalidate ONLY here, on the path that actually creates an issue — after
+          // the idempotency-replay and coalesce short-circuits above, so replays of a
+          // previously accepted dispatch keep returning the recorded run. A stale
+          // template surfaces as a failed run (outer catch), durable in the runs list.
+          // Staleness AFTER spawn stays the runtime's job (stage drift repair + the
+          // invalid_review_participant liveness classifier).
+          await normalizeRoutineExecutionPolicyForPersistence(db, input.routine.companyId, input.routine.executionPolicy ?? null);
           createdIssue = await issueSvc.create(input.routine.companyId, {
             projectId,
             projectWorkspaceId,

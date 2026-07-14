@@ -377,6 +377,12 @@ export function routineRoutes(
     if (statusWillActivate) {
       await assertBoardCanAssignTasks(req, routine.companyId);
     }
+    // Policy participants become assignees when a routine-born issue enters their
+    // stage, so changing the template is an assignment act — same gate as retargeting
+    // the assignee (presence of the key = intent to change; POST enforces this too).
+    if (req.body.executionPolicy !== undefined) {
+      await assertBoardCanAssignTasks(req, routine.companyId);
+    }
     if (
       req.actor.type === "agent" &&
       req.body.assigneeAgentId !== undefined &&

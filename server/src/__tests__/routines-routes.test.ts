@@ -514,6 +514,28 @@ describe("routine routes", () => {
     expect(mockRoutineService.update).not.toHaveBeenCalled();
   });
 
+  it("requires tasks:assign permission to change a routine's execution policy", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .patch(`/api/routines/${routineId}`)
+      .send({
+        executionPolicy: {
+          stages: [{ type: "review", participants: [{ type: "agent", agentId: otherAgentId }] }],
+        },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("tasks:assign");
+    expect(mockRoutineService.update).not.toHaveBeenCalled();
+  });
+
   it("requires tasks:assign permission to reactivate a routine", async () => {
     mockRoutineService.get.mockResolvedValue(pausedRoutine);
     const app = await createApp({
