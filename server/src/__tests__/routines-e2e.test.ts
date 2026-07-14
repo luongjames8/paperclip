@@ -19,6 +19,8 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   instanceSettings,
+  issueComments,
+  issueExecutionDecisions,
   issues,
   principalPermissionGrants,
   projectWorkspaces,
@@ -110,6 +112,8 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
+    await db.delete(issueExecutionDecisions);
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
@@ -511,4 +515,120 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
       executionWorkspaceSettings: { mode: "isolated_workspace" },
     });
   });
+
+  it("carries the routine execution policy onto the spawned issue and hands completion to the stage-1 reviewer with a wake", async () => {
+    const { companyId, agentId: writerAgentId, projectId, userId } = await seedFixture();
+    const editorAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: editorAgentId,
+      companyId,
+      name: "Editor",
+      role: "editor",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const boardApp = await createApp({
+      type: "board",
+      userId,
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const createRes = await request(boardApp)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Weekly article",
+        description: "Draft, then editor QC",
+        assigneeAgentId: writerAgentId,
+        executionPolicy: {
+          stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+        },
+      });
+    expect([200, 201], JSON.stringify(createRes.body)).toContain(createRes.status);
+    const stageId = createRes.body.executionPolicy?.stages?.[0]?.id;
+    expect(stageId).toBeTruthy();
+
+    const runRes = await postRoutineRun(boardApp, createRes.body.id, { source: "manual" });
+    expect(runRes.status).toBe(202);
+    const issueId = runRes.body.linkedIssueId as string;
+    expect(issueId).toBeTruthy();
+
+    const [spawned] = await db
+      .select({ executionPolicy: issues.executionPolicy, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId));
+    expect(spawned?.executionPolicy).toEqual(createRes.body.executionPolicy);
+
+    const [{ issueRoutes }, { errorHandler }] = await Promise.all([
+      import("../routes/issues.js"),
+      import("../middleware/index.js"),
+    ]);
+    const issueApp = express();
+    issueApp.use(express.json());
+    issueApp.use((req, _res, next) => {
+      (req as any).actor = {
+        type: "agent",
+        agentId: writerAgentId,
+        companyId,
+        runId: spawned?.executionRunId ?? null,
+        source: "agent_jwt",
+      };
+      next();
+    });
+    issueApp.use("/api", issueRoutes(db, {} as any));
+    issueApp.use(errorHandler);
+
+    const patchRes = await request(issueApp)
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done", comment: "draft ready for QC" });
+    expect(patchRes.status, JSON.stringify(patchRes.body)).toBe(200);
+
+    const [afterPatch] = await db
+      .select({
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        executionState: issues.executionState,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId));
+    expect(afterPatch?.status).toBe("in_review");
+    expect(afterPatch?.assigneeAgentId).toBe(editorAgentId);
+    expect(afterPatch?.executionState).toMatchObject({
+      status: "pending",
+      currentStageId: stageId,
+      currentParticipant: { type: "agent", agentId: editorAgentId },
+    });
+
+    // The stage wake is dispatched fire-and-forget after the PATCH responds — poll briefly.
+    // The writer's execution run (seeded by the routine-dispatch wake mock) is still
+    // active, so the engine parks the editor's wake in deferred_issue_execution; it is
+    // released natively when that run completes. The review-request context must ride
+    // the deferred payload so the editor's eventual heartbeat still sees the stage.
+    let editorWake: { reason: string | null; status: string; payload: Record<string, unknown> | null } | undefined;
+    for (let attempt = 0; attempt < 40 && !editorWake; attempt += 1) {
+      const wakes = await db
+        .select({
+          reason: agentWakeupRequests.reason,
+          status: agentWakeupRequests.status,
+          payload: agentWakeupRequests.payload,
+        })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.agentId, editorAgentId));
+      editorWake = wakes[0];
+      if (!editorWake) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(editorWake?.status).toBe("deferred_issue_execution");
+    expect(editorWake?.payload?.issueId).toBe(issueId);
+    expect(editorWake?.payload?.executionStage).toMatchObject({
+      stageId,
+      stageType: "review",
+      wakeRole: "reviewer",
+    });
+  }, 20_000);
 });

@@ -29,6 +29,7 @@ import type {
   CreateRoutine,
   CreateRoutineTrigger,
   Routine,
+  RoutineExecutionPolicy,
   RoutineDetail,
   RoutineDescriptionDocument,
   RoutineListItem,
@@ -54,11 +55,12 @@ import {
   syncRoutineVariablesWithTemplate,
 } from "@paperclipai/shared";
 import { trackRoutineRun } from "@paperclipai/shared/telemetry";
-import { conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { issueService } from "./issues.js";
+import { normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { secretService } from "./secrets.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
@@ -494,8 +496,55 @@ function routineRevisionSnapshotRoutine(routine: RoutineRow): RoutineRevisionSna
     catchUpPolicy: routine.catchUpPolicy as RoutineRevisionSnapshotV1["routine"]["catchUpPolicy"],
     variables: routine.variables ?? [],
     env: routine.env ?? null,
+    executionPolicy: routine.executionPolicy ?? null,
     responsibleUserId: routine.responsibleUserId ?? null,
   };
+}
+
+// Author-time strictness for the routine execution-policy template. Unlike the
+// issue-level surface (where normalizeIssueExecutionPolicy silently drops a stage
+// whose participants are all malformed, and a nonexistent agentId strands the issue
+// in_review until the liveness classifier notices), a routine template is validated
+// hard here: schema-invalid → 422, any stage that normalization would drop → 422,
+// any agent participant that isn't an assignable company agent → 422.
+async function normalizeRoutineExecutionPolicyForPersistence(
+  db: Db,
+  companyId: string,
+  input: RoutineExecutionPolicy | null | undefined,
+): Promise<RoutineExecutionPolicy | null> {
+  if (input == null) return null;
+  const normalized = normalizeIssueExecutionPolicy(input);
+  if (!normalized || normalized.stages.length !== input.stages.length) {
+    throw unprocessable(
+      "Every execution policy stage needs at least one participant with a valid agentId or userId",
+    );
+  }
+  const participantAgentIds = new Set<string>();
+  for (const stage of normalized.stages) {
+    for (const participant of stage.participants) {
+      if (participant.type === "agent" && participant.agentId) {
+        participantAgentIds.add(participant.agentId);
+      }
+    }
+  }
+  for (const agentId of participantAgentIds) {
+    try {
+      await assertAssignableAgent(db, companyId, agentId, { kind: "work" });
+    } catch (error) {
+      // 422, not the helper's 404/409: the bad reference is in the request body, and a
+      // 404 here would masquerade as "routine not found". The helper's structured
+      // details ride along so the agent_not_assignable taxonomy isn't lost.
+      throw unprocessable("Execution policy has an agent participant that is not an assignable company agent", {
+        agentId,
+        cause: error instanceof Error ? error.message : String(error),
+        ...(error instanceof HttpError && error.details !== undefined ? { details: error.details } : {}),
+      });
+    }
+  }
+  // Persist the engine-normalized shape: participants deduped and stage/participant
+  // ids stamped by the same normalizer the issue runtime uses, so per-issue
+  // completedStageIds tracking survives every re-normalization.
+  return { mode: normalized.mode, stages: normalized.stages };
 }
 
 function routineRevisionSnapshotTrigger(trigger: RoutineTriggerRow): RoutineRevisionSnapshotV1["triggers"][number] {
@@ -1625,6 +1674,7 @@ export function routineService(
             originRunId: createdRun.id,
             originFingerprint: dispatchFingerprint,
             billingCode: issueBillingCode,
+            executionPolicy: (input.routine.executionPolicy as Record<string, unknown> | null) ?? null,
             executionWorkspaceId: input.executionWorkspaceId ?? null,
             executionWorkspacePreference: input.executionWorkspacePreference ?? null,
             executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
@@ -1941,6 +1991,7 @@ export function routineService(
         sanitizeRoutineVariableInputs(input.variables),
       );
       assertRoutineVariableDefinitions(variables);
+      const executionPolicy = await normalizeRoutineExecutionPolicyForPersistence(db, companyId, input.executionPolicy);
       const status = normalizeDraftRoutineStatus(input.status, input.assigneeAgentId);
       const responsibleUserId = await resolveRoutineResponsibleUserId(db, companyId, actor.userId, input.parentIssueId ?? null);
       if (!responsibleUserId) {
@@ -1964,6 +2015,7 @@ export function routineService(
             catchUpPolicy: input.catchUpPolicy,
             variables,
             env,
+            executionPolicy,
             responsibleUserId,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,
@@ -2002,6 +2054,9 @@ export function routineService(
               strictMode: process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true",
               fieldPath: "env",
             });
+      const nextExecutionPolicy = patch.executionPolicy === undefined
+        ? existing.executionPolicy ?? null
+        : await normalizeRoutineExecutionPolicyForPersistence(db, existing.companyId, patch.executionPolicy);
       const requestedStatus = patch.status ?? existing.status;
       if (patch.status === "active") {
         assertRoutineCanEnable(patch.status, nextAssigneeAgentId);
@@ -2074,6 +2129,7 @@ export function routineService(
           catchUpPolicy: patch.catchUpPolicy ?? locked.catchUpPolicy,
           variables: nextVariables,
           env: nextEnv,
+          executionPolicy: nextExecutionPolicy,
           responsibleUserId: locked.responsibleUserId ?? responsibleUserId,
           updatedByAgentId: actor.agentId ?? null,
           updatedByUserId: actor.userId ?? null,
@@ -2124,6 +2180,7 @@ export function routineService(
             catchUpPolicy: candidate.catchUpPolicy,
             variables: candidate.variables,
             env: candidate.env,
+            executionPolicy: candidate.executionPolicy,
             responsibleUserId: candidate.responsibleUserId,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,

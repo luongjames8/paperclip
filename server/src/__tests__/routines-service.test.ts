@@ -30,6 +30,10 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { issueService } from "../services/issues.ts";
+import {
+  applyIssueExecutionPolicyTransition,
+  normalizeIssueExecutionPolicy,
+} from "../services/issue-execution-policy.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import * as providerRegistry from "../secrets/provider-registry.ts";
 import { routineService } from "../services/routines.ts";
@@ -1865,6 +1869,112 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       originKind: "routine_execution",
       originId: routine.id,
       originRunId: run.id,
+    });
+  });
+
+  describe("routine execution policy template", () => {
+    function routineInput(overrides: Record<string, unknown>) {
+      return {
+        projectId: null,
+        goalId: null,
+        parentIssueId: null,
+        title: "weekly article",
+        description: null,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        ...overrides,
+      };
+    }
+
+    async function seedEditor(companyId: string) {
+      const editorAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: editorAgentId,
+        companyId,
+        name: "Editor",
+        role: "editor",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      return editorAgentId;
+    }
+
+    it("rejects agent participants that are not assignable company agents", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      await expect(svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: randomUUID() }] }],
+          },
+        }) as never,
+        {},
+      )).rejects.toMatchObject({ status: 422 });
+    });
+
+    it("rejects stages that issue-level normalization would silently drop", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      await expect(svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: { stages: [{ type: "review", participants: [] }] },
+        }) as never,
+        {},
+      )).rejects.toThrow(/at least one participant/);
+    });
+
+    it("stamps the policy onto routine-born issues and the engine routes their completion into stage 1", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      const stageId = routine.executionPolicy?.stages[0]?.id;
+      expect(stageId).toBeTruthy();
+      expect(routine.executionPolicy?.stages[0]?.participants[0]?.id).toBeTruthy();
+
+      const run = await svc.runRoutine(routine.id, { source: "manual" });
+      expect(run.status).toBe("issue_created");
+      const issueRow = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, run.linkedIssueId!))
+        .then((rows) => rows[0]!);
+      expect(issueRow.executionPolicy).toEqual(routine.executionPolicy);
+
+      const transition = applyIssueExecutionPolicyTransition({
+        issue: issueRow as never,
+        policy: normalizeIssueExecutionPolicy(issueRow.executionPolicy),
+        requestedStatus: "done",
+        requestedAssigneePatch: {},
+        actor: { agentId, userId: null },
+      });
+      expect(transition.workflowControlledAssignment).toBe(true);
+      expect(transition.patch.status).toBe("in_review");
+      expect(transition.patch.assigneeAgentId).toBe(editorAgentId);
+      const nextState = transition.patch.executionState as {
+        status: string;
+        currentStageId: string | null;
+        currentParticipant: { agentId: string | null } | null;
+      };
+      expect(nextState.status).toBe("pending");
+      expect(nextState.currentStageId).toBe(stageId);
+      expect(nextState.currentParticipant?.agentId).toBe(editorAgentId);
     });
   });
 });

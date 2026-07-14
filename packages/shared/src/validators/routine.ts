@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  ISSUE_EXECUTION_POLICY_MODES,
   ISSUE_PRIORITIES,
   ROUTINE_CATCH_UP_POLICIES,
   ROUTINE_CONCURRENCY_POLICIES,
@@ -10,6 +11,7 @@ import {
 } from "../constants.js";
 import {
   ISSUE_EXECUTION_WORKSPACE_PREFERENCES,
+  issueExecutionStageSchema,
   issueExecutionWorkspaceSettingsSchema,
 } from "./issue.js";
 import { envConfigSchema } from "./secret.js";
@@ -59,6 +61,21 @@ export const routineVariableSchema = z.object({
   }
 });
 
+// Routine-level execution policy template, stamped onto every execution issue the
+// routine spawns. Deliberately narrower than issueExecutionPolicySchema: stages+mode
+// only, and .strict() so monitor/reviewPreset/authorizationPolicy (per-issue runtime
+// state, not template config) are rejected rather than silently carried.
+export const routineExecutionPolicySchema = z.object({
+  mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional().default("normal"),
+  stages: z.array(
+    issueExecutionStageSchema.refine(
+      (stage) => stage.participants.length > 0,
+      { message: "Each execution policy stage needs at least one participant" },
+    ),
+  ).min(1),
+}).strict();
+export type RoutineExecutionPolicyInput = z.infer<typeof routineExecutionPolicySchema>;
+
 export const createRoutineSchema = z.object({
   projectId: z.string().uuid().optional().nullable(),
   goalId: z.string().uuid().optional().nullable(),
@@ -72,6 +89,7 @@ export const createRoutineSchema = z.object({
   catchUpPolicy: z.enum(ROUTINE_CATCH_UP_POLICIES).optional().default("skip_missed"),
   variables: z.array(routineVariableSchema).optional().default([]),
   env: envConfigSchema.optional().nullable(),
+  executionPolicy: routineExecutionPolicySchema.optional().nullable(),
 });
 
 export type CreateRoutine = z.infer<typeof createRoutineSchema>;
@@ -96,6 +114,7 @@ export const routineRevisionSnapshotRoutineV1Schema = z.object({
   catchUpPolicy: z.enum(ROUTINE_CATCH_UP_POLICIES),
   variables: z.array(routineVariableSchema),
   env: envConfigSchema.nullable().default(null),
+  executionPolicy: routineExecutionPolicySchema.nullable().default(null),
   responsibleUserId: z.string().nullable().default(null),
 }).strict();
 
