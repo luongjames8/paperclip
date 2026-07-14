@@ -137,7 +137,7 @@ export const portabilityRoutineExecutionPolicyParticipantSchema = z.object({
   type: z.enum(["agent", "user"]),
   agentSlug: z.string().min(1).nullable().optional(),
   userId: z.string().min(1).nullable().optional(),
-}).superRefine((value, ctx) => {
+}).strict().superRefine((value, ctx) => {
   if (value.type === "agent" && !value.agentSlug) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Agent participants require agentSlug", path: ["agentSlug"] });
   }
@@ -146,13 +146,16 @@ export const portabilityRoutineExecutionPolicyParticipantSchema = z.object({
   }
 });
 
+// .strict() to match the routine API's validator: a package carrying monitor/
+// reviewPreset/authorizationPolicy (or any unknown key) fails the import loudly
+// instead of silently losing policy fields.
 export const portabilityRoutineExecutionPolicySchema = z.object({
   mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional(),
   stages: z.array(z.object({
     type: z.enum(ISSUE_EXECUTION_STAGE_TYPES),
     participants: z.array(portabilityRoutineExecutionPolicyParticipantSchema).min(1),
-  })).min(1),
-});
+  }).strict()).min(1),
+}).strict();
 
 export const portabilityIssueRoutineManifestEntrySchema = z.object({
   concurrencyPolicy: z.string().nullable(),
