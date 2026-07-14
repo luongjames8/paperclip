@@ -145,6 +145,16 @@ describe("routine validators", () => {
       })).toThrow(/at least one participant/);
     });
 
+    it("rejects duplicate caller-supplied stage ids", () => {
+      const stageId = "66666666-6666-4666-8666-666666666666";
+      expect(() => routineExecutionPolicySchema.parse({
+        stages: [
+          { id: stageId, type: "review", participants: [{ type: "agent", agentId: editorAgentId }] },
+          { id: stageId, type: "approval", participants: [{ type: "agent", agentId: editorAgentId }] },
+        ],
+      })).toThrow(/stage ids must be unique/);
+    });
+
     it("rejects agent participants without an agentId", () => {
       expect(() => routineExecutionPolicySchema.parse({
         stages: [{ type: "review", participants: [{ type: "agent" }] }],

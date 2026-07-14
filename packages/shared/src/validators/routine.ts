@@ -72,7 +72,17 @@ export const routineExecutionPolicySchema = z.object({
       (stage) => stage.participants.length > 0,
       { message: "Each execution policy stage needs at least one participant" },
     ),
-  ).min(1),
+  ).min(1)
+    // Per-issue stage state tracks completedStageIds by id: two stages sharing a
+    // caller-supplied id would both be marked complete when one approves,
+    // silently skipping the other's gate.
+    .refine(
+      (stages) => {
+        const ids = stages.map((stage) => stage.id).filter((id): id is string => Boolean(id));
+        return new Set(ids).size === ids.length;
+      },
+      { message: "Execution policy stage ids must be unique" },
+    ),
 }).strict();
 export type RoutineExecutionPolicyInput = z.infer<typeof routineExecutionPolicySchema>;
 
