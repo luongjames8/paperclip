@@ -1956,6 +1956,44 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       expect(restored.routine.executionPolicy).toEqual(policy);
     });
 
+    it("fails dispatch when a saved policy participant is no longer assignable", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, editorAgentId));
+
+      await expect(svc.runRoutine(routine.id, { source: "manual" })).rejects.toMatchObject({ status: 422 });
+    });
+
+    it("rejects restoring a revision whose policy participant is no longer assignable", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const editorAgentId = await seedEditor(companyId);
+      const routine = await svc.create(
+        companyId,
+        routineInput({
+          assigneeAgentId: agentId,
+          executionPolicy: {
+            stages: [{ type: "review", participants: [{ type: "agent", agentId: editorAgentId }] }],
+          },
+        }) as never,
+        {},
+      );
+      const firstRevisionId = routine.latestRevisionId!;
+      await svc.update(routine.id, { executionPolicy: null } as never, {});
+      await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, editorAgentId));
+
+      await expect(svc.restoreRevision(routine.id, firstRevisionId, {})).rejects.toMatchObject({ status: 422 });
+    });
+
     it("rejects stages that issue-level normalization would silently drop", async () => {
       const { companyId, agentId, svc } = await seedFixture();
       await expect(svc.create(

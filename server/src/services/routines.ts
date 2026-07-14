@@ -1525,6 +1525,12 @@ export function routineService(
       throw unprocessable("Default agent required");
     }
     await assertAssignableAgent(db, input.routine.companyId, assigneeAgentId, { kind: "routine" });
+    // Same shape as the stale-assignee check above: the policy template was validated at
+    // save time, but a participant can be terminated or removed afterwards, and a stale
+    // template would strand every spawned issue at stage entry. Fail the dispatch before
+    // the run/issue exist. Staleness AFTER spawn stays the runtime's job (stage drift
+    // repair + the invalid_review_participant liveness classifier).
+    await normalizeRoutineExecutionPolicyForPersistence(db, input.routine.companyId, input.routine.executionPolicy ?? null);
     const automaticVariables: Record<string, string | number | boolean> = {};
     if (input.executionWorkspaceId && routineUsesWorkspaceBranch(input.routine)) {
       const workspace = await db
@@ -2486,6 +2492,14 @@ export function routineService(
       const snapshot = targetRevision.snapshot as RoutineRevisionSnapshotV1;
       const routineSnapshot = snapshot.routine;
       await assertRestorableAssignee(existingRoutine.companyId, routineSnapshot.assigneeAgentId, actor);
+      // Restore is an authoring action: the snapshot's policy re-enters the live template,
+      // so it passes the same validation as create/update (participants may have been
+      // terminated/removed since the revision was taken).
+      const restoredExecutionPolicy = await normalizeRoutineExecutionPolicyForPersistence(
+        db,
+        existingRoutine.companyId,
+        routineSnapshot.executionPolicy ?? null,
+      );
 
       const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
@@ -2540,9 +2554,9 @@ export function routineService(
             catchUpPolicy: routineSnapshot.catchUpPolicy,
             variables: routineSnapshot.variables,
             env: routineSnapshot.env,
-            // ?? null: pre-executionPolicy snapshots have no key, and a revision that
-            // recorded no policy must restore to no policy.
-            executionPolicy: routineSnapshot.executionPolicy ?? null,
+            // Validated above; null when the snapshot predates executionPolicy or
+            // recorded none — a revision without a policy restores to no policy.
+            executionPolicy: restoredExecutionPolicy,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
             updatedAt: now,
