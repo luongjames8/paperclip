@@ -850,6 +850,7 @@ export type {
   CompanyPortabilityPreviewResult,
   CompanyPortabilityAdapterOverride,
   CompanyPortabilityImportRequest,
+  CompanyPortabilityImportPendingSteps,
   CompanyPortabilityImportResult,
   CompanyPortabilityExportRequest,
   EnvBinding,

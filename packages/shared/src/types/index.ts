@@ -575,6 +575,7 @@ export type {
   CompanyPortabilityPreviewResult,
   CompanyPortabilityAdapterOverride,
   CompanyPortabilityImportRequest,
+  CompanyPortabilityImportPendingSteps,
   CompanyPortabilityImportResult,
   CompanyPortabilityExportRequest,
 } from "./company-portability.js";
