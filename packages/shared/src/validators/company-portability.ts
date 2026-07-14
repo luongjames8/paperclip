@@ -1,9 +1,5 @@
 import { z } from "zod";
-import {
-  ISSUE_EXECUTION_POLICY_MODES,
-  ISSUE_EXECUTION_STAGE_TYPES,
-  MAX_COMPANY_ATTACHMENT_MAX_BYTES,
-} from "../constants.js";
+import { MAX_COMPANY_ATTACHMENT_MAX_BYTES } from "../constants.js";
 import {
   issueCommentAuthorTypeSchema,
   issueCommentMetadataSchema,
@@ -133,35 +129,10 @@ export const portabilityIssueRoutineTriggerManifestEntrySchema = z.object({
   replayWindowSec: z.number().int().nullable(),
 });
 
-export const portabilityRoutineExecutionPolicyParticipantSchema = z.object({
-  type: z.enum(["agent", "user"]),
-  agentSlug: z.string().min(1).nullable().optional(),
-  userId: z.string().min(1).nullable().optional(),
-}).strict().superRefine((value, ctx) => {
-  if (value.type === "agent" && !value.agentSlug) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Agent participants require agentSlug", path: ["agentSlug"] });
-  }
-  if (value.type === "user" && !value.userId) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "User participants require userId", path: ["userId"] });
-  }
-});
-
-// .strict() to match the routine API's validator: a package carrying monitor/
-// reviewPreset/authorizationPolicy (or any unknown key) fails the import loudly
-// instead of silently losing policy fields.
-export const portabilityRoutineExecutionPolicySchema = z.object({
-  mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional(),
-  stages: z.array(z.object({
-    type: z.enum(ISSUE_EXECUTION_STAGE_TYPES),
-    participants: z.array(portabilityRoutineExecutionPolicyParticipantSchema).min(1),
-  }).strict()).min(1),
-}).strict();
-
 export const portabilityIssueRoutineManifestEntrySchema = z.object({
   concurrencyPolicy: z.string().nullable(),
   catchUpPolicy: z.string().nullable(),
   variables: z.array(routineVariableSchema).nullable().optional(),
-  executionPolicy: portabilityRoutineExecutionPolicySchema.nullable().optional(),
   triggers: z.array(portabilityIssueRoutineTriggerManifestEntrySchema).default([]),
 });
 
