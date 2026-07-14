@@ -2430,6 +2430,63 @@ describe("company portability", () => {
       agents: "all",
       collisionStrategy: "rename",
     }, "user-1")).rejects.toThrow(/referencing agent "ghost"/);
+
+    // The rejection must come from the PREVIEW gate, before any mutation — a
+    // half-imported company is the failure mode this guards against.
+    expect(companySvc.create).not.toHaveBeenCalled();
+    expect(agentSvc.create).not.toHaveBeenCalled();
+    expect(routineSvc.create).not.toHaveBeenCalled();
+  });
+
+  it("fails the export loudly when a policy participant's agent is not included", async () => {
+    const portability = companyPortabilityService({} as any);
+    const defaultAgents = await agentSvc.list();
+    agentSvc.list.mockResolvedValue([
+      ...defaultAgents,
+      { ...defaultAgents[0], id: "agent-2", name: "EditorBot", role: "editor" },
+    ]);
+    routineSvc.list.mockResolvedValue([
+      {
+        id: "routine-1",
+        companyId: "company-1",
+        projectId: null,
+        goalId: null,
+        parentIssueId: null,
+        title: "Weekly Article",
+        description: "Draft then editor QC",
+        assigneeAgentId: "agent-1",
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        executionPolicy: {
+          mode: "normal",
+          stages: [{
+            id: "11111111-1111-4111-8111-111111111111",
+            type: "review",
+            approvalsNeeded: 1,
+            participants: [{ id: "22222222-2222-4222-8222-222222222222", type: "agent", agentId: "agent-2", userId: null }],
+          }],
+        },
+        createdByAgentId: null,
+        createdByUserId: null,
+        updatedByAgentId: null,
+        updatedByUserId: null,
+        lastTriggeredAt: null,
+        lastEnqueuedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        triggers: [],
+        lastRun: null,
+        activeIssue: null,
+      },
+    ]);
+
+    // agents excluded from the export -> the policy participant cannot be slug-mapped
+    // -> the export must fail instead of emitting a bundle its own importer rejects.
+    await expect(portability.exportBundle("company-1", {
+      include: { company: true, agents: false, projects: true, issues: true, skills: false },
+    })).rejects.toThrow(/not included in this export/);
   });
 
   it("migrates legacy schedule.recurrence imports into routine triggers", async () => {

@@ -887,20 +887,32 @@ function normalizeRoutineExtension(value: unknown): CompanyPortabilityIssueRouti
 }
 
 // Agent participants travel by slug: agent ids don't survive cross-company import.
-// A participant whose agent isn't part of the export keeps a null slug — the import
-// side fails that routine loudly rather than silently dropping its gate.
+// A participant whose agent is NOT part of the export fails the export loudly —
+// emitting it would produce a bundle paperclip's own preview/import rejects (the
+// stripped-null agentSlug fails the strict participant schema), i.e. a broken
+// artifact. Include the agent in the export or exclude the routine.
 function exportRoutineExecutionPolicy(
   policy: RoutineExecutionPolicy,
   agentIdToSlug: Map<string, string>,
+  routineTitle: string,
 ): CompanyPortabilityRoutineExecutionPolicy {
   return {
     ...(policy.mode && policy.mode !== "normal" ? { mode: policy.mode } : {}),
     stages: policy.stages.map((stage) => ({
       type: stage.type,
-      participants: stage.participants.map((participant) =>
-        participant.type === "agent"
-          ? { type: "agent" as const, agentSlug: (participant.agentId && agentIdToSlug.get(participant.agentId)) || null }
-          : { type: "user" as const, userId: participant.userId ?? null }),
+      participants: stage.participants.map((participant) => {
+        if (participant.type !== "agent") {
+          return { type: "user" as const, userId: participant.userId ?? null };
+        }
+        const agentSlug = participant.agentId ? agentIdToSlug.get(participant.agentId) ?? null : null;
+        if (!agentSlug) {
+          throw unprocessable(
+            `Routine "${routineTitle}" has an execution policy participant whose agent is not included in this export — include the agent or exclude the routine.`,
+            { routineTitle, agentId: participant.agentId ?? null },
+          );
+        }
+        return { type: "agent" as const, agentSlug };
+      }),
     })),
   };
 }
@@ -3814,7 +3826,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         catchUpPolicy: routine.catchUpPolicy !== "skip_missed" ? routine.catchUpPolicy : undefined,
         variables: (routine.variables ?? []).length > 0 ? routine.variables : undefined,
         executionPolicy: routine.executionPolicy
-          ? exportRoutineExecutionPolicy(routine.executionPolicy, idToSlug)
+          ? exportRoutineExecutionPolicy(routine.executionPolicy, idToSlug, routine.title)
           : undefined,
         triggers: routine.triggers.map((trigger) => stripEmptyValues({
           kind: trigger.kind,
@@ -4308,7 +4320,33 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     }
 
     if (include.issues) {
+      // An unresolvable execution-policy participant must fail HERE, at preview —
+      // before any company/agent/project mutation — never mid-import (which leaves a
+      // partially imported company) and never only at routine-create time. The
+      // create-time check in translateImportedRoutineExecutionPolicy stays as the
+      // backstop; this is the gate.
+      const importableAgentSlugs = new Set<string>([
+        ...agentPlans.map((plan) => plan.slug),
+        ...existingSlugs,
+      ]);
       for (const manifestIssue of manifest.issues) {
+        const policy = manifestIssue.routine?.executionPolicy;
+        if (manifestIssue.recurring && policy && Array.isArray((policy as { stages?: unknown }).stages)) {
+          for (const stage of (policy as { stages: unknown[] }).stages) {
+            const participants = (stage as { participants?: unknown })?.participants;
+            if (!Array.isArray(participants)) continue;
+            for (const participant of participants) {
+              const entry = participant as { type?: unknown; agentSlug?: unknown };
+              if (entry?.type !== "agent") continue;
+              const agentSlug = typeof entry.agentSlug === "string" && entry.agentSlug.length > 0 ? entry.agentSlug : null;
+              if (!agentSlug || !importableAgentSlugs.has(agentSlug)) {
+                errors.push(
+                  `Recurring task ${manifestIssue.slug} has an execution policy participant referencing agent "${agentSlug ?? "(unknown)"}" that is not part of this import or the target company.`,
+                );
+              }
+            }
+          }
+        }
         issuePlans.push({
           slug: manifestIssue.slug,
           action: "create",
