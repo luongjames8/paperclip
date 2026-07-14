@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
+import { asString } from "@paperclipai/shared";
 
 // The ONE device-key generator. Previously duplicated verbatim in
 // routes/agents.ts and routes/access.ts, with a third ad-hoc ensure in the
@@ -11,14 +12,17 @@ export function generateEd25519PrivateKeyPem(): string {
     .toString();
 }
 
+// Exact semantics of the route layer's private parseBooleanLike === true —
+// including the numeric branch (disableDeviceAuth: 1), which the deleted
+// routes/agents.ts ensure honored; dropping it would silently start minting
+// keys for configs that previously suppressed them. (That helper has no
+// importable home yet — services must not import from routes; consolidating
+// the codebase's several private copies into shared is a separate cleanup.)
 function disableDeviceAuthRequested(value: unknown): boolean {
   if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
   if (typeof value !== "string") return false;
   return ["true", "1", "yes", "on"].includes(value.trim().toLowerCase());
-}
-
-function hasDeviceKey(value: unknown): boolean {
-  return typeof value === "string" && value.trim().length > 0;
 }
 
 // Idempotent: mints a devicePrivateKeyPem for openclaw_gateway-class agents
@@ -31,6 +35,6 @@ export function ensureGatewayDeviceKey(
 ): Record<string, unknown> {
   if (adapterType !== "openclaw_gateway") return adapterConfig;
   if (disableDeviceAuthRequested(adapterConfig.disableDeviceAuth)) return adapterConfig;
-  if (hasDeviceKey(adapterConfig.devicePrivateKeyPem)) return adapterConfig;
+  if (asString(adapterConfig.devicePrivateKeyPem)) return adapterConfig;
   return { ...adapterConfig, devicePrivateKeyPem: generateEd25519PrivateKeyPem() };
 }

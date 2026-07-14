@@ -4572,7 +4572,6 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             metadata: manifestAgent.metadata,
           };
 
-
           const recordPendingSteps = (agentId: string) => {
             if (normalizedAdapter.adapterType !== "openclaw_gateway") return;
             // "pair" is host-side by physics (the claimed-key file lives inside the
