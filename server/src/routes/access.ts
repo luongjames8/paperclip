@@ -1,6 +1,5 @@
 import {
   createHash,
-  generateKeyPairSync,
   randomBytes,
   timingSafeEqual
 } from "node:crypto";
@@ -72,6 +71,7 @@ import {
   resolveHumanInviteRole,
 } from "../services/company-member-roles.js";
 import { humanJoinGrantsFromDefaults } from "../services/invite-grants.js";
+import { generateEd25519PrivateKeyPem } from "../services/agent-device-keys.js";
 import {
   collapseDuplicatePendingHumanJoinRequests,
   findReusableHumanJoinRequest,
@@ -507,13 +507,6 @@ function parseBooleanLike(value: unknown): boolean | null {
   if (["true", "1", "yes", "on"].includes(normalized)) return true;
   if (["false", "0", "no", "off"].includes(normalized)) return false;
   return null;
-}
-
-function generateEd25519PrivateKeyPem(): string {
-  const generated = generateKeyPairSync("ed25519");
-  return generated.privateKey
-    .export({ type: "pkcs8", format: "pem" })
-    .toString();
 }
 
 export function buildJoinDefaultsPayloadForAccept(input: {

@@ -300,6 +300,18 @@ export interface CompanyPortabilityImportRequest extends CompanyPortabilityPrevi
   secretValues?: Record<string, string>;
 }
 
+// The remaining host-side bootstrap steps the engine cannot perform for an
+// imported agent: "pair" = gateway API-key claim + device approve (the claim
+// file lives inside the claw container), "heartbeat-enable" = timer heartbeats
+// are deliberately disabled on import and need a board re-enable. Machine-
+// consumable by design — this is the input contract for `fleet.sh pair` and
+// the cattle-CI create→import→pair→doctor→smoke pipeline.
+export interface CompanyPortabilityImportPendingSteps {
+  agentId: string;
+  agentSlug: string;
+  needs: Array<"pair" | "heartbeat-enable">;
+}
+
 export interface CompanyPortabilityImportResult {
   company: {
     id: string;
@@ -313,6 +325,7 @@ export interface CompanyPortabilityImportResult {
     name: string;
     reason: string | null;
   }[];
+  pendingSteps: CompanyPortabilityImportPendingSteps[];
   projects: {
     slug: string;
     id: string | null;

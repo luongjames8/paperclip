@@ -1959,6 +1959,56 @@ describe("company portability", () => {
     ]);
   });
 
+  it("reports structured pendingSteps for imported openclaw_gateway agents", async () => {
+    const portability = companyPortabilityService({} as any);
+    companySvc.create.mockResolvedValue({ id: "company-imported", name: "Imported Paperclip" });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    let createdAgentSeq = 0;
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: `agent-imported-${++createdAgentSeq}`,
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/gatewaybot/AGENTS.md": ["---", 'name: "GatewayBot"', "---", "", "You run in the claw.", ""].join("\n"),
+      "agents/localbot/AGENTS.md": ["---", 'name: "LocalBot"', "---", "", "You run locally.", ""].join("\n"),
+      ".paperclip.yaml": [
+        "schema: paperclip/v1",
+        "agents:",
+        "  gatewaybot:",
+        "    adapter:",
+        "      type: openclaw_gateway",
+        "      config: {}",
+        "  localbot:",
+        "    adapter:",
+        "      type: codex_local",
+        "      config: {}",
+        "",
+      ].join("\n"),
+    };
+
+    const result = await portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: false, issues: false, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1");
+
+    expect(result.pendingSteps).toHaveLength(1);
+    expect(result.pendingSteps[0]).toEqual({
+      agentId: expect.stringMatching(/^agent-imported-\d+$/),
+      agentSlug: "gatewaybot",
+      needs: ["pair", "heartbeat-enable"],
+    });
+  });
+
   it("imports recurring task packages as routines instead of one-time issues", async () => {
     const portability = companyPortabilityService({} as any);
 

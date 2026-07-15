@@ -27,6 +27,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { syncAgentAdapterEnvBindings } from "./agent-secret-bindings.js";
+import { ensureGatewayDeviceKey } from "./agent-device-keys.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import { secretService } from "./secrets.js";
@@ -434,10 +435,14 @@ export function agentService(db: Db) {
       Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig") &&
       isPlainRecord(normalizedPatch.adapterConfig)
     ) {
-      normalizedPatch.adapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
-        existing.companyId,
-        normalizedPatch.adapterConfig,
-        { adapterType: (normalizedPatch.adapterType ?? existing.adapterType) as string },
+      const effectiveAdapterType = (normalizedPatch.adapterType ?? existing.adapterType) as string;
+      normalizedPatch.adapterConfig = ensureGatewayDeviceKey(
+        effectiveAdapterType,
+        await secretsSvc.normalizeAdapterConfigForPersistence(
+          existing.companyId,
+          normalizedPatch.adapterConfig,
+          { adapterType: effectiveAdapterType },
+        ),
       );
     }
 
@@ -516,9 +521,12 @@ export function agentService(db: Db) {
       const normalizedPermissions = normalizeAgentPermissions(data.permissions, role);
       const runtimeConfig = normalizeRuntimeConfigForNewAgent(data.runtimeConfig);
       const adapterType = data.adapterType ?? "process";
-      const adapterConfig = isPlainRecord(data.adapterConfig)
-        ? await secretsSvc.normalizeAdapterConfigForPersistence(companyId, data.adapterConfig, { adapterType })
-        : {};
+      const adapterConfig = ensureGatewayDeviceKey(
+        adapterType,
+        isPlainRecord(data.adapterConfig)
+          ? await secretsSvc.normalizeAdapterConfigForPersistence(companyId, data.adapterConfig, { adapterType })
+          : {},
+      );
       return db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         const created = await tx
