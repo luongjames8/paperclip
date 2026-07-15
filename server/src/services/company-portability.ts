@@ -46,6 +46,7 @@ import {
   ROUTINE_TRIGGER_SIGNING_MODES,
   deriveProjectUrlKey,
   envConfigSchema,
+  getAgentWorkEligibility,
   issueCommentAuthorTypeSchema,
   issueCommentMetadataSchema,
   issueCommentPresentationSchema,
@@ -176,6 +177,16 @@ function collectAgentSafeImportPolicyErrors(
       }
       if (issue.assigneeAdapterOverrides !== null) {
         errors.push(`Safe import does not allow task ${issue.slug} assigneeAdapterOverrides.`);
+      }
+      if (issue.routine?.executionPolicy) {
+        // executionPolicy authoring is board-only for the direct routine API
+        // (assertActorMayChangeExecutionPolicy in routines.ts), but importBundle always
+        // creates routines with a board/user actor (agentId: null), regardless of which
+        // actor actually triggered the import — so that guard never fires for imports.
+        // A CEO-agent-triggered agent_safe import carrying a crafted executionPolicy
+        // would otherwise land it unchecked. Block it at the same governance-sensitive
+        // gate as executionWorkspaceSettings/assigneeAdapterOverrides above.
+        errors.push(`Safe import does not allow routine task ${issue.slug} a custom executionPolicy.`);
       }
       const triggers = issue.routine?.triggers ?? [];
       for (const trigger of triggers) {
@@ -4140,6 +4151,17 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     const existingSlugToAgent = new Map<string, { id: string; name: string }>();
     const existingAgentIds = new Set<string>();
     const existingSlugs = new Set<string>();
+    // Execution-policy agent-participant resolvability (issuePlans loop below) needs to
+    // know which existing slugs are actually usable, not merely present: an existing
+    // agent slug that resolves to a pending_approval/terminated/broken-org-chain agent
+    // dies at routine-create (assertAssignableAgent) exactly like a nonexistent slug
+    // would — just later, mid-import. Same eligibility test as agent-assignability.ts.
+    const existingAssignableAgentSlugs = new Set<string>();
+    // Execution-policy user-participant resolvability: existing_company imports can
+    // check target company membership directly (populated below); new_company imports
+    // cannot — memberships are created DURING import — so this stays empty and the
+    // issuePlans loop rejects user participants outright for that mode.
+    const activeUserMembershipIds = new Set<string>();
     const projectPlans: CompanyPortabilityPreviewResult["plan"]["projectPlans"] = [];
     const issuePlans: CompanyPortabilityPreviewResult["plan"]["issuePlans"] = [];
     const existingProjectSlugToProject = new Map<string, { id: string; name: string }>();
@@ -4152,6 +4174,16 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         if (!existingSlugToAgent.has(slug)) existingSlugToAgent.set(slug, existing);
         existingAgentIds.add(existing.id);
         existingSlugs.add(slug);
+        // Computed here (not read off existing.orgChainHealth) so this only depends on
+        // the same {id, companyId, name, status, reportsTo} shape assertAssignableAgent
+        // itself relies on — the exact eligibility test create-time enforces, per
+        // agent-assignability.ts.
+        if (getAgentWorkEligibility({ agent: existing, agents: existingAgents }).assignable) {
+          existingAssignableAgentSlugs.add(slug);
+        }
+      }
+      for (const membership of await access.listActiveUserMemberships(input.target.companyId)) {
+        activeUserMembershipIds.add(membership.principalId);
       }
       const existingProjects = await projects.list(input.target.companyId);
       for (const existing of existingProjects) {
@@ -4323,11 +4355,21 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       // An unresolvable execution-policy participant must fail HERE, at preview —
       // before any company/agent/project mutation — never mid-import (which leaves a
       // partially imported company) and never only at routine-create time. The
-      // create-time check in translateImportedRoutineExecutionPolicy stays as the
+      // create-time check in normalizeRoutineExecutionPolicyForPersistence stays as the
       // backstop; this is the gate.
+      //
+      // An agent-participant slug resolves post-import if this import creates/updates
+      // it (agentPlans) or if it already exists untouched in the target company
+      // (existingAssignableAgentSlugs). A brand-new agent always lands "idle" with no
+      // manager, so it's unconditionally assignable; an "update"/"skip" plan reuses
+      // whatever agent already sits at that slug, so it inherits that agent's real
+      // eligibility — hence the existingAssignableAgentSlugs.has(plan.slug) filter below
+      // instead of accepting every agentPlans slug unconditionally.
       const importableAgentSlugs = new Set<string>([
-        ...agentPlans.map((plan) => plan.slug),
-        ...existingSlugs,
+        ...agentPlans
+          .filter((plan) => plan.action === "create" || existingAssignableAgentSlugs.has(plan.slug))
+          .map((plan) => plan.slug),
+        ...existingAssignableAgentSlugs,
       ]);
       for (const manifestIssue of manifest.issues) {
         const policy = manifestIssue.routine?.executionPolicy;
@@ -4336,13 +4378,34 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             const participants = (stage as { participants?: unknown })?.participants;
             if (!Array.isArray(participants)) continue;
             for (const participant of participants) {
-              const entry = participant as { type?: unknown; agentSlug?: unknown };
-              if (entry?.type !== "agent") continue;
-              const agentSlug = typeof entry.agentSlug === "string" && entry.agentSlug.length > 0 ? entry.agentSlug : null;
-              if (!agentSlug || !importableAgentSlugs.has(agentSlug)) {
-                errors.push(
-                  `Recurring task ${manifestIssue.slug} has an execution policy participant referencing agent "${agentSlug ?? "(unknown)"}" that is not part of this import or the target company.`,
-                );
+              const entry = participant as { type?: unknown; agentSlug?: unknown; userId?: unknown };
+              if (entry?.type === "agent") {
+                const agentSlug = typeof entry.agentSlug === "string" && entry.agentSlug.length > 0 ? entry.agentSlug : null;
+                if (!agentSlug || !importableAgentSlugs.has(agentSlug)) {
+                  errors.push(
+                    `Recurring task ${manifestIssue.slug} has an execution policy participant referencing agent "${agentSlug ?? "(unknown)"}" that is not part of this import or the target company.`,
+                  );
+                }
+                continue;
+              }
+              if (entry?.type === "user") {
+                // new_company imports cannot verify membership before the company
+                // exists — memberships are created DURING import (access.ensureMembership
+                // calls further down importBundle). Reject loudly here instead of
+                // deferring to the create-time 422, which would land mid-import after
+                // company/agents/projects are already mutated.
+                if (input.target.mode === "new_company") {
+                  errors.push(
+                    `Recurring task ${manifestIssue.slug} has a user execution policy participant, but new-company imports cannot verify company membership before the company exists. Use an agent participant, or import into an existing company.`,
+                  );
+                  continue;
+                }
+                const userId = typeof entry.userId === "string" && entry.userId.length > 0 ? entry.userId : null;
+                if (!userId || !activeUserMembershipIds.has(userId)) {
+                  errors.push(
+                    `Recurring task ${manifestIssue.slug} has an execution policy participant referencing user "${userId ?? "(unknown)"}" that is not an active member of the target company.`,
+                  );
+                }
               }
             }
           }

@@ -138,11 +138,25 @@ export const portabilityRoutineExecutionPolicyParticipantSchema = z.object({
   agentSlug: z.string().min(1).nullable().optional(),
   userId: z.string().min(1).nullable().optional(),
 }).strict().superRefine((value, ctx) => {
-  if (value.type === "agent" && !value.agentSlug) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Agent participants require agentSlug", path: ["agentSlug"] });
+  // Mirrors issueExecutionStagePrincipalSchema (issue.ts): a participant may only carry
+  // the field matching its own type. Without the cross-field ban, an agent participant
+  // could ALSO set userId (or vice versa); translateImportedRoutineExecutionPolicy reads
+  // only the matching field and silently drops the other, so a malformed/ambiguous
+  // package would import "successfully" with a policy the author never intended.
+  if (value.type === "agent") {
+    if (!value.agentSlug) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Agent participants require agentSlug", path: ["agentSlug"] });
+    }
+    if (value.userId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Agent participants cannot set userId", path: ["userId"] });
+    }
+    return;
   }
-  if (value.type === "user" && !value.userId) {
+  if (!value.userId) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "User participants require userId", path: ["userId"] });
+  }
+  if (value.agentSlug) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "User participants cannot set agentSlug", path: ["agentSlug"] });
   }
 });
 
