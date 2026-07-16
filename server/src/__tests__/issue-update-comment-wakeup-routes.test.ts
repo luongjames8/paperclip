@@ -529,6 +529,10 @@ describe("issue update comment wakeups", () => {
           interactionKind: "request_confirmation",
           interactionStatus: "expired",
           sourceCommentId: "prior-card-comment",
+          // The SUPERSEDING comment ("redo it"), not the original card's sourceCommentId —
+          // this is what heartbeat.enrichWakeContextSnapshot needs to derive
+          // PAPERCLIP_WAKE_COMMENT_ID for the adapter (codex P2).
+          commentId: "comment-superseding",
           mutation: "interaction",
         }),
         contextSnapshot: expect.objectContaining({
@@ -536,8 +540,58 @@ describe("issue update comment wakeups", () => {
           interactionId: "interaction-superseded-1",
           interactionKind: "request_confirmation",
           interactionStatus: "expired",
+          commentId: "comment-superseding",
+          wakeCommentId: "comment-superseding",
           wakeReason: "issue_commented",
           source: "issue.comment.superseded",
+        }),
+      }),
+    );
+  });
+
+  it("wakes the assignee with interaction context, not the mention, when a superseding comment on PATCH also @mentions the assignee (codex P2)", async () => {
+    const existing = makeIssue({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      assigneeAgentId: ASSIGNEE_AGENT_ID,
+      assigneeUserId: null,
+      status: "in_progress",
+    });
+    const updated = { ...existing };
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockResolvedValue(updated);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-superseding-mention",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "@assignee redo it",
+    });
+    mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([
+      makeSupersededByCommentInteraction({
+        issueId: existing.id,
+        result: { version: 1, outcome: "superseded_by_comment", commentId: "comment-superseding-mention" },
+      }),
+    ]);
+    // The superseding comment ALSO @-mentions the assignee. This route's addWakeup is
+    // last-write-wins per agent+issue key — before the codex P2 fix, this mention loop ran
+    // after the interaction-specific wake and clobbered it with the generic mention payload.
+    mockIssueService.findMentionedAgents.mockResolvedValue([ASSIGNEE_AGENT_ID]);
+
+    const res = await request(await createApp())
+      .patch(`/api/issues/${existing.id}`)
+      .send({
+        comment: "@assignee redo it",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        reason: "issue_commented",
+        payload: expect.objectContaining({
+          interactionId: "interaction-superseded-1",
+          interactionKind: "request_confirmation",
+          interactionStatus: "expired",
         }),
       }),
     );
@@ -628,6 +682,7 @@ describe("issue update comment wakeups", () => {
           interactionKind: "request_confirmation",
           interactionStatus: "expired",
           sourceCommentId: "prior-card-comment",
+          commentId: "comment-superseding-2",
           mutation: "interaction",
         }),
         contextSnapshot: expect.objectContaining({
@@ -635,8 +690,57 @@ describe("issue update comment wakeups", () => {
           interactionId: "interaction-superseded-2",
           interactionKind: "request_confirmation",
           interactionStatus: "expired",
+          commentId: "comment-superseding-2",
+          wakeCommentId: "comment-superseding-2",
           wakeReason: "issue_commented",
           source: "issue.comment.superseded",
+        }),
+      }),
+    );
+  });
+
+  it("wakes the assignee with interaction context, not the mention, when a superseding top-level comment on POST also @mentions the assignee (codex P2)", async () => {
+    const existing = makeIssue({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      assigneeAgentId: ASSIGNEE_AGENT_ID,
+      assigneeUserId: null,
+      status: "in_progress",
+    });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-superseding-mention-2",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "@assignee redo it",
+    });
+    mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([
+      makeSupersededByCommentInteraction({
+        id: "interaction-superseded-3",
+        issueId: existing.id,
+        result: { version: 1, outcome: "superseded_by_comment", commentId: "comment-superseding-mention-2" },
+      }),
+    ]);
+    // This route's addWakeup is first-write-wins per agent+issue key, and the
+    // interaction-specific wake is inserted before the generic/mention wakes — confirm it
+    // still lands correctly (coordinator asked to verify, not just PATCH).
+    mockIssueService.findMentionedAgents.mockResolvedValue([ASSIGNEE_AGENT_ID]);
+
+    const res = await request(await createApp())
+      .post(`/api/issues/${existing.id}/comments`)
+      .send({
+        body: "@assignee redo it",
+      });
+
+    expect(res.status).toBe(201);
+    await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1));
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        reason: "issue_commented",
+        payload: expect.objectContaining({
+          interactionId: "interaction-superseded-3",
+          interactionKind: "request_confirmation",
+          interactionStatus: "expired",
         }),
       }),
     );

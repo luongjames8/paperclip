@@ -1842,6 +1842,12 @@ function buildResolvedInteractionContinuationWakeup(input: ResolvedInteractionCo
         interactionStatus: input.interaction.status,
         sourceCommentId: input.interaction.sourceCommentId ?? null,
         sourceRunId: input.interaction.sourceRunId ?? null,
+        // The comment that RESOLVED this interaction (e.g. the operator's superseding
+        // "redo it"), distinct from sourceCommentId above (the comment that created the
+        // original card). heartbeat.enrichWakeContextSnapshot derives
+        // PAPERCLIP_WAKE_COMMENT_ID from payload.commentId — without this the adapter never
+        // sees the comment that actually triggered the wake (codex P2).
+        ...(interactionResult?.commentId ? { commentId: interactionResult.commentId } : {}),
         ...(planReviewInteraction ? { planReviewInteraction } : {}),
         ...(checkboxSelection ? { checkboxSelection } : {}),
         mutation: "interaction",
@@ -1856,6 +1862,9 @@ function buildResolvedInteractionContinuationWakeup(input: ResolvedInteractionCo
         interactionStatus: input.interaction.status,
         sourceCommentId: input.interaction.sourceCommentId ?? null,
         sourceRunId: input.interaction.sourceRunId ?? null,
+        ...(interactionResult?.commentId
+          ? { commentId: interactionResult.commentId, wakeCommentId: interactionResult.commentId }
+          : {}),
         ...(planReviewInteraction ? { planReviewInteraction } : {}),
         ...(checkboxSelection ? { checkboxSelection } : {}),
         wakeReason: "issue_commented",
@@ -8033,13 +8042,6 @@ export function issueRoutes(
           });
         }
 
-        // Interaction-specific wake (richer context: interactionId/kind/result) wins the
-        // per-agent dedupe over the generic issue_commented wake added above — this route's
-        // addWakeup (see above) is last-write-wins per agent+issue key.
-        for (const { agentId, wakeup } of commentSupersededWakeups) {
-          addWakeup(agentId, wakeup);
-        }
-
         let mentionedIds: string[] = [];
         try {
           mentionedIds = await svc.findMentionedAgents(issue.companyId, commentBody);
@@ -8065,6 +8067,14 @@ export function issueRoutes(
               source: "comment.mention",
             },
           });
+        }
+
+        // Interaction-specific wake (richer context: interactionId/kind/result) must be added
+        // LAST — this route's addWakeup (see above) is last-write-wins per agent+issue key, and
+        // if the superseding comment also @mentions the assignee, the generic mention wake above
+        // must not clobber the interaction context (codex P2).
+        for (const { agentId, wakeup } of commentSupersededWakeups) {
+          addWakeup(agentId, wakeup);
         }
       }
 
