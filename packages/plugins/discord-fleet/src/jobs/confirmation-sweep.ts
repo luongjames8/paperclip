@@ -308,6 +308,20 @@ async function postCarouselBatch(
       ctx, client, channelId, company.companyId, issue.id, interaction.id, issueUrl, existing,
     );
     if (staleAnchors.length) record.staleAnchors = staleAnchors;
+    // PERSIST BEFORE POST (codex P2 on PR #34): `record` already has no
+    // current-anchor pointer (the fresh-record branch of the ternary above
+    // never copies existing.anchorMessageId/trailerMessageId/
+    // lastRenderedStatus) — the same "retired, no live pointer" shape the
+    // deleted sentinel path used. Writing it NOW, before the header post
+    // below can fail, closes the window where a failed post would leave
+    // state[interaction.id] still pointing at the just-retired (now
+    // Discord-superseded) anchor as "awaiting": reconcileResolvedCarouselAnchors
+    // reads exactly that persisted pointer, and would repaint the retired
+    // old-generation card with a later terminal decision (accept/reject/
+    // expire) instead of leaving it superseded. A subsequent header-post
+    // retry sees this same artifactHash already persisted (hashChanged
+    // becomes false), so it never re-retires — it just resumes posting.
+    state[interaction.id] = { ...record };
   }
 
   if (!record.headerPosted) {

@@ -2319,6 +2319,63 @@ describe("runConfirmationSweep — a KNOWN carousel interaction never falls to t
     expect(trailerCalls).toHaveLength(1);
   });
 
+  it("codex P2: knownCarousel degrade render where the header post FAILS → persisted state has NO live/awaiting pointer to the just-retired old anchor (a later resolve can't repaint the stale card)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel, postToChannel } = await import("../src/discord/rest.js");
+    (postToChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("simulated Discord outage — header post"));
+
+    const harness = createTestHarness({ manifest });
+    const oldMarkdown = buildBatch([2, 2]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 2,
+          totalSections: 2,
+          artifactHash: sha256(oldMarkdown.trim()),
+          headerPosted: true,
+          trailerPosted: true,
+          anchorMessageId: "old-anchor-id",
+          trailerMessageId: "old-anchor-id",
+          anchorChannelId: "ch-carousel",
+          lastRenderedStatus: "awaiting",
+        },
+      },
+    );
+
+    const brokenMarkdown = "Plain prose revision — header post about to fail.";
+    const interaction = makeInteraction({ payload: { detailsMarkdown: brokenMarkdown } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // Old anchor WAS retired on Discord (superseded)…
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    expect((editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0][2]).toBe("old-anchor-id");
+
+    // …and — the fix under test — persisted state reflects that BEFORE the
+    // header post failure: no live pointer at the retired anchor, headerPosted
+    // is false (the post genuinely failed and stays retryable).
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].anchorMessageId).toBeUndefined();
+    expect(state["int-1"].trailerMessageId).toBeUndefined();
+    expect(state["int-1"].lastRenderedStatus).toBeUndefined();
+    expect(state["int-1"].headerPosted).toBe(false);
+    expect(state["int-1"].artifactHash).toBe(sha256(brokenMarkdown));
+
+    // The actual regression this guards: if the interaction resolves
+    // (accepted here) BEFORE the header retry succeeds, reconcileResolved-
+    // CarouselAnchors must NEVER repaint the already-retired old-anchor-id
+    // card with the terminal decision — it has no live pointer to find.
+    (editMessageInChannel as ReturnType<typeof vi.fn>).mockClear();
+    const resolvedInteraction = makeInteraction({ status: "accepted", payload: { detailsMarkdown: brokenMarkdown } });
+    const paperclip2 = makePaperclip([makeIssue()], [resolvedInteraction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip2);
+    expect(editMessageInChannel).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), "old-anchor-id", expect.anything());
+  });
+
   it("an UNFLAGGED sibling rule matching the same issue does NOT retire the anchor a carouselBatch-flagged rule owns (rule-scoped shape vs interaction-scoped state)", async () => {
     const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
     const { editMessageInChannel } = await import("../src/discord/rest.js");
