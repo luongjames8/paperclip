@@ -1000,22 +1000,39 @@ export async function runConfirmationSweep(
           // buttonless carousel cards). `rule.carouselBatch` alone used to
           // gate the degrade-with-buttons render — an interaction that had
           // ALREADY been rendered as a real carousel (structured or legacy
-          // match on a prior tick, proven by a non-sentinel carouselState
-          // record) but whose matching rule was never flagged would, on a
-          // revision that broke BOTH detectors, fall straight through to the
-          // "generic path" below, which posts a single first-image embed with
-          // NO components — permanently, since every later tick just re-hits
-          // the same 24h-throttled buttonless render. `knownCarousel` makes
-          // that impossible: an interaction this sweep has EVER confirmed is
-          // a carousel (real content once posted under it, not the ""
-          // shape-loss sentinel) always gets the degrade-with-buttons render
-          // from here on, independent of the rule flag or this tick's parse
-          // outcome. `postUnstructuredCarouselDegrade` → `postCarouselBatch`
-          // already retires the outgoing generation's anchor via its own
+          // match on a prior tick, proven by ANY carouselState record —
+          // including the "" shape-loss sentinel some already-affected
+          // production interactions carry, see below) but whose matching
+          // rule was never flagged would, on a revision that broke BOTH
+          // detectors, fall straight through to the "generic path" below,
+          // which posts a single first-image embed with NO components —
+          // permanently, since every later tick just re-hits the same
+          // 24h-throttled buttonless render. `knownCarousel` makes that
+          // impossible: an interaction this sweep has EVER confirmed is a
+          // carousel always gets the degrade-with-buttons render from here
+          // on, independent of the rule flag or this tick's parse outcome.
+          // `postUnstructuredCarouselDegrade` → `postCarouselBatch` already
+          // retires the outgoing generation's anchor via its own
           // hashChanged handling (the old real hash → this tick's degrade
           // hash), so no separate manual retirement step is needed here.
+          //
+          // RECOVER SENTINEL RECORDS TOO (codex P1): the pre-fix "CAROUSEL-
+          // SHAPE LOSS" code (deleted above) used to persist a record with
+          // artifactHash:"" for exactly this situation — a known carousel
+          // whose unflagged rule made it fall to the generic path. Those
+          // records already exist in production state. Gating knownCarousel
+          // on `artifactHash !== ""` would treat every ALREADY-affected
+          // interaction as NOT known, so it would keep reposting the
+          // buttonless card forever even after this fix ships — the sentinel
+          // record IS carousel proof (nothing else ever writes it), so a
+          // bare `Boolean(priorRecord)` recovers it on the very next sweep.
+          // No extra "don't double-retire" guard is needed: the sentinel
+          // record carries no anchorMessageId/trailerMessageId (the old code
+          // retired the real anchor BEFORE writing the sentinel), so
+          // retireCurrentAnchor's own `if (currentId && ...)` check inside
+          // postCarouselBatch's hashChanged branch already no-ops here.
           const priorRecord = carouselState[interaction.id];
-          const knownCarousel = Boolean(priorRecord && priorRecord.artifactHash !== "");
+          const knownCarousel = Boolean(priorRecord);
 
           if (rule.carouselBatch || knownCarousel) {
             await postUnstructuredCarouselDegrade(ctx, client, rule.channelId, company, issue, interaction, detailsMarkdown, carouselState, now);

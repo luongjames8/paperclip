@@ -108,7 +108,12 @@ function ruleConfig(flag: RuleFlagId): DiscordFleetConfig["confirmationSweep"] {
 // carouselState record — this IS "has prior carouselState" AND "v2
 // supersedes v1" in one: v1 was a genuinely valid legacy post, v2 is the
 // matrix cell's artifact under test) ──────────────────────────────────────
-type PriorStateId = "fresh" | "revision";
+// codex P1 (PR #34 follow-up): a THIRD prior-state value, "sentinel" — the
+// exact artifactHash:"" shape the pre-fix "CAROUSEL-SHAPE LOSS" code left in
+// PRODUCTION state for every already-affected interaction. Recovering these
+// (not just future non-sentinel records) is the whole point of that fix; see
+// seedSentinelRecord below.
+type PriorStateId = "fresh" | "revision" | "sentinel";
 const V1_MARKDOWN = "**1. legacy-seed (Mon)**\n![s](https://r2.example.com/seed/1.jpg)\n\nSeed caption.\n";
 function seedPriorRecord(harness: ReturnType<typeof createTestHarness>) {
   return harness.ctx.state.set(
@@ -125,6 +130,26 @@ function seedPriorRecord(harness: ReturnType<typeof createTestHarness>) {
         anchorMessageId: "v1-anchor",
         anchorChannelId: "ch-carousel",
         lastRenderedStatus: "awaiting",
+        lastSeenUpdatedAt: "2020-01-01T00:00:00.000Z",
+      },
+    },
+  );
+}
+// The REALISTIC sentinel shape: no anchorMessageId/trailerMessageId at all —
+// the deleted shape-loss code always retired the real anchor BEFORE writing
+// this record, so recovery must never attempt a spurious/duplicate retirement
+// against a nonexistent pointer (codex P1's explicit second requirement).
+function seedSentinelRecord(harness: ReturnType<typeof createTestHarness>) {
+  return harness.ctx.state.set(
+    { scopeKind: "company", scopeId: "c1", stateKey: "carousel-batch-sweep-posted" },
+    {
+      "int-1": {
+        postedAt: new Date().toISOString(),
+        sectionsPosted: 0,
+        totalSections: 0,
+        artifactHash: "",
+        headerPosted: false,
+        trailerPosted: false,
         lastSeenUpdatedAt: "2020-01-01T00:00:00.000Z",
       },
     },
@@ -242,6 +267,7 @@ function expectButtons(shape: ShapeDef, ruleFlag: RuleFlagId, priorState: PriorS
   if (shape.structurallyParseable) return true;
   if (ruleFlag === "true") return true;
   if (priorState === "revision") return true; // PR #34 fix
+  if (priorState === "sentinel") return true; // codex P1 fix: sentinel recovery
   return false; // KNOWN GAP: fresh + unflagged + unparseable shape
 }
 
@@ -254,6 +280,7 @@ interface CellResult {
   elisionMarkerCounts: number[];
   oldAnchorSuperseded: boolean | "n/a";
   newAnchorDiffersFromOld: boolean | "n/a";
+  editCallCount: number;
 }
 
 async function runCell(shape: ShapeDef, ruleFlag: RuleFlagId, priorState: PriorStateId): Promise<CellResult> {
@@ -263,6 +290,7 @@ async function runCell(shape: ShapeDef, ruleFlag: RuleFlagId, priorState: PriorS
 
   const harness = createTestHarness({ manifest });
   if (priorState === "revision") await seedPriorRecord(harness);
+  if (priorState === "sentinel") await seedSentinelRecord(harness);
 
   const payload: Record<string, unknown> = { detailsMarkdown: shape.detailsMarkdown };
   if (shape.carouselBatchPayload) payload.carouselBatch = shape.carouselBatchPayload;
@@ -311,11 +339,12 @@ async function runCell(shape: ShapeDef, ruleFlag: RuleFlagId, priorState: PriorS
     elisionMarkerCounts,
     oldAnchorSuperseded,
     newAnchorDiffersFromOld,
+    editCallCount: editCalls.length,
   };
 }
 
 const RULE_FLAGS: RuleFlagId[] = ["true", "false", "absent"];
-const PRIOR_STATES: PriorStateId[] = ["fresh", "revision"];
+const PRIOR_STATES: PriorStateId[] = ["fresh", "revision", "sentinel"];
 
 describe("STRESS MATRIX — carousel confirmation-card seam (heading-drift x rule-flag x prior-state)", () => {
   for (const shape of shapes) {
@@ -336,11 +365,19 @@ describe("STRESS MATRIX — carousel confirmation-card seam (heading-drift x rul
           }
 
           // INV-5: routing never sends a KNOWN-carousel interaction (prior
-          // state = revision) to the buttonless generic path — this holds
-          // for EVERY shape/flag once there's a real prior record (the
-          // PR #34 fix), so it's unconditionally true for all revision cells.
-          if (priorState === "revision") {
+          // state = revision OR sentinel) to the buttonless generic path —
+          // this holds for EVERY shape/flag once there's a prior record of
+          // EITHER kind (PR #34 + codex P1's sentinel-recovery fix), so it's
+          // unconditionally true for all revision/sentinel cells.
+          if (priorState === "revision" || priorState === "sentinel") {
             expect(r.genericPathFired).toBe(false);
+          }
+          // codex P1's second requirement: recovering a sentinel record must
+          // never fire a spurious/duplicate retirement — this seed carries NO
+          // anchorMessageId/trailerMessageId at all (the realistic shape the
+          // deleted shape-loss code wrote), so there is nothing to retire.
+          if (priorState === "sentinel") {
+            expect(r.editCallCount).toBe(0);
           }
           // For a KNOWN GAP cell (fresh, unflagged, unparseable), the
           // generic path is exactly what DOES fire — document it, don't

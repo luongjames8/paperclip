@@ -2217,9 +2217,20 @@ describe("runConfirmationSweep — a KNOWN carousel interaction never falls to t
     expect(trailerCalls).toHaveLength(1);
   });
 
-  it("the '' sentinel gates re-entry: a shape-lost record does NOT re-fire retirement on later generic-path ticks (even with a zombie anchor pointer)", async () => {
+  // ─── codex P1 on PR #34: sentinel (artifactHash:"") records are RECOVERED,
+  // not permanently abandoned. The pre-fix "CAROUSEL-SHAPE LOSS" code wrote
+  // this exact sentinel shape into PRODUCTION state for every already-
+  // affected interaction; treating it as "not known" would leave those
+  // interactions reposting the buttonless generic card forever even after
+  // this fix ships. This test's premise changed accordingly: a sentinel
+  // record is now recovered on the very next sweep (fresh degrade-with-
+  // buttons card), and a leftover anchor pointer on it — zombie or real —
+  // gets a best-effort supersede attempt rather than being silently ignored
+  // (Discord's "Unknown Message" 10008 is already tolerated gracefully by
+  // supersedeAnchorMessage for a truly-stale/corrupted id).
+  it("a sentinel ('') shape-loss record is RECOVERED on the next sweep — its leftover anchor pointer gets a best-effort supersede, and a fresh degrade-with-buttons card posts", async () => {
     const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
-    const { editMessageInChannel } = await import("../src/discord/rest.js");
+    const { editMessageInChannel, postEmbedsToChannel, postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
 
     const harness = createTestHarness({ manifest });
     await harness.ctx.state.set(
@@ -2232,8 +2243,10 @@ describe("runConfirmationSweep — a KNOWN carousel interaction never falls to t
           artifactHash: "",
           headerPosted: false,
           trailerPosted: false,
-          // Zombie pointer (corrupted/hand-edited state) — the sentinel must
-          // still gate the block; retirement ran at shape-loss time.
+          // Zombie pointer (corrupted/hand-edited state, or a real leftover
+          // from before this fix shipped) — recovery still attempts a
+          // best-effort supersede of it rather than assuming it's safe to
+          // leave alone.
           anchorMessageId: "zombie-anchor-id",
         },
       },
@@ -2243,7 +2256,67 @@ describe("runConfirmationSweep — a KNOWN carousel interaction never falls to t
     const paperclip = makePaperclip([makeIssue()], [interaction]);
     await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
 
+    // Best-effort supersede of the leftover pointer…
+    expect(editMessageInChannel).toHaveBeenCalledTimes(1);
+    expect((editMessageInChannel as ReturnType<typeof vi.fn>).mock.calls[0][2]).toBe("zombie-anchor-id");
+
+    // …NEVER the buttonless generic path…
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+
+    // …a fresh degrade-with-buttons card posts instead.
+    const trailerCalls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, , , components]) => components !== undefined,
+    );
+    expect(trailerCalls).toHaveLength(1);
+    const customIds = (trailerCalls[0][3][0].components as Array<{ custom_id: string }>).map((c) => c.custom_id);
+    expect(customIds.some((id) => id.startsWith("car-ok:"))).toBe(true);
+    expect(customIds.some((id) => id.startsWith("car-no:"))).toBe(true);
+
+    const textCalls = (postToChannel as ReturnType<typeof vi.fn>).mock.calls;
+    expect(textCalls.some(([, , msg]) => (msg as string).includes("unstructured artifact"))).toBe(true);
+
+    const state = (await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY,
+    })) as Record<string, any>;
+    expect(state["int-1"].artifactHash).not.toBe("");
+    expect(state["int-1"].headerPosted).toBe(true);
+    expect(state["int-1"].trailerPosted).toBe(true);
+  });
+
+  it("a REALISTIC sentinel record (no leftover anchor pointer at all — the normal shape the old code wrote) recovers WITHOUT any spurious retirement call (codex P1: avoid a duplicate retirement when there is no current anchor)", async () => {
+    const { runConfirmationSweep, CAROUSEL_BATCH_SWEEP_STATE_KEY } = await import("../src/jobs/confirmation-sweep.js");
+    const { editMessageInChannel, postEmbedsToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: "c1", stateKey: CAROUSEL_BATCH_SWEEP_STATE_KEY },
+      {
+        "int-1": {
+          postedAt: new Date().toISOString(),
+          sectionsPosted: 0,
+          totalSections: 0,
+          artifactHash: "",
+          headerPosted: false,
+          trailerPosted: false,
+          // No anchorMessageId/trailerMessageId at all — the REAL shape the
+          // deleted shape-loss code wrote (it always retired the true
+          // anchor BEFORE persisting the sentinel).
+        },
+      },
+    );
+
+    const interaction = makeInteraction({ payload: { detailsMarkdown: "Still plain prose, still not a carousel." } });
+    const paperclip = makePaperclip([makeIssue()], [interaction]);
+    await runConfirmationSweep(harness.ctx, () => ({} as Client), CONFIG, async () => paperclip);
+
+    // Nothing to retire — no spurious/duplicate edit call.
     expect(editMessageInChannel).not.toHaveBeenCalled();
+
+    // Recovery still posts the fresh degrade-with-buttons card.
+    const trailerCalls = (postEmbedsToChannel as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, , , components]) => components !== undefined,
+    );
+    expect(trailerCalls).toHaveLength(1);
   });
 
   it("an UNFLAGGED sibling rule matching the same issue does NOT retire the anchor a carouselBatch-flagged rule owns (rule-scoped shape vs interaction-scoped state)", async () => {
