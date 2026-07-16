@@ -210,6 +210,25 @@ function makeIssue(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// A carousel/decision-gate request_confirmation the operator superseded by commenting
+// ("redo it") before clicking Accept/Reject — mirrors the shape
+// expireRequestConfirmationsSupersededByComment returns in production.
+function makeSupersededByCommentInteraction(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "interaction-superseded-1",
+    companyId: "company-1",
+    issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    kind: "request_confirmation",
+    status: "expired",
+    continuationPolicy: "wake_assignee",
+    sourceCommentId: "prior-card-comment",
+    sourceRunId: "run-that-posted-the-card",
+    payload: { acceptLabel: "Publish batch", rejectLabel: "Reject" },
+    result: { version: 1, outcome: "superseded_by_comment", commentId: "comment-superseding" },
+    ...overrides,
+  };
+}
+
 describe("issue update comment wakeups", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -223,6 +242,7 @@ describe("issue update comment wakeups", () => {
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
     mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
+    mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([]);
   });
 
   it("includes the new comment in assignment wakes from issue updates", async () => {
@@ -468,6 +488,61 @@ describe("issue update comment wakeups", () => {
     );
   });
 
+  it("wakes the assignee with interaction context when a comment supersedes a pending carousel confirmation (PATCH)", async () => {
+    const existing = makeIssue({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      assigneeAgentId: ASSIGNEE_AGENT_ID,
+      assigneeUserId: null,
+      status: "in_progress",
+    });
+    const updated = { ...existing };
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockResolvedValue(updated);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-superseding",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "redo it",
+    });
+    mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([
+      makeSupersededByCommentInteraction({ issueId: existing.id }),
+    ]);
+
+    const res = await request(await createApp())
+      .patch(`/api/issues/${existing.id}`)
+      .send({
+        comment: "redo it",
+      });
+
+    expect(res.status).toBe(200);
+    // The interaction-specific continuation must win the per-agent wake — not fan out into
+    // a second heartbeat run alongside the generic issue_commented wake.
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        source: "automation",
+        reason: "issue_commented",
+        payload: expect.objectContaining({
+          issueId: existing.id,
+          interactionId: "interaction-superseded-1",
+          interactionKind: "request_confirmation",
+          interactionStatus: "expired",
+          sourceCommentId: "prior-card-comment",
+          mutation: "interaction",
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: existing.id,
+          interactionId: "interaction-superseded-1",
+          interactionKind: "request_confirmation",
+          interactionStatus: "expired",
+          wakeReason: "issue_commented",
+          source: "issue.comment.superseded",
+        }),
+      }),
+    );
+  });
+
   it("wakes the assignee on top-level board issue comments", async () => {
     const existing = makeIssue({
       assigneeAgentId: ASSIGNEE_AGENT_ID,
@@ -507,6 +582,61 @@ describe("issue update comment wakeups", () => {
           wakeCommentId: "comment-3",
           wakeReason: "issue_commented",
           source: "issue.comment",
+        }),
+      }),
+    );
+  });
+
+  it("wakes the assignee with interaction context when a top-level comment supersedes a pending carousel confirmation (POST)", async () => {
+    const existing = makeIssue({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      assigneeAgentId: ASSIGNEE_AGENT_ID,
+      assigneeUserId: null,
+      status: "in_progress",
+    });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-superseding-2",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "redo it",
+    });
+    mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([
+      makeSupersededByCommentInteraction({
+        id: "interaction-superseded-2",
+        issueId: existing.id,
+        result: { version: 1, outcome: "superseded_by_comment", commentId: "comment-superseding-2" },
+      }),
+    ]);
+
+    const res = await request(await createApp())
+      .post(`/api/issues/${existing.id}/comments`)
+      .send({
+        body: "redo it",
+      });
+
+    expect(res.status).toBe(201);
+    await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1));
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        source: "automation",
+        reason: "issue_commented",
+        payload: expect.objectContaining({
+          issueId: existing.id,
+          interactionId: "interaction-superseded-2",
+          interactionKind: "request_confirmation",
+          interactionStatus: "expired",
+          sourceCommentId: "prior-card-comment",
+          mutation: "interaction",
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: existing.id,
+          interactionId: "interaction-superseded-2",
+          interactionKind: "request_confirmation",
+          interactionStatus: "expired",
+          wakeReason: "issue_commented",
+          source: "issue.comment.superseded",
         }),
       }),
     );

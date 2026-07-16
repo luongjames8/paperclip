@@ -526,6 +526,15 @@ function readConfirmationResultForWake(result: unknown) {
   };
 }
 
+// A user comment superseded a pending request_confirmation/request_checkbox_confirmation/
+// ask_user_questions before it was answered — as opposed to a silent stale-target or
+// background-sweep expiry. This is the one "expired" shape that still represents a live
+// operator signal the assignee needs to react to (see queueResolvedInteractionContinuationWakeup).
+function isInteractionResultSupersededByComment(result: unknown): boolean {
+  const parsed = readObject(result);
+  return parsed.outcome === "superseded_by_comment" || parsed.expirationReason === "superseded_by_comment";
+}
+
 function hasIssueWorkspaceAuditChange(previous: Record<string, unknown>) {
   return Object.keys(previous).some((key) => ISSUE_WORKSPACE_AUDIT_FIELDS.has(key));
 }
@@ -1764,8 +1773,7 @@ function isAssigneeSelfCommentOnTerminalIssue(input: {
   return input.actorId === input.assigneeAgentId;
 }
 
-function queueResolvedInteractionContinuationWakeup(input: {
-  heartbeat: ReturnType<typeof heartbeatService>;
+type ResolvedInteractionContinuationInput = {
   issue: { id: string; assigneeAgentId: string | null; status: string };
   interaction: {
     id: string;
@@ -1781,17 +1789,29 @@ function queueResolvedInteractionContinuationWakeup(input: {
   source: string;
   forceFreshSession?: boolean;
   workspaceRefreshReason?: string | null;
-}) {
+};
+
+// Shared payload builder so both the direct accept/reject/respond/cancel routes and the
+// comment-triggered supersede-expiry paths produce the identical wake_assignee continuation
+// wakeup — callers that need to merge it with other same-request wakeups (see the "merge all
+// wakeups" dedupe map in the comment routes) can use the returned { agentId, wakeup } directly
+// instead of going through queueResolvedInteractionContinuationWakeup's own heartbeat.wakeup call.
+function buildResolvedInteractionContinuationWakeup(input: ResolvedInteractionContinuationInput) {
   if (
     input.interaction.continuationPolicy !== "wake_assignee"
     && input.interaction.continuationPolicy !== "wake_assignee_on_accept"
-  ) return;
+  ) return null;
   if (
     input.interaction.continuationPolicy === "wake_assignee_on_accept"
     && input.interaction.status !== "accepted"
-  ) return;
-  if (input.interaction.status === "expired") return;
-  if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status)) return;
+  ) return null;
+  // A silent stale-target/background-sweep expiry means the interaction never got a real
+  // resolution to continue from — but an expiry caused by the operator commenting IS a live
+  // signal (the operator just told the assignee something), so it still needs to wake.
+  if (input.interaction.status === "expired" && !isInteractionResultSupersededByComment(input.interaction.result)) {
+    return null;
+  }
+  if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status)) return null;
 
   const forceFreshSession = input.forceFreshSession === true;
   const workspaceRefreshReason = readNonEmptyString(input.workspaceRefreshReason);
@@ -1809,43 +1829,54 @@ function queueResolvedInteractionContinuationWakeup(input: {
           result: interactionResult,
         }
       : null;
-  void input.heartbeat.wakeup(input.issue.assigneeAgentId, {
-    source: "automation",
-    triggerDetail: "system",
-    reason: "issue_commented",
-    payload: {
-      issueId: input.issue.id,
-      interactionId: input.interaction.id,
-      interactionKind: input.interaction.kind,
-      interactionStatus: input.interaction.status,
-      sourceCommentId: input.interaction.sourceCommentId ?? null,
-      sourceRunId: input.interaction.sourceRunId ?? null,
-      ...(planReviewInteraction ? { planReviewInteraction } : {}),
-      ...(checkboxSelection ? { checkboxSelection } : {}),
-      mutation: "interaction",
+  return {
+    agentId: input.issue.assigneeAgentId,
+    wakeup: {
+      source: "automation" as const,
+      triggerDetail: "system" as const,
+      reason: "issue_commented",
+      payload: {
+        issueId: input.issue.id,
+        interactionId: input.interaction.id,
+        interactionKind: input.interaction.kind,
+        interactionStatus: input.interaction.status,
+        sourceCommentId: input.interaction.sourceCommentId ?? null,
+        sourceRunId: input.interaction.sourceRunId ?? null,
+        ...(planReviewInteraction ? { planReviewInteraction } : {}),
+        ...(checkboxSelection ? { checkboxSelection } : {}),
+        mutation: "interaction",
+      },
+      requestedByActorType: input.actor.actorType,
+      requestedByActorId: input.actor.actorId,
+      contextSnapshot: {
+        issueId: input.issue.id,
+        taskId: input.issue.id,
+        interactionId: input.interaction.id,
+        interactionKind: input.interaction.kind,
+        interactionStatus: input.interaction.status,
+        sourceCommentId: input.interaction.sourceCommentId ?? null,
+        sourceRunId: input.interaction.sourceRunId ?? null,
+        ...(planReviewInteraction ? { planReviewInteraction } : {}),
+        ...(checkboxSelection ? { checkboxSelection } : {}),
+        wakeReason: "issue_commented",
+        source: input.source,
+        ...(forceFreshSession ? { forceFreshSession: true } : {}),
+        ...(workspaceRefreshReason ? { workspaceRefreshReason } : {}),
+      },
     },
-    requestedByActorType: input.actor.actorType,
-    requestedByActorId: input.actor.actorId,
-    contextSnapshot: {
-      issueId: input.issue.id,
-      taskId: input.issue.id,
-      interactionId: input.interaction.id,
-      interactionKind: input.interaction.kind,
-      interactionStatus: input.interaction.status,
-      sourceCommentId: input.interaction.sourceCommentId ?? null,
-      sourceRunId: input.interaction.sourceRunId ?? null,
-      ...(planReviewInteraction ? { planReviewInteraction } : {}),
-      ...(checkboxSelection ? { checkboxSelection } : {}),
-      wakeReason: "issue_commented",
-      source: input.source,
-      ...(forceFreshSession ? { forceFreshSession: true } : {}),
-      ...(workspaceRefreshReason ? { workspaceRefreshReason } : {}),
-    },
-  }).catch((err) => logger.warn({
+  };
+}
+
+function queueResolvedInteractionContinuationWakeup(
+  input: ResolvedInteractionContinuationInput & { heartbeat: ReturnType<typeof heartbeatService> },
+) {
+  const built = buildResolvedInteractionContinuationWakeup(input);
+  if (!built) return;
+  void input.heartbeat.wakeup(built.agentId, built.wakeup).catch((err) => logger.warn({
     err,
     issueId: input.issue.id,
     interactionId: input.interaction.id,
-    agentId: input.issue.assigneeAgentId,
+    agentId: built.agentId,
   }, "failed to wake assignee on issue interaction resolution"));
 }
 
@@ -7732,6 +7763,7 @@ export function issueRoutes(
     }
 
     let comment = null;
+    let commentSupersededWakeups: NonNullable<ReturnType<typeof buildResolvedInteractionContinuationWakeup>>[] = [];
     if (commentBody) {
       const commentReferenceSummaryBefore = updateReferenceSummaryAfter
         ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
@@ -7805,6 +7837,14 @@ export function issueRoutes(
         actor,
         source: "issue.comment",
       });
+      commentSupersededWakeups = expiredInteractions
+        .map((expired) => buildResolvedInteractionContinuationWakeup({
+          issue,
+          interaction: expired,
+          actor,
+          source: "issue.comment.superseded",
+        }))
+        .filter((built): built is NonNullable<typeof built> => built !== null);
 
     } else if (updateReferenceSummaryAfter) {
       issueResponse = {
@@ -7991,6 +8031,13 @@ export function issueRoutes(
               ...(interruptedRunId ? { interruptedRunId } : {}),
             },
           });
+        }
+
+        // Interaction-specific wake (richer context: interactionId/kind/result) wins the
+        // per-agent dedupe over the generic issue_commented wake added above — this route's
+        // addWakeup (see above) is last-write-wins per agent+issue key.
+        for (const { agentId, wakeup } of commentSupersededWakeups) {
+          addWakeup(agentId, wakeup);
         }
 
         let mentionedIds: string[] = [];
@@ -9432,6 +9479,19 @@ export function issueRoutes(
 
       if (commentDecisionStageWakeup) {
         addWakeup(commentDecisionStageWakeup.agentId, commentDecisionStageWakeup.wakeup);
+      }
+
+      // Interaction-specific wake (richer context: interactionId/kind/result) must be added
+      // before the generic issue_commented wake below — this addWakeup is first-write-wins
+      // per agent+issue key, so the richer payload needs to claim the key first.
+      for (const expired of expiredInteractions) {
+        const built = buildResolvedInteractionContinuationWakeup({
+          issue: currentIssue,
+          interaction: expired,
+          actor,
+          source: "issue.comment.superseded",
+        });
+        if (built) addWakeup(built.agentId, built.wakeup);
       }
 
       const assigneeId = currentIssue.assigneeAgentId;
