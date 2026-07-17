@@ -7364,6 +7364,8 @@ export function issueRoutes(
       commentBody,
       reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
       monitorExplicitlyUpdated: req.body.executionPolicy !== undefined && monitorChanged,
+      expectedExecutionStageId:
+        typeof req.body.expectedExecutionStageId === "string" ? req.body.expectedExecutionStageId : undefined,
     });
     const decisionId = transition.decision ? randomUUID() : null;
     if (decisionId) {

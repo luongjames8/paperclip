@@ -11,7 +11,7 @@ import type {
   IssueMonitorScheduledBy,
 } from "@paperclipai/shared";
 import { issueExecutionPolicySchema, issueExecutionStateSchema } from "@paperclipai/shared";
-import { unprocessable } from "../errors.js";
+import { conflict, unprocessable } from "../errors.js";
 
 type AssigneeLike = {
   assigneeAgentId?: string | null;
@@ -50,6 +50,12 @@ type TransitionInput = {
   commentBody?: string | null;
   reviewRequest?: IssueExecutionState["reviewRequest"] | null;
   monitorExplicitlyUpdated?: boolean;
+  // Compare-and-swap guard (fleet issue #631 / PR-0, codex P1): when present,
+  // the caller is asserting "I observed this stage as the current pending
+  // one and I'm deciding on THAT stage" (e.g. a Discord button's customId).
+  // Optional and unused by callers with no client-observed stage to assert
+  // against (e.g. the comment-driven auto-approval path).
+  expectedExecutionStageId?: string | null;
 };
 
 type TransitionResult = {
@@ -623,6 +629,24 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
   const effectiveReviewRequest = input.reviewRequest === undefined
     ? existingState?.reviewRequest ?? null
     : input.reviewRequest;
+
+  // Compare-and-swap guard (fleet issue #631 / PR-0, codex P1): evaluated
+  // FIRST, as a hard reject — never folded into the stageStateDrifted
+  // self-heal branch below, which is a DIFFERENT case (participant/assignee
+  // drift on the SAME still-current stage) and must never silently "heal" a
+  // request that named an already-superseded stage into approving whatever
+  // is now current. Runs before the participant-identity check too: if the
+  // named stage isn't even the live one, WHO is asking doesn't matter yet.
+  if (input.expectedExecutionStageId !== undefined && input.expectedExecutionStageId !== null) {
+    const stageStillPending =
+      existingState?.status === PENDING_STATUS &&
+      existingState.currentStageId === input.expectedExecutionStageId;
+    if (!stageStillPending) {
+      throw conflict(
+        "This execution stage is no longer pending — it may have already been decided, had changes requested, or been superseded by a later stage.",
+      );
+    }
+  }
 
   if (!input.policy) {
     if (existingState) {

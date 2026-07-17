@@ -374,7 +374,20 @@ export class PaperclipClient {
   // stage; any other status (typically "in_progress") with a comment
   // requests changes and returns the issue to its executor. The runtime
   // requires a non-empty comment on both outcomes (issue-execution-policy.ts).
-  async updateIssueStatus(issueId: string, status: string, comment: string): Promise<void> {
+  //
+  // expectedExecutionStageId (fleet issue #631 / PR-0, codex P1 round 3): a
+  // compare-and-swap guard the server enforces ATOMICALLY as part of this
+  // same request — pass the stageId the caller observed as pending (e.g. a
+  // Discord card's customId) and the server rejects with 409 if that stage
+  // is no longer the current one. Replaces an earlier client-side
+  // GET-then-PATCH pre-check, which left a round-trip race window this
+  // closes by construction.
+  async updateIssueStatus(
+    issueId: string,
+    status: string,
+    comment: string,
+    expectedExecutionStageId?: string,
+  ): Promise<void> {
     const url = `${this.baseUrl}/api/issues/${issueId}`;
     const res = await this.ctx.http.fetch(url, {
       method: "PATCH",
@@ -382,7 +395,7 @@ export class PaperclipClient {
         Authorization: `Bearer ${this.apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ status, comment }),
+      body: JSON.stringify({ status, comment, ...(expectedExecutionStageId ? { expectedExecutionStageId } : {}) }),
     });
     if (res.status >= 400) {
       const text = await res.text().catch(() => "");

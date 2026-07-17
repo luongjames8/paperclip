@@ -13,6 +13,7 @@ const mockIssueService = vi.hoisted(() => ({
   getRelationSummaries: vi.fn(),
   listWakeableBlockedDependents: vi.fn(),
   getWakeableParentAfterChildCompletion: vi.fn(),
+  getCurrentScheduledRetry: vi.fn(),
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({
@@ -40,8 +41,18 @@ const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
 })));
 const mockDbSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockDbSelectWhere })));
 const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })));
+// A completed decision (approve/changes-request) commits via db.transaction —
+// needed once a test drives a stage all the way to a recorded decision (the
+// expectedExecutionStageId compare-and-swap tests do). Mirrors
+// issue-comment-reopen-routes.test.ts's mockTx pattern.
+const mockTxInsertValues = vi.hoisted(() => vi.fn(async () => undefined));
+const mockTxInsert = vi.hoisted(() => vi.fn(() => ({ values: mockTxInsertValues })));
+const mockTx = vi.hoisted(() => ({
+  insert: mockTxInsert,
+}));
 const mockDb = vi.hoisted(() => ({
   select: mockDbSelect,
+  transaction: vi.fn(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx)),
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
@@ -188,6 +199,11 @@ describe("issue execution policy routes", () => {
     mockIssueThreadInteractionService.listForIssue.mockResolvedValue([]);
     mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([]);
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([]);
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-1", body: "", createdAt: new Date().toISOString() });
+    mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
+    mockTxInsertValues.mockResolvedValue(undefined);
+    mockTxInsert.mockImplementation(() => ({ values: mockTxInsertValues }));
+    mockDb.transaction.mockImplementation(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx));
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
     mockDbSelectWhere.mockImplementation(() => ({
@@ -460,6 +476,132 @@ describe("issue execution policy routes", () => {
     expect(mockPublishPluginDomainEvent).not.toHaveBeenCalledWith(
       expect.objectContaining({ eventType: "issue.execution_stage.pending" }),
     );
+  });
+
+  // fleet issue #631 / PR-0, codex P1 round 3 (treadmill / adversarial-seam-
+  // hardening pass): a Discord button's customId carries the stageId it was
+  // rendered for; expectedExecutionStageId lets the caller assert "resolve
+  // THIS stage" and closes the client GET-then-PATCH round-trip race a
+  // separate client-side pre-check could never fully close.
+  describe("expectedExecutionStageId compare-and-swap", () => {
+    const STAGE_ID = "11111111-1111-4111-8111-111111111111";
+    function pendingReviewIssue(overrides: Partial<Record<string, unknown>> = {}) {
+      const policy = normalizeIssueExecutionPolicy({
+        stages: [
+          { id: STAGE_ID, type: "review", participants: [{ type: "user", userId: "local-board" }] },
+        ],
+      })!;
+      return {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        companyId: "company-1",
+        status: "in_review",
+        assigneeAgentId: null,
+        assigneeUserId: "local-board",
+        createdByUserId: "local-board",
+        identifier: "PAP-1634",
+        title: "Stage CAS check",
+        executionPolicy: policy,
+        executionState: {
+          status: "pending",
+          currentStageId: STAGE_ID,
+          currentStageIndex: 0,
+          currentStageType: "review",
+          currentParticipant: { type: "user", userId: "local-board", agentId: null },
+          returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333", userId: null },
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+        },
+        ...overrides,
+      };
+    }
+
+    it("matching expectedExecutionStageId → approves normally", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalled();
+    });
+
+    it("mismatched expectedExecutionStageId → 409, no mutation applied", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({
+          status: "done",
+          comment: "Stale click",
+          expectedExecutionStageId: "99999999-9999-4999-8999-999999999999",
+        });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("stage in changes_requested (same stageId, executor hasn't resubmitted) → 409, no mutation", async () => {
+      const issue = pendingReviewIssue({
+        status: "in_progress",
+        assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+        assigneeUserId: null,
+        executionState: {
+          status: "changes_requested",
+          currentStageId: STAGE_ID,
+          currentStageIndex: 0,
+          currentStageType: "review",
+          currentParticipant: { type: "user", userId: "local-board", agentId: null },
+          returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333", userId: null },
+          completedStageIds: [],
+          lastDecisionId: "decision-1",
+          lastDecisionOutcome: "changes_requested",
+        },
+      });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Stale approve while changes are outstanding", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("absent expectedExecutionStageId (existing/non-Discord callers) → unaffected, behaves exactly as before", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via web UI, no stage token" });
+
+      expect(res.status).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalled();
+    });
   });
 
   it("allows an agent-authored in_review transition with a scheduled monitor", async () => {

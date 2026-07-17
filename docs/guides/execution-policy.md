@@ -245,6 +245,19 @@ PATCH /api/issues/{issueId}
 
 The runtime reassigns to the original executor automatically.
 
+### Compare-and-swap against a stale stage (optional)
+
+A client that rendered a decision UI for a *specific* stage (e.g. a Discord card) can pass `expectedExecutionStageId` alongside `status`/`comment`. The runtime rejects the request with `409 Conflict` if that stage is no longer the current pending one (already decided, changes requested, or superseded) — closing the race between "I observed this stage as pending" and "I'm submitting a decision on it" without a separate read-then-write round trip. Omit the field to keep the previous behavior (no stage check, e.g. for the web UI or any caller with no client-observed stage to assert against).
+
+```bash
+PATCH /api/issues/{issueId}
+{
+  "status": "done",
+  "comment": "Approved.",
+  "expectedExecutionStageId": "11111111-1111-4111-8111-111111111111"
+}
+```
+
 ## UI
 
 ### New Issue Dialog

@@ -43,8 +43,17 @@ function resolveUserMapping(company: CompanyConfig, discordUserId: string): User
   return company.userMappings?.find((m) => m.discordUserId === discordUserId);
 }
 
+// Staleness guard (fleet issue #631 / PR-0, hardened across codex rounds 1-3):
+// the customId's stageId rides along as expectedExecutionStageId on the PATCH
+// itself, and the SERVER enforces it atomically as part of the same request
+// that applies the transition (server/src/services/issue-execution-policy.ts)
+// — rejecting with 409 if the stage is no longer the current pending one.
+// An earlier version of this guard did a separate client-side GET-then-PATCH
+// pre-check; that left a round-trip race window (a double-click, or the same
+// participant resolving a stage in the gap between the check and the act)
+// that only a server-side compare-and-swap closes by construction.
 const STALE_STAGE_MESSAGE =
-  "This card is for a stage that's already been resolved or superseded by a later one — check Paperclip for the current state.";
+  "This card is for a stage that's already been resolved, had changes requested, or been superseded by a later one — check Paperclip for the current state.";
 
 // codex P2: unlike approvals (approval-button.ts), an executionPolicy stage
 // transition only advances when the request actor's identity EXACTLY matches
@@ -57,34 +66,17 @@ const STALE_STAGE_MESSAGE =
 const NO_PERSONAL_KEY_MESSAGE =
   "Your Discord mapping needs a personal boardApiKeySecretRef to act on execution-policy stages — the runtime checks exact participant identity, and the company-wide key would authenticate as a different Paperclip user. Ask an operator to configure one for you.";
 
-// Staleness guard (altitude review, PR-0): the engine's own authorization
-// (issue-execution-policy.ts) checks participant IDENTITY only, never
-// stageId — a participant assigned to two consecutive stages of the same
-// issue (e.g. the same person reviews then approves) could otherwise click a
-// stale, already-superseded card and silently resolve the CURRENT stage
-// instead of the one the card was about. Must run AFTER the interaction is
-// acked (deferUpdate/showModal already sent) — this is a real paperclip API
-// fetch, and Discord's 3s first-response window doesn't allow it before ack.
-//
-// status must be "pending", not just currentStageId matching (codex P2): a
-// changes-requested cycle returns to the SAME stageId once the executor
-// resubmits, so a card rendered for the ORIGINAL pending stage would
-// otherwise still read as "current" while the stage is actually back with
-// the executor (status: "changes_requested") — clicking Approve there resets
-// the stage to pending again rather than approving anything, while this
-// handler would still stamp the stale card "✅ Approved".
-async function isStageStillCurrent(
-  paperclip: PaperclipClient,
-  issueId: string,
-  stageId: string,
-): Promise<boolean> {
-  let issue;
-  try {
-    issue = await paperclip.getIssueById(issueId);
-  } catch {
-    return false;
+// Maps an updateIssueStatus failure to the message shown to the clicker. 409
+// is the server's compare-and-swap rejection (stale stage) — a DIFFERENT,
+// user-facing-friendlier message than the generic 422 "not your turn"/policy-
+// validation case, so the operator isn't left staring at a raw server string
+// for the one failure mode this handler specifically guards against.
+function describeUpdateIssueStatusError(err: unknown, verb: string): string {
+  if (err instanceof PaperclipApiError) {
+    if (err.status === 409) return STALE_STAGE_MESSAGE;
+    if (err.status === 422) return `Rejected by server: ${String(err).slice(0, 200)}`;
   }
-  return issue?.executionState?.status === "pending" && issue.executionState.currentStageId === stageId;
+  return `Failed to ${verb}: ${String(err).slice(0, 200)}`;
 }
 
 async function renderResolved(interaction: ButtonInteraction | ModalSubmitInteraction, label: string): Promise<void> {
@@ -104,10 +96,11 @@ async function renderResolved(interaction: ButtonInteraction | ModalSubmitIntera
   });
 }
 
-// Approve: PATCH {status:"done"}. isStageStillCurrent guards against a stale
-// card (see its doc comment above); the engine's participant-identity check
-// (issue-execution-policy.ts) is a SEPARATE, complementary authorization
-// layer — it decides whether THIS actor may act at all, not which stage.
+// Approve: PATCH {status:"done", expectedExecutionStageId}. The server's
+// compare-and-swap guard (see the STALE_STAGE_MESSAGE comment above) is a
+// SEPARATE, complementary check from the engine's participant-identity
+// authorization — one decides whether THIS actor may act at all, the other
+// whether the stage they're acting on is still the live one.
 export async function handleExecutionStageButton(
   ctx: PluginContext,
   interaction: ButtonInteraction,
@@ -138,9 +131,7 @@ export async function handleExecutionStageButton(
 
   // "Request changes" opens a modal to collect the required comment — showModal
   // MUST be the interaction's first response, before any deferUpdate/API call.
-  // The staleness check (isStageStillCurrent) is deferred to the modal SUBMIT,
-  // which gets its own fresh ack — mirrors carousel-confirmation-button.ts's
-  // reject flow exactly.
+  // Mirrors carousel-confirmation-button.ts's reject flow exactly.
   if (parsed.action === "changes") {
     const modal = new ModalBuilder()
       .setCustomId(`${EXECUTION_STAGE_CHANGES_MODAL_PREFIX}${parsed.issueId}:${parsed.stageId}`)
@@ -183,20 +174,12 @@ export async function handleExecutionStageButton(
   const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef);
   const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
 
-  const isCurrent = await isStageStillCurrent(paperclip, parsed.issueId, parsed.stageId);
-  if (!isCurrent) {
-    await interaction.followUp({ content: STALE_STAGE_MESSAGE, ephemeral: true });
-    return;
-  }
-
   const comment = `Approved via Discord by ${interaction.user.username}`;
   try {
-    await paperclip.updateIssueStatus(parsed.issueId, "done", comment);
+    await paperclip.updateIssueStatus(parsed.issueId, "done", comment, parsed.stageId);
   } catch (err) {
     ctx.logger.warn("execution-stage-button: approve API call failed", { issueId: parsed.issueId, err: String(err) });
-    const status = err instanceof PaperclipApiError ? err.status : undefined;
-    const prefix = status === 422 ? "Rejected by server: " : "Failed to approve: ";
-    await interaction.followUp({ content: `${prefix}${String(err).slice(0, 200)}`, ephemeral: true });
+    await interaction.followUp({ content: describeUpdateIssueStatusError(err, "approve"), ephemeral: true });
     return;
   }
 
@@ -246,19 +229,11 @@ export async function handleExecutionStageChangesModal(
   const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef);
   const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
 
-  const isCurrent = await isStageStillCurrent(paperclip, issueId, stageId);
-  if (!isCurrent) {
-    await interaction.followUp({ content: STALE_STAGE_MESSAGE, ephemeral: true });
-    return;
-  }
-
   try {
-    await paperclip.updateIssueStatus(issueId, "in_progress", note);
+    await paperclip.updateIssueStatus(issueId, "in_progress", note, stageId);
   } catch (err) {
     ctx.logger.warn("execution-stage-changes-modal: request-changes API call failed", { issueId, err: String(err) });
-    const status = err instanceof PaperclipApiError ? err.status : undefined;
-    const prefix = status === 422 ? "Rejected by server: " : "Failed to request changes: ";
-    await interaction.followUp({ content: `${prefix}${String(err).slice(0, 200)}`, ephemeral: true });
+    await interaction.followUp({ content: describeUpdateIssueStatusError(err, "request changes"), ephemeral: true });
     return;
   }
 
