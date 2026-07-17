@@ -17,17 +17,13 @@ export type IssueLivenessState =
  * open recovery before it is treated as a stale orphan rather than deliberate parking
  * (doc/execution-semantics.md, "Agent-assigned backlog").
  *
- * Must stay below the auto-recovery lookback window (default 24h,
- * DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS in
- * packages/shared/src/types/instance.ts) — reconcileIssueGraphLiveness only acts on
- * findings whose dependency-path issues were updated within that window
- * (service.ts, isLivenessFindingInsideAutoRecoveryLookback), and this finding's sole
- * dependency-path entry is the stale issue itself, so an at-or-above threshold would
- * make every finding go stale-and-out-of-window the instant it is raised. Known edge
- * case: an operator-configured lookback below this threshold (floor is 1h,
- * MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS) reintroduces the same
- * silent-suppression failure for this state specifically — not auto-defended against,
- * since fixing it needs the classifier to know the configured lookback.
+ * This state's sole dependency-path entry is the stale issue itself, which is
+ * inherently frozen once orphaned — so unlike the other finding types here, it is
+ * exempt from the generic auto-recovery lookback window entirely
+ * (service.ts, isLivenessFindingLookbackExempt): that window exists to avoid
+ * re-litigating findings whose chain went cold long ago, but for this state chain
+ * staleness IS the trigger, and gating on freshness would eventually suppress
+ * escalation for every instance permanently.
  */
 export const ASSIGNED_BACKLOG_STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
 

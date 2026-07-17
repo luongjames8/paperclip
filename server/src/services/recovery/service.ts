@@ -3741,11 +3741,26 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     firstTimestamp!);
   }
 
+  // stale_assigned_backlog_issue already gates on its own staleness threshold
+  // (ASSIGNED_BACKLOG_STALE_THRESHOLD_MS, issue-graph-liveness.ts) upstream in the
+  // classifier, and its sole dependency-path entry is the stale issue itself — which
+  // is inherently frozen once orphaned, since nothing touches a parked backlog issue.
+  // The generic "has the dependency chain moved recently" lookback exists to avoid
+  // re-litigating findings whose chain went cold long ago; for this state, chain
+  // staleness IS the trigger, not a reason to stop escalating. Without this
+  // exemption, a finding that ages past the configured lookback (or one raised while
+  // the scheduler was down) would never auto-recover again — silently reintroducing
+  // the exact black hole this state exists to close.
+  function isLivenessFindingLookbackExempt(finding: IssueLivenessFinding) {
+    return finding.state === "stale_assigned_backlog_issue";
+  }
+
   function isLivenessFindingInsideAutoRecoveryLookback(
     finding: IssueLivenessFinding,
     cutoff: Date,
     updatedAtByIssueKey: Map<string, Date>,
   ) {
+    if (isLivenessFindingLookbackExempt(finding)) return true;
     const latestUpdatedAt = latestDependencyUpdatedAtForLivenessFinding(finding, updatedAtByIssueKey);
     return Boolean(latestUpdatedAt && latestUpdatedAt >= cutoff);
   }
@@ -3774,8 +3789,14 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         finding,
         updatedAtByIssueKey,
       );
-      if (!latestDependencyUpdatedAt || latestDependencyUpdatedAt < cutoff) {
+      const exempt = isLivenessFindingLookbackExempt(finding);
+      if (!exempt && (!latestDependencyUpdatedAt || latestDependencyUpdatedAt < cutoff)) {
         skippedOutsideLookback += 1;
+        continue;
+      }
+      if (!latestDependencyUpdatedAt) {
+        // Exempt finding whose dependency issue's updatedAt could not be resolved
+        // (e.g. deleted between classify and preview-build) — nothing to display.
         continue;
       }
       const recoveryIssue = recoveryById.get(finding.recoveryIssueId);

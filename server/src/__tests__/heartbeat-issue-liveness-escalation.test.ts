@@ -722,6 +722,30 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     expect(result.escalationsCreated).toBe(0);
   });
 
+  it("still escalates a stale orphan assigned backlog issue older than the default lookback window", async () => {
+    // The orphan's own updatedAt is frozen at go-stale time (nothing touches a
+    // parked backlog issue), so at 30h old it sits outside the default 24h
+    // auto-recovery lookback. This state is exempt from that lookback (its own
+    // staleness threshold already gates it) — without the exemption this finding
+    // would surface in `findings` forever but never actually escalate.
+    await enableAutoRecovery();
+    const { orphanIssueId } = await seedOrphanAssignedBacklogIssue({ ageHours: 30 });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileIssueGraphLiveness();
+
+    expect(result.findings).toBe(1);
+    expect(result.skippedOutsideLookback).toBe(0);
+    expect(result.escalationsCreated).toBe(1);
+
+    const orphanAfter = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, orphanIssueId))
+      .then((rows) => rows[0]);
+    expect(orphanAfter?.status).toBe("blocked");
+  });
+
   it("treats open recovery issues as active waiting paths for non-assigned-backlog states", async () => {
     await enableAutoRecovery();
     const { companyId, managerId, blockedIssueId, blockerIssueId } = await seedBlockedChain();
