@@ -4,6 +4,7 @@ import type { DiscordFleetConfig } from "../config/schema.js";
 import { matchChannelByType, routeIssue } from "../routing/route.js";
 import { postEmbedToChannel } from "../discord/rest.js";
 import { buildExecutionStageActionRow, buildExecutionStagePendingEmbed } from "../render/embeds.js";
+import { postExecutionStageDeliveryFailureFallback } from "./delivery-fallback.js";
 
 // Payload shape emitted by publishExecutionStagePendingEventIfChanged (server/src/routes/issues.ts).
 interface ExecutionStagePendingPayload {
@@ -75,5 +76,26 @@ export async function handleExecutionStagePending(
     issueUrl: url,
   });
 
-  await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
+  try {
+    await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
+  } catch (err) {
+    // codex round 10: a channel-level post failure (bad/deleted
+    // destinationChannelId, missing permission override, archived thread)
+    // while the bot IS connected used to only log here, same silent-drop
+    // failure mode worker.ts's no-client branch had before round 9 — mirrors
+    // approval-created.ts's header-card catch with the execution-stage
+    // fallback added in that same round.
+    ctx.logger.error("execution-stage-pending: card post failed", {
+      issueId,
+      companyId,
+      destinationChannelId,
+      error: String(err),
+    });
+    await postExecutionStageDeliveryFailureFallback(
+      ctx,
+      config,
+      event,
+      `card post to Discord channel ${destinationChannelId} failed: ${String(err)}`,
+    );
+  }
 }

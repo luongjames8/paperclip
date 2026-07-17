@@ -8370,7 +8370,17 @@ export function issueRoutes(
     })();
 
     await queueTaskWatchdogEvaluation(issue, actor.runId);
-    res.json({ ...issueResponse, comment });
+    res.json({
+      ...issueResponse,
+      comment,
+      // codex round 10: a Discord decision (expectedExecutionStageId sent)
+      // can pass every pre-write check and still not record a decision (the
+      // stage-removed self-heal path returns 200 with only a reassignment) —
+      // the CAS gate above now rejects the known cases of this, but the
+      // client shouldn't trust "200 means approved" on faith. Exposed only
+      // when the caller asked for stage-decision semantics.
+      ...(expectedExecutionStageId !== undefined ? { executionStageDecisionRecorded: decisionId !== null } : {}),
+    });
   });
 
   router.delete("/issues/:id", async (req, res) => {

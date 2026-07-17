@@ -689,6 +689,19 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
         throw conflict(STALE_EXECUTION_STAGE_MESSAGE);
       }
     }
+    // codex round 10: stageId/token matching the STALE executionState isn't
+    // enough — a policy edit can leave the same stageId "pending" but no
+    // longer valid (stage removed, or its participant list changed under the
+    // observed currentParticipant). Without this, the transition below falls
+    // into the stage-removed self-heal branch or silently reassigns to a new
+    // participant, recording NO decision while still returning 200 — the
+    // Discord button handler can't tell that apart from a real approval.
+    // `currentStage`/`stageHasParticipant` are the same helpers the rest of
+    // this function already uses for this exact policy, just asked here,
+    // first, as a hard reject instead of a silent reassignment.
+    if (!currentStage || !stageHasParticipant(currentStage, existingState?.currentParticipant ?? null)) {
+      throw conflict(STALE_EXECUTION_STAGE_MESSAGE);
+    }
   }
 
   if (!input.policy) {

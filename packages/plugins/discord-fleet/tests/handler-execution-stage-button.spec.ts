@@ -20,7 +20,7 @@ import {
 } from "../src/handlers/execution-stage-button.js";
 import { PaperclipApiError } from "../src/api/paperclip.js";
 
-const mockUpdateIssueStatus = vi.fn().mockResolvedValue(undefined);
+const mockUpdateIssueStatus = vi.fn().mockResolvedValue({ executionStageDecisionRecorded: true });
 
 vi.mock("../src/api/paperclip.js", async () => {
   const actual = await vi.importActual<typeof import("../src/api/paperclip.js")>("../src/api/paperclip.js");
@@ -249,6 +249,28 @@ describe("handleExecutionStageButton — approve happy path", () => {
     expect(mockUpdateIssueStatus).not.toHaveBeenCalled();
     expect(interaction.editReply).not.toHaveBeenCalled();
   });
+
+  // codex round 10: a 200 response doesn't by itself prove a decision was
+  // recorded — a policy edit under a stale card (server-side gate closes the
+  // known cases, but the client must not trust "didn't throw" alone) can
+  // return 200 with executionStageDecisionRecorded:false. The card must show
+  // an honest "stage changed" outcome, not "✅ Approved".
+  it("executionStageDecisionRecorded:false → honest 'stage changed' outcome, not '✅ Approved'", async () => {
+    const { handleExecutionStageButton } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+    mockUpdateIssueStatus.mockResolvedValueOnce({ executionStageDecisionRecorded: false });
+    const interaction = makeButtonInteraction(`exs-ok:${ISSUE_ID}:${STAGE_ID}:${DECISION_TOKEN}`);
+
+    await handleExecutionStageButton(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("newer version was posted"), ephemeral: true }),
+    );
+    const call = interaction.editReply.mock.calls[0][0];
+    expect(call.embeds[0].title).toMatch(/^⚠️ Stage changed/);
+    expect(call.embeds[0].title).not.toMatch(/Approved/);
+  });
 });
 
 describe("handleExecutionStageButton — request changes opens a modal first", () => {
@@ -338,5 +360,23 @@ describe("handleExecutionStageChangesModal — submit happy + error paths", () =
       expect.objectContaining({ content: expect.stringContaining("newer version was posted") }),
     );
     expect(interaction.editReply).not.toHaveBeenCalled();
+  });
+
+  // codex round 10: same "200 isn't proof" gap as the approve path.
+  it("executionStageDecisionRecorded:false → honest 'stage changed' outcome, not '✏️ Changes requested'", async () => {
+    const { handleExecutionStageChangesModal } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+    mockUpdateIssueStatus.mockResolvedValueOnce({ executionStageDecisionRecorded: false });
+    const interaction = makeModalInteraction(`exs-chgm:${ISSUE_ID}:${STAGE_ID}:${DECISION_TOKEN}`, "some note");
+
+    await handleExecutionStageChangesModal(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("newer version was posted"), ephemeral: true }),
+    );
+    const call = interaction.editReply.mock.calls[0][0];
+    expect(call.embeds[0].title).toMatch(/^⚠️ Stage changed/);
+    expect(call.embeds[0].title).not.toMatch(/Changes requested/);
   });
 });

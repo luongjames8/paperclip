@@ -391,7 +391,7 @@ export class PaperclipClient {
     comment: string,
     expectedExecutionStageId?: string,
     expectedLastDecisionToken?: string,
-  ): Promise<void> {
+  ): Promise<{ executionStageDecisionRecorded?: boolean }> {
     const url = `${this.baseUrl}/api/issues/${issueId}`;
     const res = await this.ctx.http.fetch(url, {
       method: "PATCH",
@@ -410,6 +410,13 @@ export class PaperclipClient {
       const text = await res.text().catch(() => "");
       throw new PaperclipApiError(`paperclip API updateIssueStatus error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
     }
+    // codex round 10: 200 alone doesn't prove a stage decision was recorded —
+    // a policy edit under a stale card can pass every pre-write check and
+    // still only reassign the stage. executionStageDecisionRecorded is the
+    // server's own account of what happened, so the caller can render an
+    // honest outcome instead of assuming success from the status code alone.
+    const body = (await res.json().catch(() => ({}))) as { executionStageDecisionRecorded?: boolean };
+    return { executionStageDecisionRecorded: body.executionStageDecisionRecorded };
   }
 
   async approveApproval(approvalId: string, decisionNote?: string): Promise<void> {

@@ -661,6 +661,40 @@ describe("issue execution policy routes", () => {
       expect(mockIssueService.update).not.toHaveBeenCalled();
     });
 
+    // codex round 10: NOT a concurrency race — a SEQUENTIAL scenario. An
+    // operator edits the policy (same stageId, but the participant list no
+    // longer includes the observed currentParticipant) BEFORE the Discord
+    // card is clicked, so `existing` (this request's own pre-transaction
+    // read) already reflects the edited policy. The old gate only checked
+    // stageId/status/lastDecisionId against the STALE executionState and
+    // would have passed this through to the stage-removed self-heal /
+    // silent-reassignment path (200, no decision recorded). The gate now
+    // also requires the stage to still exist in the current policy AND the
+    // observed participant to still be valid for it — caught here, in
+    // issue-execution-policy.ts, before the transaction/row-lock ever runs.
+    it("sequential stale decision: policy edited BEFORE the click (participant no longer valid for the same stageId) → 409, no mutation, row lock never reached", async () => {
+      const editedPolicy = normalizeIssueExecutionPolicy({
+        stages: [
+          { id: STAGE_ID, type: "review", participants: [{ type: "user", userId: "someone-else" }] },
+        ],
+      })!;
+      const issue = pendingReviewIssue({ executionPolicy: editedPolicy });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockTxSelectFor).not.toHaveBeenCalled();
+    });
+
     it("mismatched expectedExecutionStageId → 409, no mutation applied", async () => {
       const issue = pendingReviewIssue();
       mockIssueService.getById.mockResolvedValue(issue);

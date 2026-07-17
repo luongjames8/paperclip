@@ -101,6 +101,25 @@ async function renderResolved(interaction: ButtonInteraction | ModalSubmitIntera
   });
 }
 
+// codex round 10: a 200 from updateIssueStatus doesn't by itself prove the
+// decision was recorded — a policy edit under a stale card can pass every
+// pre-write check and still only reassign the stage, no decision, no error
+// thrown. Shared by both handlers below (approve + request-changes) so the
+// "trust the server's account, not just the status code" check lives in one
+// place, mirroring describeUpdateIssueStatusError's role for the error path.
+async function renderDecisionOutcome(
+  interaction: ButtonInteraction | ModalSubmitInteraction,
+  result: { executionStageDecisionRecorded?: boolean },
+  successLabel: string,
+): Promise<void> {
+  if (result.executionStageDecisionRecorded === false) {
+    await interaction.followUp({ content: STALE_STAGE_MESSAGE, ephemeral: true });
+    await renderResolved(interaction, "⚠️ Stage changed");
+    return;
+  }
+  await renderResolved(interaction, successLabel);
+}
+
 // Approve: PATCH {status:"done", expectedExecutionStageId}. The server's
 // compare-and-swap guard (see the STALE_STAGE_MESSAGE comment above) is a
 // SEPARATE, complementary check from the engine's participant-identity
@@ -180,15 +199,16 @@ export async function handleExecutionStageButton(
   const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
 
   const comment = `Approved via Discord by ${interaction.user.username}`;
+  let result: Awaited<ReturnType<typeof paperclip.updateIssueStatus>>;
   try {
-    await paperclip.updateIssueStatus(parsed.issueId, "done", comment, parsed.stageId, parsed.decisionToken);
+    result = await paperclip.updateIssueStatus(parsed.issueId, "done", comment, parsed.stageId, parsed.decisionToken);
   } catch (err) {
     ctx.logger.warn("execution-stage-button: approve API call failed", { issueId: parsed.issueId, err: String(err) });
     await interaction.followUp({ content: describeUpdateIssueStatusError(err, "approve"), ephemeral: true });
     return;
   }
 
-  await renderResolved(interaction, "✅ Approved");
+  await renderDecisionOutcome(interaction, result, "✅ Approved");
 }
 
 // Handles the "Request changes" modal submit: PATCH {status:"in_progress",
@@ -234,13 +254,14 @@ export async function handleExecutionStageChangesModal(
   const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef);
   const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
 
+  let result: Awaited<ReturnType<typeof paperclip.updateIssueStatus>>;
   try {
-    await paperclip.updateIssueStatus(issueId, "in_progress", note, stageId, decisionToken);
+    result = await paperclip.updateIssueStatus(issueId, "in_progress", note, stageId, decisionToken);
   } catch (err) {
     ctx.logger.warn("execution-stage-changes-modal: request-changes API call failed", { issueId, err: String(err) });
     await interaction.followUp({ content: describeUpdateIssueStatusError(err, "request changes"), ephemeral: true });
     return;
   }
 
-  await renderResolved(interaction, "✏️ Changes requested");
+  await renderDecisionOutcome(interaction, result, "✏️ Changes requested");
 }

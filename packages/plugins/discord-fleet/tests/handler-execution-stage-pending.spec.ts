@@ -15,6 +15,12 @@ vi.mock("../src/discord/rest.js", () => ({
   postEmbedToChannel: vi.fn().mockResolvedValue("msg-id-1"),
 }));
 
+vi.mock("../src/api/paperclip.js", () => ({
+  PaperclipClient: vi.fn().mockImplementation(() => ({
+    addIssueComment: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+
 function makeConfig(overrides: Partial<DiscordFleetConfig> = {}): DiscordFleetConfig {
   return {
     botTokenSecretRef: "bot-ref",
@@ -177,5 +183,47 @@ describe("handleExecutionStagePending", () => {
     await handleExecutionStagePending(harness.ctx, makeEvent(), client, config);
 
     expect(postEmbedToChannel).toHaveBeenCalledWith(client, "monitor-channel", expect.anything(), expect.anything());
+  });
+
+  // codex round 10: a channel-level post failure (bad/deleted channel,
+  // missing permission, archived thread) while the bot IS connected used to
+  // only be logged — the review/approval stage was invisible outside plugin
+  // logs. Mirrors approval-created.ts's header-card catch via the round-9
+  // execution-stage delivery-fallback (addIssueComment).
+  it("card post failure (bot connected, channel post rejects) → logs and posts a fallback comment on the issue", async () => {
+    const { handleExecutionStagePending } = await import("../src/handlers/execution-stage-pending.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    (postEmbedToChannel as any).mockRejectedValueOnce(new Error("Missing Access"));
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+
+    await handleExecutionStagePending(harness.ctx, makeEvent(), client, config);
+
+    const errorLog = harness.logs.find((l) => l.message === "execution-stage-pending: card post failed");
+    expect(errorLog?.meta).toMatchObject({ issueId: "iss-1", companyId: "c1" });
+
+    const paperclipInstance = (PaperclipClient as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
+    expect(paperclipInstance.addIssueComment).toHaveBeenCalledWith(
+      "iss-1",
+      expect.stringContaining("could not deliver"),
+    );
+  });
+
+  it("card post failure is deduped — a second identical event does not post a second fallback comment", async () => {
+    const { handleExecutionStagePending } = await import("../src/handlers/execution-stage-pending.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    (postEmbedToChannel as any).mockRejectedValue(new Error("Missing Access"));
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+
+    await handleExecutionStagePending(harness.ctx, makeEvent(), client, config);
+    await handleExecutionStagePending(harness.ctx, makeEvent(), client, config);
+
+    const paperclipInstance = (PaperclipClient as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
+    expect(paperclipInstance.addIssueComment).toHaveBeenCalledTimes(1);
   });
 });
