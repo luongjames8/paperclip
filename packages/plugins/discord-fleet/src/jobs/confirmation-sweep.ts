@@ -308,6 +308,20 @@ async function postCarouselBatch(
       ctx, client, channelId, company.companyId, issue.id, interaction.id, issueUrl, existing,
     );
     if (staleAnchors.length) record.staleAnchors = staleAnchors;
+    // PERSIST BEFORE POST (codex P2 on PR #34): `record` already has no
+    // current-anchor pointer (the fresh-record branch of the ternary above
+    // never copies existing.anchorMessageId/trailerMessageId/
+    // lastRenderedStatus) — the same "retired, no live pointer" shape the
+    // deleted sentinel path used. Writing it NOW, before the header post
+    // below can fail, closes the window where a failed post would leave
+    // state[interaction.id] still pointing at the just-retired (now
+    // Discord-superseded) anchor as "awaiting": reconcileResolvedCarouselAnchors
+    // reads exactly that persisted pointer, and would repaint the retired
+    // old-generation card with a later terminal decision (accept/reject/
+    // expire) instead of leaving it superseded. A subsequent header-post
+    // retry sees this same artifactHash already persisted (hashChanged
+    // becomes false), so it never re-retires — it just resumes posting.
+    state[interaction.id] = { ...record };
   }
 
   if (!record.headerPosted) {
@@ -995,41 +1009,48 @@ export async function runConfirmationSweep(
             continue;
           }
 
-          if (rule.carouselBatch) {
+          // BUTTONS BIND TO THE INTERACTION'S OWN CAROUSEL IDENTITY, NEVER TO
+          // WHETHER TODAY'S TEXT HAPPENS TO PARSE (live incident: months of
+          // buttonless carousel cards). `rule.carouselBatch` alone used to
+          // gate the degrade-with-buttons render — an interaction that had
+          // ALREADY been rendered as a real carousel (structured or legacy
+          // match on a prior tick, proven by ANY carouselState record —
+          // including the "" shape-loss sentinel some already-affected
+          // production interactions carry, see below) but whose matching
+          // rule was never flagged would, on a revision that broke BOTH
+          // detectors, fall straight through to the "generic path" below,
+          // which posts a single first-image embed with NO components —
+          // permanently, since every later tick just re-hits the same
+          // 24h-throttled buttonless render. `knownCarousel` makes that
+          // impossible: an interaction this sweep has EVER confirmed is a
+          // carousel always gets the degrade-with-buttons render from here
+          // on, independent of the rule flag or this tick's parse outcome.
+          // `postUnstructuredCarouselDegrade` → `postCarouselBatch` already
+          // retires the outgoing generation's anchor via its own
+          // hashChanged handling (the old real hash → this tick's degrade
+          // hash), so no separate manual retirement step is needed here.
+          //
+          // RECOVER SENTINEL RECORDS TOO (codex P1): the pre-fix "CAROUSEL-
+          // SHAPE LOSS" code (deleted above) used to persist a record with
+          // artifactHash:"" for exactly this situation — a known carousel
+          // whose unflagged rule made it fall to the generic path. Those
+          // records already exist in production state. Gating knownCarousel
+          // on `artifactHash !== ""` would treat every ALREADY-affected
+          // interaction as NOT known, so it would keep reposting the
+          // buttonless card forever even after this fix ships — the sentinel
+          // record IS carousel proof (nothing else ever writes it), so a
+          // bare `Boolean(priorRecord)` recovers it on the very next sweep.
+          // No extra "don't double-retire" guard is needed: the sentinel
+          // record carries no anchorMessageId/trailerMessageId (the old code
+          // retired the real anchor BEFORE writing the sentinel), so
+          // retireCurrentAnchor's own `if (currentId && ...)` check inside
+          // postCarouselBatch's hashChanged branch already no-ops here.
+          const priorRecord = carouselState[interaction.id];
+          const knownCarousel = Boolean(priorRecord);
+
+          if (rule.carouselBatch || knownCarousel) {
             await postUnstructuredCarouselDegrade(ctx, client, rule.channelId, company, issue, interaction, detailsMarkdown, carouselState, now);
             continue;
-          }
-
-          // CAROUSEL-SHAPE LOSS (codex round-6 P2): this interaction
-          // previously rendered as a carousel (a record exists) but the
-          // current revision is not carousel-shaped by ANY detection path —
-          // no structured payload, no legacy heading, rule not
-          // carouselBatch-flagged — and is about to render via the generic
-          // path below. That is a generation change like any other: retire
-          // the old anchor (parked on failure, retried every tick) instead
-          // of leaving it "awaiting decision" with live buttons for a
-          // generation that no longer exists. The record's artifactHash is
-          // reset to the "" sentinel (never equal to a real sha256) so that
-          // (a) this block runs at most once per shape loss, and (b) a later
-          // revision back to carousel shape — even byte-identical to the
-          // retired generation — is a hash change that re-posts from
-          // scratch, rather than matching the old record as "fully posted"
-          // while its anchor sits superseded with no live buttons.
-          const shapeLostRecord = carouselState[interaction.id];
-          if (shapeLostRecord && shapeLostRecord.artifactHash !== "") {
-            const staleAnchors = await retireCurrentAnchor(
-              ctx, client, rule.channelId, company.companyId, issue.id, interaction.id, issueUrl, shapeLostRecord,
-            );
-            carouselState[interaction.id] = {
-              postedAt: new Date(now).toISOString(),
-              sectionsPosted: 0,
-              totalSections: 0,
-              artifactHash: "",
-              headerPosted: false,
-              trailerPosted: false,
-              lastSeenUpdatedAt: interaction.updatedAt,
-              ...(staleAnchors.length ? { staleAnchors } : {}),
-            };
           }
 
           // Generic path only: safeParseMs turns a corrupted stored timestamp
