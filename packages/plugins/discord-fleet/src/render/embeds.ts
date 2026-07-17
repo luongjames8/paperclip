@@ -144,6 +144,107 @@ export function buildCarouselAnchorEmbed(opts: {
   });
 }
 
+// Execution-policy review/approval stage cards (fleet issue #631 / PR-0) — a
+// DIFFERENT entity from approvals (issues.executionState, not the approvals
+// table). customId carries issueId + stageId + a decision-generation token:
+// PATCH /api/issues/{id} enforces both atomically, server-side, as a
+// compare-and-swap (issue-execution-policy.ts) before acting on WHATEVER
+// stage is currently pending. Two staleness classes this guards, both
+// hardened across codex review rounds:
+//   - stageId: a participant assigned to TWO consecutive stages of the same
+//     issue (reviewer == approver, a normal config) could otherwise click a
+//     stale, already-superseded card and silently resolve the wrong stage.
+//   - decision token: a changes-requested-then-resubmit cycle returns to the
+//     SAME stageId with status back to "pending" — stageId alone can't tell
+//     a card from BEFORE that cycle from the fresh resubmission. The token is
+//     the first EXECUTION_STAGE_DECISION_TOKEN_LEN hex chars of
+//     executionState.lastDecisionId (or the literal sentinel below when no
+//     decision has ever been recorded yet), which the server stamps to a
+//     fresh value every time ANY decision is recorded for the issue — see
+//     executionStageDecisionToken in server/src/services/issue-execution-policy.ts
+//     (the two sides must agree on this convention independently; there's no
+//     shared package between the server and this plugin to import it from).
+export const EXECUTION_STAGE_BUTTON_PREFIX = {
+  approve: "exs-ok:",
+  changes: "exs-chg:",
+} as const;
+
+// Modal shown when the operator clicks "Request changes" — the runtime
+// requires a comment on every stage decision (issue-execution-policy.ts,
+// "Requesting changes requires a comment").
+export const EXECUTION_STAGE_CHANGES_MODAL_PREFIX = "exs-chgm:";
+export const EXECUTION_STAGE_CHANGES_NOTE_FIELD = "changesNote";
+
+// Mirrors server/src/services/issue-execution-policy.ts's
+// EXECUTION_STAGE_DECISION_TOKEN_LEN / EXECUTION_STAGE_NO_DECISION_TOKEN.
+export const EXECUTION_STAGE_DECISION_TOKEN_LEN = 8;
+export const EXECUTION_STAGE_NO_DECISION_TOKEN = "none";
+
+export function executionStageDecisionToken(lastDecisionId: string | null | undefined): string {
+  return lastDecisionId
+    ? lastDecisionId.slice(0, EXECUTION_STAGE_DECISION_TOKEN_LEN)
+    : EXECUTION_STAGE_NO_DECISION_TOKEN;
+}
+
+// custom_id hard limit is 100 chars. Longest: modal prefix 9 + issueId 36 +
+// 1 + stageId 36 + 1 + token 8 = 91.
+const EXECUTION_STAGE_MAX_CUSTOM_ID_LEN = 100;
+
+export function buildExecutionStageActionRow(opts: {
+  issueId: string;
+  stageId: string;
+  lastDecisionId: string | null | undefined;
+  issueUrl: string;
+}): APIActionRowComponent<APIComponentInMessageActionRow> {
+  const suffix = `${opts.issueId}:${opts.stageId}:${executionStageDecisionToken(opts.lastDecisionId)}`;
+  const approveId = `${EXECUTION_STAGE_BUTTON_PREFIX.approve}${suffix}`;
+  const changesId = `${EXECUTION_STAGE_BUTTON_PREFIX.changes}${suffix}`;
+  if (approveId.length > EXECUTION_STAGE_MAX_CUSTOM_ID_LEN || changesId.length > EXECUTION_STAGE_MAX_CUSTOM_ID_LEN) {
+    throw new Error(
+      `execution-stage custom_id exceeds Discord's ${EXECUTION_STAGE_MAX_CUSTOM_ID_LEN}-char limit (approve=${approveId.length}, changes=${changesId.length})`,
+    );
+  }
+  const approve: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Success,
+    label: "✅ Approve",
+    custom_id: approveId,
+  };
+  const changes: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Primary,
+    label: "✏️ Request changes",
+    custom_id: changesId,
+  };
+  const view: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Link,
+    label: "View",
+    url: opts.issueUrl,
+  };
+  return {
+    type: ComponentType.ActionRow,
+    components: [approve, changes, view],
+  };
+}
+
+export function buildExecutionStagePendingEmbed(opts: {
+  identifier: string;
+  title?: string;
+  stageType: "review" | "approval";
+  issueUrl: string;
+}): APIEmbed {
+  const headline = opts.title ? safe(opts.title, 220) : `${opts.identifier} — needs ${opts.stageType}`;
+  const verb = opts.stageType === "approval" ? "Approval" : "Review";
+  return enforceEmbedLimits({
+    color: 0xfee75c,
+    title: safe(`🟡 ${verb} needed — ${headline}`, 256),
+    url: opts.issueUrl,
+    description: safe(`**${opts.identifier}**\n\n[View & decide in Paperclip](${opts.issueUrl})`),
+    timestamp: new Date().toISOString(),
+  });
+}
+
 export function buildApprovalActionRow(opts: {
   approvalId: string;
   issueUrl: string;

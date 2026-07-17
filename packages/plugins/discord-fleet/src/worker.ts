@@ -13,12 +13,22 @@ import {
   handleCarouselConfirmationRejectModal,
 } from "./handlers/carousel-confirmation-button.js";
 import {
+  handleExecutionStagePending,
+  isDiscordAddressableStageParticipant,
+} from "./handlers/execution-stage-pending.js";
+import {
+  handleExecutionStageButton,
+  handleExecutionStageChangesModal,
+} from "./handlers/execution-stage-button.js";
+import {
   CAROUSEL_CONFIRM_BUTTON_PREFIX,
   CAROUSEL_CONFIRM_BUTTON_PREFIX_LEGACY,
   CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX,
   CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY,
+  EXECUTION_STAGE_BUTTON_PREFIX,
+  EXECUTION_STAGE_CHANGES_MODAL_PREFIX,
 } from "./render/embeds.js";
-import { postDeliveryFailureFallback } from "./handlers/delivery-fallback.js";
+import { postDeliveryFailureFallback, postExecutionStageDeliveryFailureFallback } from "./handlers/delivery-fallback.js";
 import { runDigest } from "./jobs/digest.js";
 import { runStuckDetector } from "./jobs/stuck-detector.js";
 import { runRoutineHealth } from "./jobs/routine-health.js";
@@ -321,6 +331,13 @@ async function dispatchButton(
     await handleCarouselConfirmationButton(ctx, interaction, config);
     return;
   }
+  if (
+    interaction.customId.startsWith(EXECUTION_STAGE_BUTTON_PREFIX.approve) ||
+    interaction.customId.startsWith(EXECUTION_STAGE_BUTTON_PREFIX.changes)
+  ) {
+    await handleExecutionStageButton(ctx, interaction, config);
+    return;
+  }
   await handleApprovalButton(ctx, interaction, config);
 }
 
@@ -337,6 +354,10 @@ async function dispatchModal(
     interaction.customId.startsWith(CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY)
   ) {
     await handleCarouselConfirmationRejectModal(ctx, interaction, config);
+    return;
+  }
+  if (interaction.customId.startsWith(EXECUTION_STAGE_CHANGES_MODAL_PREFIX)) {
+    await handleExecutionStageChangesModal(ctx, interaction, config);
     return;
   }
   await handleApprovalRevisionModal(ctx, interaction, config);
@@ -368,6 +389,31 @@ function bindEventHandlers(
         return;
       }
       await handleApprovalCreated(ctx, event, client, config);
+    }),
+    ctx.events.on("issue.execution_stage.pending", async (event) => {
+      const client = getClientForCompany(event.companyId);
+      if (!client) {
+        // codex round 11: an agent-owned stage never renders a card in the
+        // first place (handleExecutionStagePending's own early return below)
+        // — firing the fallback for one anyway would post a misleading
+        // "could not deliver this card" comment for a card that was never
+        // supposed to exist. Same predicate as that early return, so the two
+        // decision points can't diverge again.
+        const payload = event.payload as { issueId?: unknown; participant?: { type?: "agent" | "user" } | null };
+        if (!isDiscordAddressableStageParticipant(payload.participant)) return;
+        ctx.logger.error("discord-fleet: issue.execution_stage.pending received for company with no connected client; posting fallback comment", {
+          companyId: event.companyId,
+          issueId: payload.issueId ?? event.entityId,
+        });
+        await postExecutionStageDeliveryFailureFallback(
+          ctx,
+          config,
+          event,
+          "no Discord client connected for this company (bot not in guild, or connect failed)",
+        );
+        return;
+      }
+      await handleExecutionStagePending(ctx, event, client, config);
     }),
   ];
 }

@@ -30,6 +30,7 @@ vi.mock("../services/company-skills.js", () => ({
 
 vi.mock("../services/activity-log.js", () => ({
   logActivity: vi.fn(),
+  publishPluginDomainEvent: vi.fn(),
 }));
 
 const {

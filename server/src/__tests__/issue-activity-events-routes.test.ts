@@ -53,6 +53,7 @@ function registerModuleMocks() {
 
   vi.doMock("../services/activity-log.js", () => ({
     logActivity: mockLogActivity,
+    publishPluginDomainEvent: vi.fn(),
   }));
 
   vi.doMock("../services/feedback.js", () => ({

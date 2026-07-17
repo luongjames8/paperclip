@@ -55,6 +55,7 @@ function registerServiceMocks() {
 
   vi.doMock("../services/activity-log.js", () => ({
     logActivity: mockLogActivity,
+    publishPluginDomainEvent: vi.fn(),
   }));
 
   vi.doMock("../services/execution-workspaces.js", () => ({

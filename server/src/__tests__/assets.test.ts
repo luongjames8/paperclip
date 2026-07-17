@@ -13,6 +13,7 @@ const { createAssetMock, getAssetByIdMock, logActivityMock } = vi.hoisted(() => 
 function registerModuleMocks() {
   vi.doMock("../services/activity-log.js", () => ({
     logActivity: logActivityMock,
+    publishPluginDomainEvent: vi.fn(),
   }));
 
   vi.doMock("../services/assets.js", () => ({

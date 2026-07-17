@@ -903,6 +903,7 @@ Minimum event set:
 - `issue.checked_out`
 - `issue.released`
 - `issue.assignment_wakeup_requested`
+- `issue.execution_stage.pending`
 - `agent.created`
 - `agent.updated`
 - `agent.status_changed`

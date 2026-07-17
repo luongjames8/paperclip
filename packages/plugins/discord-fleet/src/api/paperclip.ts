@@ -20,6 +20,13 @@ export interface PaperclipIssue {
   createdAt: string;
   // Present on blocked issues; empty/absent means no declared blockers (black-hole case).
   blockedByIssueIds?: string[];
+  // Read by the execution-stage button handler's stale-card guard — the ONLY
+  // fields of executionState this client reads. status must be checked
+  // alongside currentStageId (codex P2): a "changes requested" cycle keeps
+  // the SAME currentStageId (it returns to the same stage on resubmission),
+  // so stageId alone can't tell a still-awaiting-decision card from one whose
+  // decision window already closed.
+  executionState?: { status?: string | null; currentStageId?: string | null } | null;
 }
 
 export interface PaperclipInteraction {
@@ -196,8 +203,14 @@ export class PaperclipClient {
     return this.requestArray<PaperclipAgent>(url);
   }
 
-  async getIssueById(companyId: string, issueId: string): Promise<PaperclipIssue | null> {
-    const url = `${this.baseUrl}/api/companies/${companyId}/issues/${issueId}`;
+  // Single-issue fetch. NOTE: the only registered GET route for one issue is
+  // /api/issues/:id (server/src/routes/issues.ts) — there is no company-scoped
+  // variant; company access is enforced server-side from the caller's auth,
+  // not a path segment (codex P1: an earlier company-scoped URL here always
+  // 404'd, so every stale-stage check silently treated the current stage as
+  // stale).
+  async getIssueById(issueId: string): Promise<PaperclipIssue | null> {
+    const url = `${this.baseUrl}/api/issues/${issueId}`;
     const res = await this.ctx.http.fetch(url, {
       method: "GET",
       headers: { Authorization: `Bearer ${this.apiKey}` },
@@ -355,6 +368,73 @@ export class PaperclipClient {
     }
   }
 
+  // Drives an executionPolicy review/approval stage decision — NOT the
+  // approvals endpoints (a different entity family; issue.executionState vs
+  // the approvals table). status:"done" with a comment approves the current
+  // stage; any other status (typically "in_progress") with a comment
+  // requests changes and returns the issue to its executor. The runtime
+  // requires a non-empty comment on both outcomes (issue-execution-policy.ts).
+  //
+  // expectedExecutionStageId (fleet issue #631 / PR-0, codex P1 round 3) +
+  // expectedLastDecisionToken (codex round 5): a compare-and-swap guard the
+  // server enforces ATOMICALLY as part of this same request — pass the
+  // stageId + decision-generation token the caller observed as pending (e.g.
+  // a Discord card's customId) and the server rejects with 409 if that stage
+  // is no longer the current one, OR if a changes-requested-then-resubmit
+  // cycle happened since (same stageId, but a fresh decisionToken — see
+  // executionStageDecisionToken's doc comment in ../render/embeds.ts).
+  // Replaces an earlier client-side GET-then-PATCH pre-check, which left a
+  // round-trip race window this closes by construction.
+  async updateIssueStatus(
+    issueId: string,
+    status: string,
+    comment: string,
+    expectedExecutionStageId?: string,
+    expectedLastDecisionToken?: string,
+  ): Promise<{ executionStageDecisionRecorded?: boolean }> {
+    const url = `${this.baseUrl}/api/issues/${issueId}`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        status,
+        comment,
+        ...(expectedExecutionStageId ? { expectedExecutionStageId } : {}),
+        ...(expectedLastDecisionToken ? { expectedLastDecisionToken } : {}),
+      }),
+    });
+    if (res.status >= 400) {
+      const text = await res.text().catch(() => "");
+      throw new PaperclipApiError(`paperclip API updateIssueStatus error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
+    }
+    // codex round 10: 200 alone doesn't prove a stage decision was recorded —
+    // a policy edit under a stale card can pass every pre-write check and
+    // still only reassign the stage. executionStageDecisionRecorded is the
+    // server's own account of what happened, so the caller can render an
+    // honest outcome instead of assuming success from the status code alone.
+    //
+    // adversarial-seam-hardening: a malformed/empty 2xx body (proxy error
+    // page, transport hiccup) must NOT be silently treated as "field absent,
+    // assume success" — that's the exact bug executionStageDecisionRecorded
+    // exists to catch, just reached via a swallowed parse failure instead of
+    // server logic. Throw instead of defaulting to {} so the caller's
+    // existing try/catch renders an honest failure, not "✅ Approved".
+    let body: { executionStageDecisionRecorded?: boolean };
+    try {
+      body = (await res.json()) as { executionStageDecisionRecorded?: boolean };
+    } catch (err) {
+      throw new PaperclipApiError(
+        `paperclip API updateIssueStatus: malformed response body: ${String(err)}`,
+        res.status,
+        url,
+      );
+    }
+    return { executionStageDecisionRecorded: body.executionStageDecisionRecorded };
+  }
+
   async approveApproval(approvalId: string, decisionNote?: string): Promise<void> {
     await this.resolveApproval(approvalId, "approve", decisionNote);
   }
@@ -380,6 +460,22 @@ export class PaperclipClient {
     if (res.status >= 400) {
       const text = await res.text().catch(() => "");
       throw new PaperclipApiError(`paperclip API addApprovalComment error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
+    }
+  }
+
+  async addIssueComment(issueId: string, body: string): Promise<void> {
+    const url = `${this.baseUrl}/api/issues/${issueId}/comments`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body }),
+    });
+    if (res.status >= 400) {
+      const text = await res.text().catch(() => "");
+      throw new PaperclipApiError(`paperclip API addIssueComment error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
     }
   }
 

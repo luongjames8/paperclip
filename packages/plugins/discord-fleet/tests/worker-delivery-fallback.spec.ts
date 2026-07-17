@@ -45,6 +45,7 @@ vi.mock("../src/jobs/approvals-reminder.js", () => ({
 vi.mock("../src/api/paperclip.js", () => ({
   PaperclipClient: vi.fn().mockImplementation(() => ({
     addApprovalComment: vi.fn().mockResolvedValue(undefined),
+    addIssueComment: vi.fn().mockResolvedValue(undefined),
   })),
 }));
 
@@ -57,6 +58,32 @@ function makeApprovalEvent(companyId: string, approvalId: string): PluginEvent {
     entityId: approvalId,
     entityType: "approval",
     payload: { approvalId, approvalType: "budget" },
+  };
+}
+
+function makeExecutionStageEvent(
+  companyId: string,
+  issueId: string,
+  overrides: Record<string, unknown> = {},
+): PluginEvent {
+  return {
+    eventId: "evt-stage-1",
+    eventType: "issue.execution_stage.pending",
+    occurredAt: new Date().toISOString(),
+    companyId,
+    entityId: issueId,
+    entityType: "issue",
+    payload: {
+      issueId,
+      identifier: "ISS-1",
+      title: "Stage fallback test",
+      projectId: "proj-1",
+      stageId: "stage-1",
+      stageType: "review",
+      lastDecisionId: null,
+      participant: { type: "user", userId: "pc-user-alice", agentId: null },
+      ...overrides,
+    },
   };
 }
 
@@ -155,6 +182,177 @@ describe("worker.ts — no-connected-client branches (companyId c-fail never joi
     // The connected company (c-ok) is still processed — one client, one company.
     expect(runApprovalsReminder).toHaveBeenCalledTimes(1);
     expect((runApprovalsReminder as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe("c-ok");
+  });
+
+  // codex P2 (fleet issue #631 round 9, worker.ts:392): unlike approval.created
+  // just above, this branch used to silently drop the event when no Discord
+  // client is connected — the review/approval stage never got a clickable
+  // card AND never left any trace an operator could find.
+  it("(4) issue.execution_stage.pending for the company with no connected client calls addIssueComment with a 'no Discord client' message", async () => {
+    const plugin = (await import("../src/worker.js")).default;
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities, "jobs.schedule"],
+      config: makeMixedConfig() as unknown as Record<string, unknown>,
+    });
+
+    await plugin.definition.setup(harness.ctx);
+
+    await harness.emit(
+      "issue.execution_stage.pending",
+      {
+        issueId: "iss-cfail-1",
+        identifier: "CF-1",
+        title: "Stage fallback test",
+        projectId: "proj-1",
+        stageId: "stage-1",
+        stageType: "review",
+        lastDecisionId: null,
+        participant: { type: "user", userId: "pc-user-alice", agentId: null },
+      },
+      { companyId: "c-fail", entityId: "iss-cfail-1", entityType: "issue" },
+    );
+
+    const errorLog = harness.logs.find(
+      (l) => l.message === "discord-fleet: issue.execution_stage.pending received for company with no connected client; posting fallback comment",
+    );
+    expect(errorLog?.meta).toMatchObject({ companyId: "c-fail", issueId: "iss-cfail-1" });
+
+    const paperclipInstance = (PaperclipClient as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
+    expect(paperclipInstance.addIssueComment).toHaveBeenCalledWith(
+      "iss-cfail-1",
+      expect.stringContaining("no Discord client"),
+    );
+  });
+
+  // adversarial-seam-hardening (round 11, worker.ts:397): an agent-owned
+  // stage never renders a Discord card in the first place
+  // (handleExecutionStagePending's own early return) — firing the no-client
+  // fallback for one anyway would post a misleading "could not deliver this
+  // card" comment for a card that was never supposed to exist. Uses the SAME
+  // isDiscordAddressableStageParticipant predicate as the render path so the
+  // two decision points can't diverge again.
+  it("(5) issue.execution_stage.pending for an AGENT participant, no connected client → no fallback comment posted (agent stages never had a card)", async () => {
+    const plugin = (await import("../src/worker.js")).default;
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities, "jobs.schedule"],
+      config: makeMixedConfig() as unknown as Record<string, unknown>,
+    });
+
+    await plugin.definition.setup(harness.ctx);
+
+    await harness.emit(
+      "issue.execution_stage.pending",
+      {
+        issueId: "iss-cfail-agent-1",
+        identifier: "CF-2",
+        title: "Agent-owned stage",
+        projectId: "proj-1",
+        stageId: "stage-2",
+        stageType: "review",
+        lastDecisionId: null,
+        participant: { type: "agent", agentId: "agent-1", userId: null },
+      },
+      { companyId: "c-fail", entityId: "iss-cfail-agent-1", entityType: "issue" },
+    );
+
+    const errorLog = harness.logs.find(
+      (l) => l.message === "discord-fleet: issue.execution_stage.pending received for company with no connected client; posting fallback comment",
+    );
+    expect(errorLog).toBeUndefined();
+
+    // No fallback path means no PaperclipClient was even constructed for it.
+    expect(PaperclipClient).not.toHaveBeenCalled();
+  });
+});
+
+// ─── postExecutionStageDeliveryFailureFallback: dedup + double-failure ───────
+describe("postExecutionStageDeliveryFailureFallback", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeConfig(): DiscordFleetConfig {
+    return {
+      botTokenSecretRef: "bot-ref",
+      companies: [
+        {
+          companyId: "c1",
+          companyPrefix: "TC1",
+          guildId: "guild-1",
+          channels: { digest: "d1", errors: "e1", orphan: "o1" },
+          projectRouting: {},
+          digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
+          stuckIssueThresholdHours: 6,
+          paperclipApiKeySecretRef: "paperclip/api-key",
+          paperclipApiUrl: "http://100.98.95.12:3100",
+        },
+      ],
+    };
+  }
+
+  it("posts exactly once per (issueId, stageId, decision-generation token) — a second call for the SAME pending instance is a no-op", async () => {
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    const addIssueComment = vi.fn().mockResolvedValue(undefined);
+    (PaperclipClient as ReturnType<typeof vi.fn>).mockImplementation(() => ({ addIssueComment }));
+
+    const { postExecutionStageDeliveryFailureFallback } = await import("../src/handlers/delivery-fallback.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const event = makeExecutionStageEvent("c1", "iss-dedup-1");
+
+    await postExecutionStageDeliveryFailureFallback(harness.ctx, config, event, "no Discord client connected");
+    await postExecutionStageDeliveryFailureFallback(harness.ctx, config, event, "no Discord client connected");
+
+    expect(addIssueComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("a DIFFERENT decision-generation token for the same issue+stage (changes-requested-then-resubmit) posts a NEW fallback trace", async () => {
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    const addIssueComment = vi.fn().mockResolvedValue(undefined);
+    (PaperclipClient as ReturnType<typeof vi.fn>).mockImplementation(() => ({ addIssueComment }));
+
+    const { postExecutionStageDeliveryFailureFallback } = await import("../src/handlers/delivery-fallback.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const firstInstance = makeExecutionStageEvent("c1", "iss-cycle-1", { lastDecisionId: null });
+    const secondInstance = makeExecutionStageEvent("c1", "iss-cycle-1", {
+      lastDecisionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    });
+
+    await postExecutionStageDeliveryFailureFallback(harness.ctx, config, firstInstance, "no Discord client connected");
+    await postExecutionStageDeliveryFailureFallback(harness.ctx, config, secondInstance, "no Discord client connected");
+
+    expect(addIssueComment).toHaveBeenCalledTimes(2);
+  });
+
+  it("logs the double-failure error and does not throw when the fallback comment POST itself fails", async () => {
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+    (PaperclipClient as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+      addIssueComment: vi.fn().mockRejectedValue(new Error("paperclip API addIssueComment error: 500")),
+    }));
+
+    const { postExecutionStageDeliveryFailureFallback } = await import("../src/handlers/delivery-fallback.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const event = makeExecutionStageEvent("c1", "iss-double-fail");
+
+    await expect(
+      postExecutionStageDeliveryFailureFallback(harness.ctx, config, event, "no Discord client connected for this company"),
+    ).resolves.toBeUndefined();
+
+    const doubleFailureLog = harness.logs.find(
+      (l) => l.message === "discord-fleet: execution-stage fallback comment post also failed — non-delivery is now doubly silent",
+    );
+    expect(doubleFailureLog?.meta).toMatchObject({ issueId: "iss-double-fail", companyId: "c1" });
   });
 });
 

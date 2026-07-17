@@ -154,6 +154,8 @@ import { authorizationDeniedDetails } from "../services/authorization.js";
 import { environmentService } from "../services/environments.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
 import { redactSensitiveText } from "../redaction.js";
+import { publishPluginDomainEvent } from "../services/activity-log.js";
+import type { PluginEvent } from "@paperclipai/plugin-sdk";
 import {
   createCompanySearchRateLimiter,
   type CompanySearchRateLimiter,
@@ -1947,6 +1949,131 @@ function diffExecutionParticipants(
   };
 }
 
+// Shared "did a review/approval stage NEWLY become pending" predicate — used
+// both to decide whether to wake an agent participant (buildExecutionStageWakeup,
+// agent participants only) and whether to emit the issue.execution_stage.pending
+// plugin event (publishExecutionStagePendingEventIfChanged, below, fires for every
+// participant type). Kept as one function so the two consumers can never drift
+// on what "newly pending" means.
+function executionStagePendingChanged(
+  previousState: ParsedExecutionState | null,
+  nextState: ParsedExecutionState,
+): boolean {
+  return (
+    previousState?.status !== "pending" ||
+    previousState?.currentStageId !== nextState.currentStageId ||
+    !executionPrincipalsEqual(previousState?.currentParticipant ?? null, nextState.currentParticipant ?? null)
+  );
+}
+
+// Builds AND publishes the issue.execution_stage.pending plugin event for a
+// stage that just became pending (fleet issue #631 / PR-0: without a
+// dedicated event, a review/approval stage never reached Discord as a
+// clickable card — buildPendingStagePatch is a pure issue-row mutation with
+// no approvals row and no request_confirmation interaction). Unlike
+// buildExecutionStageWakeup below (agent participants ONLY — they're woken
+// directly via heartbeat and act via the API), this fires for every
+// participant type; it's a plugin's job to decide whether a given participant
+// (e.g. type "user") needs a rendered card. No-op (never publishes) when the
+// stage hasn't changed — both call sites can call this unconditionally.
+function publishExecutionStagePendingEventIfChanged(input: {
+  issue: {
+    id: string;
+    companyId: string;
+    identifier?: string | null;
+    title?: string | null;
+    projectId?: string | null;
+  };
+  previousState: ParsedExecutionState | null;
+  nextState: ParsedExecutionState | null;
+  actor: { actorType: "user" | "agent"; actorId: string };
+}): void {
+  const { issue, previousState, nextState, actor } = input;
+  if (!nextState || nextState.status !== "pending") return;
+  if (!executionStagePendingChanged(previousState, nextState)) return;
+
+  const event: PluginEvent = {
+    eventId: randomUUID(),
+    eventType: "issue.execution_stage.pending",
+    occurredAt: new Date().toISOString(),
+    actorType: actor.actorType,
+    actorId: actor.actorId,
+    entityId: issue.id,
+    entityType: "issue",
+    companyId: issue.companyId,
+    payload: {
+      issueId: issue.id,
+      identifier: issue.identifier ?? null,
+      title: issue.title ?? null,
+      projectId: issue.projectId ?? null,
+      // stageId + lastDecisionId ride in the Discord button's customId too
+      // (execution-stage-button.ts, as issueId:stageId:decisionToken) so a
+      // click against a superseded card — including one from BEFORE a
+      // changes-requested-then-resubmit cycle, which keeps the same stageId
+      // but stamps a fresh lastDecisionId — can be refused instead of
+      // silently acting on whatever's CURRENTLY pending. See
+      // expectedExecutionStageId/expectedLastDecisionToken and
+      // assertExecutionStageStillPendingForUpdate below.
+      stageId: nextState.currentStageId,
+      stageType: nextState.currentStageType,
+      lastDecisionId: nextState.lastDecisionId,
+      participant: nextState.currentParticipant,
+    },
+  };
+  publishPluginDomainEvent(event);
+}
+
+// Closes the compare-and-swap TOCTOU codex flagged (fleet issue #631 / PR-0,
+// round 4): applyIssueExecutionPolicyTransition's expectedExecutionStageId
+// check reads the issue row BEFORE the decision-committing transaction opens,
+// so two concurrent decision requests could both read the same pending stage
+// and both pass that check before either writes. Scoped narrowly to the
+// executionPolicy decision path only (not a change to issueService.update's
+// shared signature, which dozens of unrelated callers use) — mirrors the
+// existing row-lock pattern in services/issues.ts's adoptStaleCheckoutRun.
+//
+// Rounds 5-9 added incremental field-by-field comparands here — lastDecisionId
+// (round 5), then currentParticipant (round 7) — because each round codex
+// found another field that could drift in the pre-transaction-read-to-lock
+// gap (a policy edit removing a stage was round 9's finding). Comparing
+// individual fields can never be complete; there's always another field.
+// This now compares the ENTIRE locked executionPolicy + executionState
+// against exactly what THIS request's transition was computed from
+// (preTransactionSnapshot, captured before the transaction opened) — if
+// EITHER differs at all for ANY reason (reassignment, a policy edit, another
+// decision landing first, anything), the pre-lock transition is stale and
+// must not be committed on top of it. This does NOT recompute the
+// transition under the lock (that would require moving the many OTHER
+// pre-transaction computations this route does — assignee-change
+// authorization, monitor scheduling, workspace checks — inside the
+// transaction too, a much larger restructure of the whole route); it only
+// detects that something changed and asks the client to retry, which is
+// sufficient for a Discord decision (the operator just sees "stale, check
+// Paperclip" and the next card/click reflects reality).
+async function assertExecutionStageStillPendingForUpdate(
+  tx: Pick<Db, "select">,
+  issueId: string,
+  expectedExecutionStageId: string | null | undefined,
+  preTransactionSnapshot: { executionPolicy: unknown; executionState: unknown },
+): Promise<void> {
+  if (expectedExecutionStageId === undefined || expectedExecutionStageId === null) return;
+
+  const locked = await tx
+    .select({ executionState: issueRows.executionState, executionPolicy: issueRows.executionPolicy })
+    .from(issueRows)
+    .where(eq(issueRows.id, issueId))
+    .for("update")
+    .then((rows) => rows[0] ?? null);
+  const unchangedSincePreTransactionRead =
+    JSON.stringify(locked?.executionPolicy ?? null) === JSON.stringify(preTransactionSnapshot.executionPolicy ?? null) &&
+    JSON.stringify(locked?.executionState ?? null) === JSON.stringify(preTransactionSnapshot.executionState ?? null);
+  if (!unchangedSincePreTransactionRead) {
+    throw conflict(
+      "This execution stage is no longer pending — it may have already been decided, reassigned, had its policy edited, or a newer version was posted after changes were requested and resubmitted.",
+    );
+  }
+}
+
 function buildExecutionStageWakeup(input: {
   issueId: string;
   previousState: ParsedExecutionState | null;
@@ -1961,10 +2088,7 @@ function buildExecutionStageWakeup(input: {
   if (nextState.status === "pending") {
     const agentId =
       nextState.currentParticipant?.type === "agent" ? (nextState.currentParticipant.agentId ?? null) : null;
-    const stageChanged =
-      previousState?.status !== "pending" ||
-      previousState?.currentStageId !== nextState.currentStageId ||
-      !executionPrincipalsEqual(previousState?.currentParticipant ?? null, nextState.currentParticipant ?? null);
+    const stageChanged = executionStagePendingChanged(previousState, nextState);
     if (!agentId || !stageChanged) return null;
 
     const reason =
@@ -7089,6 +7213,13 @@ export function issueRoutes(
       resume: resumeRequested,
       interrupt: interruptRequested,
       hiddenAt: hiddenAtRaw,
+      // codex P1: these are read directly from req.body further below (for
+      // applyIssueExecutionPolicyTransition / assertExecutionStageStillPendingForUpdate)
+      // and must never reach svc.update's patch or the activity-log details
+      // blob — excluded here alongside every other non-column request field,
+      // matching this destructuring's existing convention.
+      expectedExecutionStageId: _expectedExecutionStageIdRaw,
+      expectedLastDecisionToken: _expectedLastDecisionTokenRaw,
       ...updateFields
     } = req.body;
     const shouldCancelActiveRunForCancelledStatus =
@@ -7280,6 +7411,10 @@ export function issueRoutes(
       req.body.executionPolicy !== undefined && monitorChanged,
     );
 
+    const expectedExecutionStageId =
+      typeof req.body.expectedExecutionStageId === "string" ? req.body.expectedExecutionStageId : undefined;
+    const expectedLastDecisionToken =
+      typeof req.body.expectedLastDecisionToken === "string" ? req.body.expectedLastDecisionToken : undefined;
     const transition = applyIssueExecutionPolicyTransition({
       issue: existing,
       policy: nextExecutionPolicy,
@@ -7297,6 +7432,8 @@ export function issueRoutes(
       commentBody,
       reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
       monitorExplicitlyUpdated: req.body.executionPolicy !== undefined && monitorChanged,
+      expectedExecutionStageId,
+      expectedLastDecisionToken,
     });
     const decisionId = transition.decision ? randomUUID() : null;
     if (decisionId) {
@@ -7373,6 +7510,17 @@ export function issueRoutes(
       if (transition.decision && decisionId) {
         const decision = transition.decision;
         issue = await db.transaction(async (tx) => {
+          // Row-lock re-verification FIRST (see assertExecutionStageStillPendingForUpdate) —
+          // closes the race between the pre-transaction expectedExecutionStageId
+          // check above and this transaction's write. Compares the ENTIRE
+          // locked executionPolicy + executionState against what `existing`
+          // held when this transition was computed, so ANY drift in the gap
+          // (a decision landing first, a reassignment, a policy edit) is
+          // caught, not just the specific fields prior rounds enumerated.
+          await assertExecutionStageStillPendingForUpdate(tx, existing.id, expectedExecutionStageId, {
+            executionPolicy: existing.executionPolicy,
+            executionState: existing.executionState,
+          });
           // existing.id (resolved UUID), not the raw path param `id` — `id`
           // may be a human-readable identifier (svc.getById resolves both
           // forms above), but svc.update queries eq(issues.id, ...) against
@@ -7891,6 +8039,18 @@ export function issueRoutes(
       requestedByActorType: actor.actorType,
       requestedByActorId: actor.actorId,
     });
+    publishExecutionStagePendingEventIfChanged({
+      issue: {
+        id: issue.id,
+        companyId: issue.companyId,
+        identifier: issue.identifier,
+        title: issue.title,
+        projectId: issue.projectId,
+      },
+      previousState: previousExecutionState,
+      nextState: nextExecutionState,
+      actor: { actorType: actor.actorType, actorId: actor.actorId },
+    });
 
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
     void (async () => {
@@ -8210,7 +8370,17 @@ export function issueRoutes(
     })();
 
     await queueTaskWatchdogEvaluation(issue, actor.runId);
-    res.json({ ...issueResponse, comment });
+    res.json({
+      ...issueResponse,
+      comment,
+      // codex round 10: a Discord decision (expectedExecutionStageId sent)
+      // can pass every pre-write check and still not record a decision (the
+      // stage-removed self-heal path returns 200 with only a reassignment) —
+      // the CAS gate above now rejects the known cases of this, but the
+      // client shouldn't trust "200 means approved" on faith. Exposed only
+      // when the caller asked for stage-decision semantics.
+      ...(expectedExecutionStageId !== undefined ? { executionStageDecisionRecorded: decisionId !== null } : {}),
+    });
   });
 
   router.delete("/issues/:id", async (req, res) => {
@@ -9358,13 +9528,26 @@ export function issueRoutes(
           },
         });
       }
+      const commentDecisionNextExecutionState = parseIssueExecutionState(currentIssue.executionState);
       commentDecisionStageWakeup = buildExecutionStageWakeup({
         issueId: currentIssue.id,
         previousState: currentExecutionState,
-        nextState: parseIssueExecutionState(currentIssue.executionState),
+        nextState: commentDecisionNextExecutionState,
         interruptedRunId,
         requestedByActorType: actor.actorType,
         requestedByActorId: actor.actorId,
+      });
+      publishExecutionStagePendingEventIfChanged({
+        issue: {
+          id: currentIssue.id,
+          companyId: currentIssue.companyId,
+          identifier: currentIssue.identifier,
+          title: currentIssue.title,
+          projectId: currentIssue.projectId,
+        },
+        previousState: currentExecutionState,
+        nextState: commentDecisionNextExecutionState,
+        actor: { actorType: actor.actorType, actorId: actor.actorId },
       });
     } else {
       // currentIssue.id (resolved UUID), not the raw path param — same

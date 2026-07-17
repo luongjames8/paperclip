@@ -13,6 +13,7 @@ const mockIssueService = vi.hoisted(() => ({
   getRelationSummaries: vi.fn(),
   listWakeableBlockedDependents: vi.fn(),
   getWakeableParentAfterChildCompletion: vi.fn(),
+  getCurrentScheduledRetry: vi.fn(),
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({
@@ -40,11 +41,31 @@ const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
 })));
 const mockDbSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockDbSelectWhere })));
 const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })));
+// A completed decision (approve/changes-request) commits via db.transaction —
+// needed once a test drives a stage all the way to a recorded decision (the
+// expectedExecutionStageId compare-and-swap tests do). Mirrors
+// issue-comment-reopen-routes.test.ts's mockTx pattern.
+const mockTxInsertValues = vi.hoisted(() => vi.fn(async () => undefined));
+const mockTxInsert = vi.hoisted(() => vi.fn(() => ({ values: mockTxInsertValues })));
+// The row-lock re-verification (assertExecutionStageStillPendingForUpdate,
+// routes/issues.ts) does tx.select(...).from(issues).where(...).for("update")
+// as the FIRST thing inside the decision-committing transaction — tests that
+// drive a real decision through the transaction must mock this chain too.
+const mockTxSelectFor = vi.hoisted(() => vi.fn(async () => [] as Array<{ executionState: unknown; executionPolicy: unknown }>));
+const mockTxSelectWhere = vi.hoisted(() => vi.fn(() => ({ for: mockTxSelectFor })));
+const mockTxSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockTxSelectWhere })));
+const mockTxSelect = vi.hoisted(() => vi.fn(() => ({ from: mockTxSelectFrom })));
+const mockTx = vi.hoisted(() => ({
+  insert: mockTxInsert,
+  select: mockTxSelect,
+}));
 const mockDb = vi.hoisted(() => ({
   select: mockDbSelect,
+  transaction: vi.fn(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx)),
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockPublishPluginDomainEvent = vi.hoisted(() => vi.fn());
 const mockIssueThreadInteractionService = vi.hoisted(() => ({
   listForIssue: vi.fn(async () => []),
   expireRequestConfirmationsSupersededByComment: vi.fn(async () => []),
@@ -54,6 +75,14 @@ const mockIssueApprovalService = vi.hoisted(() => ({
 }));
 
 function registerModuleMocks() {
+  // Routes import publishPluginDomainEvent directly from activity-log.js (not
+  // through the ../services/index.js barrel below, which only re-exports
+  // logActivity) — mocked separately so tests can assert on the
+  // issue.execution_stage.pending event without a real plugin event bus.
+  vi.doMock("../services/activity-log.js", () => ({
+    logActivity: mockLogActivity,
+    publishPluginDomainEvent: mockPublishPluginDomainEvent,
+  }));
   vi.doMock("../services/index.js", () => ({
     companyService: () => ({
       getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
@@ -179,6 +208,15 @@ describe("issue execution policy routes", () => {
     mockIssueThreadInteractionService.listForIssue.mockResolvedValue([]);
     mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([]);
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([]);
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-1", body: "", createdAt: new Date().toISOString() });
+    mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
+    mockTxInsertValues.mockResolvedValue(undefined);
+    mockTxInsert.mockImplementation(() => ({ values: mockTxInsertValues }));
+    mockTxSelectFor.mockResolvedValue([]);
+    mockTxSelectWhere.mockImplementation(() => ({ for: mockTxSelectFor }));
+    mockTxSelectFrom.mockImplementation(() => ({ where: mockTxSelectWhere }));
+    mockTxSelect.mockImplementation(() => ({ from: mockTxSelectFrom }));
+    mockDb.transaction.mockImplementation(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx));
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
     mockDbSelectWhere.mockImplementation(() => ({
@@ -346,6 +384,506 @@ describe("issue execution policy routes", () => {
         }),
       }),
     );
+  });
+
+  // fleet issue #631 / PR-0: a review/approval stage becoming pending must
+  // emit a dedicated issue.execution_stage.pending plugin event so discord-fleet
+  // can render an Approve / Request-changes card — see buildExecutionStagePendingEvent
+  // (routes/issues.ts). Unlike buildExecutionStageWakeup (agent participants
+  // only), this fires for a "user" participant too — the case a Discord card
+  // actually needs.
+  it("emits issue.execution_stage.pending when a review stage becomes pending for a user participant", async () => {
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "todo",
+      assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1631",
+      title: "Carousel batch review",
+      projectId: "project-1",
+      executionPolicy: null,
+      executionState: null,
+    };
+    const policy = normalizeIssueExecutionPolicy({
+      stages: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          type: "review",
+          participants: [{ type: "user", userId: "local-board" }],
+        },
+      ],
+    })!;
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      companyId: "company-1",
+      runId: "run-1",
+    }))
+      .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+      .send({ status: "in_review", executionPolicy: policy });
+
+    expect(res.status).toBe(200);
+    expect(mockPublishPluginDomainEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "issue.execution_stage.pending",
+        companyId: "company-1",
+        entityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        payload: expect.objectContaining({
+          issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          identifier: "PAP-1631",
+          stageId: "11111111-1111-4111-8111-111111111111",
+          stageType: "review",
+          // First-ever pending instance for this issue — no decision has
+          // been recorded yet, so lastDecisionId is still null (codex round 5).
+          lastDecisionId: null,
+          participant: expect.objectContaining({ type: "user", userId: "local-board" }),
+        }),
+      }),
+    );
+  });
+
+  it("does not emit issue.execution_stage.pending when attaching a policy without (re)starting the workflow", async () => {
+    // Mirrors "does not auto-start execution review when reviewers are added
+    // to an already in_review issue" above: attaching executionPolicy alone
+    // (no status:"in_review"/"done") never activates a stage — nextExecutionState
+    // stays null, so no stage has "newly become pending" and no event fires.
+    const policy = normalizeIssueExecutionPolicy({
+      stages: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          type: "review",
+          participants: [{ type: "user", userId: "local-board" }],
+        },
+      ],
+    })!;
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_review",
+      assigneeAgentId: null,
+      assigneeUserId: "local-board",
+      createdByUserId: "local-board",
+      identifier: "PAP-1632",
+      title: "Execution policy edit",
+      executionPolicy: null,
+      executionState: null,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+
+    const res = await request(await createApp())
+      .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+      .send({ executionPolicy: policy });
+
+    expect(res.status).toBe(200);
+    expect(mockPublishPluginDomainEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "issue.execution_stage.pending" }),
+    );
+  });
+
+  // fleet issue #631 / PR-0, codex P1 round 3 (treadmill / adversarial-seam-
+  // hardening pass): a Discord button's customId carries the stageId it was
+  // rendered for; expectedExecutionStageId lets the caller assert "resolve
+  // THIS stage" and closes the client GET-then-PATCH round-trip race a
+  // separate client-side pre-check could never fully close.
+  describe("expectedExecutionStageId compare-and-swap", () => {
+    const STAGE_ID = "11111111-1111-4111-8111-111111111111";
+    function pendingReviewIssue(overrides: Partial<Record<string, unknown>> = {}) {
+      const policy = normalizeIssueExecutionPolicy({
+        stages: [
+          { id: STAGE_ID, type: "review", participants: [{ type: "user", userId: "local-board" }] },
+        ],
+      })!;
+      return {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        companyId: "company-1",
+        status: "in_review",
+        assigneeAgentId: null,
+        assigneeUserId: "local-board",
+        createdByUserId: "local-board",
+        identifier: "PAP-1634",
+        title: "Stage CAS check",
+        executionPolicy: policy,
+        executionState: {
+          status: "pending",
+          currentStageId: STAGE_ID,
+          currentStageIndex: 0,
+          currentStageType: "review",
+          currentParticipant: { type: "user", userId: "local-board", agentId: null },
+          returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333", userId: null },
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+        },
+        ...overrides,
+      };
+    }
+
+    it("matching expectedExecutionStageId → approves normally", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+      // The transaction's own row-lock re-verification re-reads the SAME
+      // still-pending state — mirrors what a real, uncontested Postgres
+      // FOR UPDATE read would see.
+      mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState, executionPolicy: issue.executionPolicy }]);
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({
+          status: "done",
+          comment: "Approved via test",
+          expectedExecutionStageId: STAGE_ID,
+          expectedLastDecisionToken: "none",
+        });
+
+      expect(res.status).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalled();
+      expect(mockTxSelectFor).toHaveBeenCalledWith("update");
+      // codex P1 (round 6): these CAS-only fields must never reach the
+      // update patch (they aren't real issue columns) or the activity-log
+      // details blob — verified by asserting the exact patch shape.
+      const patch = mockIssueService.update.mock.calls[0][1] as Record<string, unknown>;
+      expect(patch).not.toHaveProperty("expectedExecutionStageId");
+      expect(patch).not.toHaveProperty("expectedLastDecisionToken");
+    });
+
+    it("row lock re-verification catches a stage that advanced BETWEEN the pre-transaction read and the lock (concurrent-decision race) → 409, no mutation", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+      // Simulates a second concurrent decision that landed and completed the
+      // stage in the gap between this request's pre-transaction read (which
+      // still saw "pending") and this request's own FOR UPDATE lock
+      // acquisition — the exact race codex flagged in round 4. The
+      // transaction-scoped re-check must catch what the pre-transaction
+      // check alone cannot.
+      mockTxSelectFor.mockResolvedValue([{
+        executionState: { ...issue.executionState, status: "completed", currentStageId: null },
+        executionPolicy: issue.executionPolicy,
+      }]);
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    // codex round 7: the transition being written was computed from the
+    // PRE-transaction read's participant. If a reassignment (same stageId,
+    // same lastDecisionId — no decision was recorded, just a policy/assignee
+    // edit) lands in the gap before this request's own lock acquires, the
+    // stale request must not silently commit as the OLD participant.
+    it("row lock re-verification catches a participant reassignment BETWEEN the pre-transaction read and the lock → 409, no mutation", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+      // Same stageId + same lastDecisionId (no decision recorded), but the
+      // reviewer was reassigned from local-board to a different user in the
+      // gap between the pre-transaction read and this request's lock.
+      mockTxSelectFor.mockResolvedValue([{
+        executionState: {
+          ...issue.executionState,
+          currentParticipant: { type: "user", userId: "someone-else", agentId: null },
+        },
+        executionPolicy: issue.executionPolicy,
+      }]);
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    // codex round 9: an executionPolicy edit (e.g. an approval stage added/
+    // removed, or the reviewer's participant list changed) in the gap
+    // between the pre-transaction read and this request's lock leaves
+    // executionState nominally unchanged (same stageId/status/participant/
+    // lastDecisionId) but the transition was computed against a policy that
+    // no longer matches the locked row. Field-by-field comparands on
+    // executionState alone can never catch this — the whole-object compare
+    // (executionPolicy AND executionState) is what closes it.
+    it("row lock re-verification catches an executionPolicy edit BETWEEN the pre-transaction read and the lock → 409, no mutation", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+      // executionState is byte-for-byte identical to the pre-transaction
+      // read; only executionPolicy drifted (an approval stage was appended).
+      const editedPolicy = normalizeIssueExecutionPolicy({
+        stages: [
+          { id: STAGE_ID, type: "review", participants: [{ type: "user", userId: "local-board" }] },
+          { type: "approval", participants: [{ type: "user", userId: "second-approver" }] },
+        ],
+      })!;
+      mockTxSelectFor.mockResolvedValue([{
+        executionState: issue.executionState,
+        executionPolicy: editedPolicy,
+      }]);
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    // codex round 10: NOT a concurrency race — a SEQUENTIAL scenario. An
+    // operator edits the policy (same stageId, but the participant list no
+    // longer includes the observed currentParticipant) BEFORE the Discord
+    // card is clicked, so `existing` (this request's own pre-transaction
+    // read) already reflects the edited policy. The old gate only checked
+    // stageId/status/lastDecisionId against the STALE executionState and
+    // would have passed this through to the stage-removed self-heal /
+    // silent-reassignment path (200, no decision recorded). The gate now
+    // also requires the stage to still exist in the current policy AND the
+    // observed participant to still be valid for it — caught here, in
+    // issue-execution-policy.ts, before the transaction/row-lock ever runs.
+    it("sequential stale decision: policy edited BEFORE the click (participant no longer valid for the same stageId) → 409, no mutation, row lock never reached", async () => {
+      const editedPolicy = normalizeIssueExecutionPolicy({
+        stages: [
+          { id: STAGE_ID, type: "review", participants: [{ type: "user", userId: "someone-else" }] },
+        ],
+      })!;
+      const issue = pendingReviewIssue({ executionPolicy: editedPolicy });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockTxSelectFor).not.toHaveBeenCalled();
+    });
+
+    it("mismatched expectedExecutionStageId → 409, no mutation applied", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({
+          status: "done",
+          comment: "Stale click",
+          expectedExecutionStageId: "99999999-9999-4999-8999-999999999999",
+        });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("stage in changes_requested (same stageId, executor hasn't resubmitted) → 409, no mutation", async () => {
+      const issue = pendingReviewIssue({
+        status: "in_progress",
+        assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+        assigneeUserId: null,
+        executionState: {
+          status: "changes_requested",
+          currentStageId: STAGE_ID,
+          currentStageIndex: 0,
+          currentStageType: "review",
+          currentParticipant: { type: "user", userId: "local-board", agentId: null },
+          returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333", userId: null },
+          completedStageIds: [],
+          lastDecisionId: "decision-1",
+          lastDecisionOutcome: "changes_requested",
+        },
+      });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Stale approve while changes are outstanding", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("absent expectedExecutionStageId (existing/non-Discord callers) → unaffected, behaves exactly as before", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via web UI, no stage token" });
+
+      expect(res.status).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalled();
+      // No client-observed stage to assert -> the row-lock re-verification
+      // never runs (would be pure overhead for a caller with nothing to check).
+      expect(mockTxSelectFor).not.toHaveBeenCalled();
+    });
+
+    // codex round 5 (adversarial-seam-hardening pass): stageId+status alone
+    // don't distinguish a stage's pending instance from a LATER pending
+    // instance of the SAME stage after a changes-requested-then-resubmit
+    // cycle — both have identical (status: "pending", currentStageId).
+    // expectedLastDecisionToken closes this: it's derived from
+    // executionState.lastDecisionId, which the route layer stamps to a fresh
+    // value every time ANY decision is recorded for the issue.
+    describe("expectedLastDecisionToken (pending-generation token)", () => {
+      it("matching token ('none', no decision recorded yet) → approves normally", async () => {
+        const issue = pendingReviewIssue();
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+          ...issue,
+          ...patch,
+          updatedAt: new Date(),
+        }));
+        mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState, executionPolicy: issue.executionPolicy }]);
+
+        const res = await request(await createApp())
+          .patch(`/api/issues/${issue.id}`)
+          .send({
+            status: "done",
+            comment: "Approved via test",
+            expectedExecutionStageId: STAGE_ID,
+            expectedLastDecisionToken: "none",
+          });
+
+        expect(res.status).toBe(200);
+        expect(mockIssueService.update).toHaveBeenCalled();
+      });
+
+      it("stale token from BEFORE a changes-requested-then-resubmit cycle → 409, no mutation (the exact codex round-5 scenario)", async () => {
+        // Same stageId, status back to "pending" (executor resubmitted), but
+        // lastDecisionId is now the changes-request decision's id — a card
+        // rendered for the ORIGINAL pending instance (token "none") is stale.
+        const issue = pendingReviewIssue({
+          executionState: {
+            status: "pending",
+            currentStageId: STAGE_ID,
+            currentStageIndex: 0,
+            currentStageType: "review",
+            currentParticipant: { type: "user", userId: "local-board", agentId: null },
+            returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333", userId: null },
+            completedStageIds: [],
+            lastDecisionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            lastDecisionOutcome: "changes_requested",
+          },
+        });
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+          ...issue,
+          ...patch,
+          updatedAt: new Date(),
+        }));
+
+        const res = await request(await createApp())
+          .patch(`/api/issues/${issue.id}`)
+          .send({
+            status: "done",
+            comment: "Approved from a stale, pre-changes-request card",
+            expectedExecutionStageId: STAGE_ID,
+            expectedLastDecisionToken: "none",
+          });
+
+        expect(res.status).toBe(409);
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      });
+
+      it("row lock re-verification catches a decision recorded BETWEEN the pre-transaction read and the lock → 409, no mutation", async () => {
+        const issue = pendingReviewIssue();
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+          ...issue,
+          ...patch,
+          updatedAt: new Date(),
+        }));
+        // Pre-transaction read saw lastDecisionId: null ("none"); by the time
+        // this request's own lock acquires, a concurrent decision already
+        // landed and stamped a fresh lastDecisionId — same stageId+status
+        // (changes-requested loop back to pending), different generation.
+        mockTxSelectFor.mockResolvedValue([{
+          executionState: { ...issue.executionState, lastDecisionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+          executionPolicy: issue.executionPolicy,
+        }]);
+
+        const res = await request(await createApp())
+          .patch(`/api/issues/${issue.id}`)
+          .send({
+            status: "done",
+            comment: "Approved via test",
+            expectedExecutionStageId: STAGE_ID,
+            expectedLastDecisionToken: "none",
+          });
+
+        expect(res.status).toBe(409);
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      });
+
+      it("absent expectedLastDecisionToken (stageId provided but no token) → falls back to stageId-only check, behaves as before", async () => {
+        const issue = pendingReviewIssue();
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+          ...issue,
+          ...patch,
+          updatedAt: new Date(),
+        }));
+        mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState, executionPolicy: issue.executionPolicy }]);
+
+        const res = await request(await createApp())
+          .patch(`/api/issues/${issue.id}`)
+          .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+        expect(res.status).toBe(200);
+        expect(mockIssueService.update).toHaveBeenCalled();
+      });
+    });
   });
 
   it("allows an agent-authored in_review transition with a scheduled monitor", async () => {
