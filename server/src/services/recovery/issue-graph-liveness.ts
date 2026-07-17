@@ -620,14 +620,23 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
   // checks enum membership), so a `backlog` issue can carry its own unresolved
   // `blockedByIssueIds` — e.g. PATCHed back from `blocked` without clearing them,
   // or dependency-parked per the F2/INV-3 convention before a later status flip.
-  // That is itself an explicit waiting path (checkout also refuses in_progress
-  // while unresolved blockers exist), so the orphan scan must not recommend
-  // "move to todo" when the real next action is upstream of this issue.
-  function hasUnresolvedOwnBlockers(issue: IssueLivenessIssueInput) {
+  //
+  // Deliberately narrow: filters ONLY `done` (an unambiguous, single-field,
+  // no-interpretation-possible "no longer blocking" — the same test
+  // firstBlockedChainFinding itself applies before it will even look at a
+  // relation, and the same test `unresolvedBlockers` above already uses).
+  // Everything else that filter cares about (cross-company relations, a
+  // dangling blocker id) is left to firstBlockedChainFinding as the single
+  // source of truth for "is this relation actually live" — duplicating that
+  // part here would only recreate the class of bug this replaces (a gate and
+  // a walker silently drifting out of sync on which relations they consider
+  // real). A resolvable, non-done blocker is exactly the boundary where a
+  // duplicate check is risk-free because it can never legitimately diverge.
+  function hasOwnBlockerRelations(issue: IssueLivenessIssueInput) {
     const relations = blockersByBlockedIssueId.get(issue.id) ?? [];
     return relations.some((relation) => {
       const blocker = issuesById.get(relation.blockerIssueId);
-      return Boolean(blocker) && blocker!.status !== "done" && blocker!.status !== "cancelled";
+      return blocker !== undefined && blocker.status !== "done";
     });
   }
 
@@ -670,10 +679,21 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
       issue.assigneeAgentId &&
       !unresolvedBlockers.has(issue.id) &&
       isStaleAssignedBacklogIssue(issue) &&
-      !hasUnresolvedOwnBlockers(issue) &&
       !hasExplicitWaitingPath(issue)
     ) {
-      findings.push(staleAssignedBacklogFinding(issue));
+      if (hasOwnBlockerRelations(issue)) {
+        // Walk the SAME chain a status==="blocked" root would walk (the function
+        // doesn't read the root's own status), so a dead upstream blocker still
+        // gets surfaced as its own leaf finding instead of silently suppressing
+        // this one. A null result means the chain resolves to a genuinely live
+        // path (or every relation was filtered as malformed) — either way, that
+        // is the identical conclusion the same walk already reaches today for a
+        // status==="blocked" root in the same shape, so nothing to add here.
+        const chainFinding = firstBlockedChainFinding(issue, issue, [issue], new Set());
+        if (chainFinding) findings.push(chainFinding);
+      } else {
+        findings.push(staleAssignedBacklogFinding(issue));
+      }
     }
   }
 
