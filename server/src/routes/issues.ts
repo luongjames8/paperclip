@@ -2008,13 +2008,51 @@ function publishExecutionStagePendingEventIfChanged(input: {
       projectId: issue.projectId ?? null,
       // stageId rides in the Discord button's customId too (execution-stage-button.ts)
       // so a click against a superseded card can be refused instead of silently
-      // acting on whatever stage is CURRENTLY pending — see PaperclipClient.getIssueById.
+      // acting on whatever stage is CURRENTLY pending — see expectedExecutionStageId
+      // and assertExecutionStageStillPendingForUpdate below.
       stageId: nextState.currentStageId,
       stageType: nextState.currentStageType,
       participant: nextState.currentParticipant,
     },
   };
   publishPluginDomainEvent(event);
+}
+
+// Closes the compare-and-swap TOCTOU codex flagged (fleet issue #631 / PR-0,
+// round 4): applyIssueExecutionPolicyTransition's expectedExecutionStageId
+// check reads the issue row BEFORE the decision-committing transaction opens,
+// so two concurrent decision requests could both read the same pending stage
+// and both pass that check before either writes. Scoped narrowly to the
+// executionPolicy decision path only (not a change to issueService.update's
+// shared signature, which dozens of unrelated callers use) — mirrors the
+// existing row-lock pattern in services/issues.ts's adoptStaleCheckoutRun.
+//
+// Must run FIRST inside the transaction, before svc.update: locks the row via
+// SELECT ... FOR UPDATE, which blocks a second concurrent transaction on the
+// SAME issue until the first commits. When the second transaction's lock
+// finally acquires, it re-reads the (by then already-mutated) executionState
+// and correctly fails the pending/stageId check here — never silently
+// proceeding to write on top of a decision that already landed.
+async function assertExecutionStageStillPendingForUpdate(
+  tx: Pick<Db, "select">,
+  issueId: string,
+  expectedExecutionStageId: string | null | undefined,
+): Promise<void> {
+  if (expectedExecutionStageId === undefined || expectedExecutionStageId === null) return;
+
+  const locked = await tx
+    .select({ executionState: issueRows.executionState })
+    .from(issueRows)
+    .where(eq(issueRows.id, issueId))
+    .for("update")
+    .then((rows) => rows[0] ?? null);
+  const lockedState = parseIssueExecutionState(locked?.executionState);
+  const stillPending = lockedState?.status === "pending" && lockedState.currentStageId === expectedExecutionStageId;
+  if (!stillPending) {
+    throw conflict(
+      "This execution stage is no longer pending — it may have already been decided, had changes requested, or been superseded by a later stage.",
+    );
+  }
 }
 
 function buildExecutionStageWakeup(input: {
@@ -7347,6 +7385,8 @@ export function issueRoutes(
       req.body.executionPolicy !== undefined && monitorChanged,
     );
 
+    const expectedExecutionStageId =
+      typeof req.body.expectedExecutionStageId === "string" ? req.body.expectedExecutionStageId : undefined;
     const transition = applyIssueExecutionPolicyTransition({
       issue: existing,
       policy: nextExecutionPolicy,
@@ -7364,8 +7404,7 @@ export function issueRoutes(
       commentBody,
       reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
       monitorExplicitlyUpdated: req.body.executionPolicy !== undefined && monitorChanged,
-      expectedExecutionStageId:
-        typeof req.body.expectedExecutionStageId === "string" ? req.body.expectedExecutionStageId : undefined,
+      expectedExecutionStageId,
     });
     const decisionId = transition.decision ? randomUUID() : null;
     if (decisionId) {
@@ -7442,6 +7481,10 @@ export function issueRoutes(
       if (transition.decision && decisionId) {
         const decision = transition.decision;
         issue = await db.transaction(async (tx) => {
+          // Row-lock re-verification FIRST (see assertExecutionStageStillPendingForUpdate) —
+          // closes the race between the pre-transaction expectedExecutionStageId
+          // check above and this transaction's write.
+          await assertExecutionStageStillPendingForUpdate(tx, existing.id, expectedExecutionStageId);
           // existing.id (resolved UUID), not the raw path param `id` — `id`
           // may be a human-readable identifier (svc.getById resolves both
           // forms above), but svc.update queries eq(issues.id, ...) against

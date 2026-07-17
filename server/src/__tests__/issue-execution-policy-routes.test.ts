@@ -47,8 +47,17 @@ const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })))
 // issue-comment-reopen-routes.test.ts's mockTx pattern.
 const mockTxInsertValues = vi.hoisted(() => vi.fn(async () => undefined));
 const mockTxInsert = vi.hoisted(() => vi.fn(() => ({ values: mockTxInsertValues })));
+// The row-lock re-verification (assertExecutionStageStillPendingForUpdate,
+// routes/issues.ts) does tx.select(...).from(issues).where(...).for("update")
+// as the FIRST thing inside the decision-committing transaction — tests that
+// drive a real decision through the transaction must mock this chain too.
+const mockTxSelectFor = vi.hoisted(() => vi.fn(async () => [] as Array<{ executionState: unknown }>));
+const mockTxSelectWhere = vi.hoisted(() => vi.fn(() => ({ for: mockTxSelectFor })));
+const mockTxSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockTxSelectWhere })));
+const mockTxSelect = vi.hoisted(() => vi.fn(() => ({ from: mockTxSelectFrom })));
 const mockTx = vi.hoisted(() => ({
   insert: mockTxInsert,
+  select: mockTxSelect,
 }));
 const mockDb = vi.hoisted(() => ({
   select: mockDbSelect,
@@ -203,6 +212,10 @@ describe("issue execution policy routes", () => {
     mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
     mockTxInsertValues.mockResolvedValue(undefined);
     mockTxInsert.mockImplementation(() => ({ values: mockTxInsertValues }));
+    mockTxSelectFor.mockResolvedValue([]);
+    mockTxSelectWhere.mockImplementation(() => ({ for: mockTxSelectFor }));
+    mockTxSelectFrom.mockImplementation(() => ({ where: mockTxSelectWhere }));
+    mockTxSelect.mockImplementation(() => ({ from: mockTxSelectFrom }));
     mockDb.transaction.mockImplementation(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx));
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
@@ -524,6 +537,10 @@ describe("issue execution policy routes", () => {
         ...patch,
         updatedAt: new Date(),
       }));
+      // The transaction's own row-lock re-verification re-reads the SAME
+      // still-pending state — mirrors what a real, uncontested Postgres
+      // FOR UPDATE read would see.
+      mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState }]);
 
       const res = await request(await createApp())
         .patch(`/api/issues/${issue.id}`)
@@ -531,6 +548,33 @@ describe("issue execution policy routes", () => {
 
       expect(res.status).toBe(200);
       expect(mockIssueService.update).toHaveBeenCalled();
+      expect(mockTxSelectFor).toHaveBeenCalledWith("update");
+    });
+
+    it("row lock re-verification catches a stage that advanced BETWEEN the pre-transaction read and the lock (concurrent-decision race) → 409, no mutation", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+      // Simulates a second concurrent decision that landed and completed the
+      // stage in the gap between this request's pre-transaction read (which
+      // still saw "pending") and this request's own FOR UPDATE lock
+      // acquisition — the exact race codex flagged in round 4. The
+      // transaction-scoped re-check must catch what the pre-transaction
+      // check alone cannot.
+      mockTxSelectFor.mockResolvedValue([{
+        executionState: { ...issue.executionState, status: "completed", currentStageId: null },
+      }]);
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
     });
 
     it("mismatched expectedExecutionStageId → 409, no mutation applied", async () => {
@@ -601,6 +645,9 @@ describe("issue execution policy routes", () => {
 
       expect(res.status).toBe(200);
       expect(mockIssueService.update).toHaveBeenCalled();
+      // No client-observed stage to assert -> the row-lock re-verification
+      // never runs (would be pure overhead for a caller with nothing to check).
+      expect(mockTxSelectFor).not.toHaveBeenCalled();
     });
   });
 
