@@ -121,17 +121,11 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     });
   }
 
-  async function seedBlockedChain(opts: {
-    outsideLookback?: boolean;
-    blockerStatus?: string;
-    blockerAssigneeAgentId?: "coder" | "manager" | null;
-  } = {}) {
+  async function seedCompanyWithCtoAndCoder(prefixLetter: string) {
     const companyId = randomUUID();
     const managerId = randomUUID();
     const coderId = randomUUID();
-    const blockedIssueId = randomUUID();
-    const blockerIssueId = randomUUID();
-    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const issuePrefix = `${prefixLetter}${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
 
     await db.insert(companies).values({
       id: companyId,
@@ -165,6 +159,18 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
         permissions: {},
       },
     ]);
+
+    return { companyId, managerId, coderId, issuePrefix };
+  }
+
+  async function seedBlockedChain(opts: {
+    outsideLookback?: boolean;
+    blockerStatus?: string;
+    blockerAssigneeAgentId?: "coder" | "manager" | null;
+  } = {}) {
+    const { companyId, managerId, coderId, issuePrefix } = await seedCompanyWithCtoAndCoder("T");
+    const blockedIssueId = randomUUID();
+    const blockerIssueId = randomUUID();
 
     const issueTimestamp = opts.outsideLookback === true
       ? new Date(Date.now() - 25 * 60 * 60 * 1000)
@@ -208,6 +214,30 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     });
 
     return { companyId, managerId, coderId, blockedIssueId, blockerIssueId };
+  }
+
+  async function seedOrphanAssignedBacklogIssue(opts: {
+    ageHours?: number;
+  } = {}) {
+    const ageHours = opts.ageHours ?? 8;
+    const { companyId, managerId, coderId, issuePrefix } = await seedCompanyWithCtoAndCoder("O");
+    const orphanIssueId = randomUUID();
+
+    const issueTimestamp = new Date(Date.now() - ageHours * 60 * 60 * 1000);
+    await db.insert(issues).values({
+      id: orphanIssueId,
+      companyId,
+      title: "Rework leg born in backlog",
+      status: "backlog",
+      priority: "medium",
+      assigneeAgentId: coderId,
+      issueNumber: 1,
+      identifier: `${issuePrefix}-1`,
+      createdAt: issueTimestamp,
+      updatedAt: issueTimestamp,
+    });
+
+    return { companyId, managerId, coderId, orphanIssueId };
   }
 
   async function seedResolvedDependencyBackstopFixture(opts: {
@@ -625,6 +655,155 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
         blockerIssueId,
       ].join(":"),
     });
+  });
+
+  it("creates one bounded escalation for a stale orphan assigned backlog issue (HIN-2245 class)", async () => {
+    await enableAutoRecovery();
+    const { companyId, coderId, orphanIssueId } = await seedOrphanAssignedBacklogIssue({ ageHours: 8 });
+    const heartbeat = heartbeatService(db);
+
+    const first = await heartbeat.reconcileIssueGraphLiveness();
+    const second = await heartbeat.reconcileIssueGraphLiveness();
+
+    expect(first.findings).toBe(1);
+    expect(first.escalationsCreated).toBe(1);
+    expect(second.findings).toBe(0);
+    expect(second.escalationsCreated).toBe(0);
+
+    const escalations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "harness_liveness_escalation")));
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0]).toMatchObject({
+      parentId: orphanIssueId,
+      assigneeAgentId: coderId,
+      originId: [
+        "harness_liveness",
+        companyId,
+        orphanIssueId,
+        "stale_assigned_backlog_issue",
+        "none",
+      ].join(":"),
+      originFingerprint: [
+        "harness_liveness_leaf",
+        companyId,
+        "stale_assigned_backlog_issue",
+        orphanIssueId,
+      ].join(":"),
+    });
+
+    const orphanAfter = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, orphanIssueId))
+      .then((rows) => rows[0]);
+    expect(orphanAfter?.status).toBe("blocked");
+
+    const orphanBlockerRelations = await db
+      .select({ blockerIssueId: issueRelations.issueId })
+      .from(issueRelations)
+      .where(and(
+        eq(issueRelations.companyId, companyId),
+        eq(issueRelations.relatedIssueId, orphanIssueId),
+        eq(issueRelations.type, "blocks"),
+      ));
+    expect(orphanBlockerRelations.map((row) => row.blockerIssueId)).toContain(escalations[0]!.id);
+  });
+
+  it("does not escalate a freshly parked assigned backlog issue with no dependents", async () => {
+    await enableAutoRecovery();
+    await seedOrphanAssignedBacklogIssue({ ageHours: 2 });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileIssueGraphLiveness();
+
+    expect(result.findings).toBe(0);
+    expect(result.escalationsCreated).toBe(0);
+  });
+
+  it("still escalates a stale orphan assigned backlog issue older than the default lookback window", async () => {
+    // The orphan's own updatedAt is frozen at go-stale time (nothing touches a
+    // parked backlog issue), so at 30h old it sits outside the default 24h
+    // auto-recovery lookback. This state is exempt from that lookback (its own
+    // staleness threshold already gates it) — without the exemption this finding
+    // would surface in `findings` forever but never actually escalate.
+    await enableAutoRecovery();
+    const { orphanIssueId } = await seedOrphanAssignedBacklogIssue({ ageHours: 30 });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileIssueGraphLiveness();
+
+    expect(result.findings).toBe(1);
+    expect(result.skippedOutsideLookback).toBe(0);
+    expect(result.escalationsCreated).toBe(1);
+
+    const orphanAfter = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, orphanIssueId))
+      .then((rows) => rows[0]);
+    expect(orphanAfter?.status).toBe("blocked");
+  });
+
+  it("still escalates a stale backlog root's own dead blocker when both are older than the lookback window", async () => {
+    // The classifier's own-blocker chain walk can surface a backlog root as a
+    // DIFFERENT state (blocked_by_unassigned_issue here) than
+    // stale_assigned_backlog_issue — the lookback exemption must key on the
+    // root's status, not the finding's state, or exactly this outcome silently
+    // ages out of auto-recovery under the default 24h lookback.
+    await enableAutoRecovery();
+    const { companyId, coderId, issuePrefix } = await seedCompanyWithCtoAndCoder("D");
+    const orphanIssueId = randomUUID();
+    const deadBlockerIssueId = randomUUID();
+    const oldTimestamp = new Date(Date.now() - 30 * 60 * 60 * 1000);
+
+    await db.insert(issues).values([
+      {
+        id: orphanIssueId,
+        companyId,
+        title: "Rework leg born in backlog with a dead blocker",
+        status: "backlog",
+        priority: "medium",
+        assigneeAgentId: coderId,
+        issueNumber: 1,
+        identifier: `${issuePrefix}-1`,
+        createdAt: oldTimestamp,
+        updatedAt: oldTimestamp,
+      },
+      {
+        id: deadBlockerIssueId,
+        companyId,
+        title: "Unowned upstream work",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId: null,
+        issueNumber: 2,
+        identifier: `${issuePrefix}-2`,
+        createdAt: oldTimestamp,
+        updatedAt: oldTimestamp,
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: deadBlockerIssueId,
+      relatedIssueId: orphanIssueId,
+      type: "blocks",
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileIssueGraphLiveness();
+
+    expect(result.findings).toBe(1);
+    expect(result.skippedOutsideLookback).toBe(0);
+    expect(result.escalationsCreated).toBe(1);
+
+    const escalations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "harness_liveness_escalation")));
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0]).toMatchObject({ parentId: deadBlockerIssueId });
   });
 
   it("treats open recovery issues as active waiting paths for non-assigned-backlog states", async () => {

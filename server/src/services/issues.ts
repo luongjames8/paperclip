@@ -3066,6 +3066,7 @@ async function listIssueBlockedInboxAttentionMap(
       executionState: issue.executionState,
       monitorNextCheckAt: issue.monitorNextCheckAt,
       monitorAttemptCount: issue.monitorAttemptCount,
+      updatedAt: issue.updatedAt,
     })),
     relations: graphRelations,
     agents: companyAgents,
@@ -3212,6 +3213,7 @@ async function listIssueBlockedInboxAttentionMap(
         reason: finding.state as IssueBlockedInboxAttention["reason"],
         severity: finding.state === "blocked_by_assigned_backlog_issue"
           || finding.state === "in_review_without_action_path"
+          || finding.state === "stale_assigned_backlog_issue"
           ? "high"
           : finding.severity === "critical" ? "critical" : "high",
         stoppedSinceAt: leaf?.updatedAt ?? row.updatedAt,
@@ -3236,6 +3238,8 @@ async function listIssueBlockedInboxAttentionMap(
                 return "Repair review participant";
               case "in_review_without_action_path":
                 return "Choose review path";
+              case "stale_assigned_backlog_issue":
+                return "Move to todo";
             }
           })(),
           detail: finding.recommendedAction,

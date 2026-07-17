@@ -9,7 +9,26 @@ export type IssueLivenessState =
   | "blocked_by_uninvokable_assignee"
   | "blocked_by_cancelled_issue"
   | "invalid_review_participant"
-  | "in_review_without_action_path";
+  | "in_review_without_action_path"
+  | "stale_assigned_backlog_issue";
+
+/**
+ * How long an issue may sit assigned + `backlog` with no dependent, waiting path, or
+ * open recovery before it is treated as a stale orphan rather than deliberate parking
+ * (doc/execution-semantics.md, "Agent-assigned backlog").
+ *
+ * A backlog-rooted issue is inherently frozen once orphaned — nothing touches a
+ * parked backlog issue, including any upstream blocker the classifier's own-blocker
+ * chain walk surfaces instead (see hasOwnBlockerRelations below) — so findings
+ * rooted here are exempt from the generic auto-recovery lookback window entirely
+ * (service.ts, isLivenessFindingLookbackExempt, keyed on the root's status rather
+ * than the finding's state since the chain walk can surface this root as any of
+ * the pre-existing blocked-by or review states, not just stale_assigned_backlog_issue):
+ * that window exists to avoid re-litigating findings whose chain went cold long ago,
+ * but for a backlog root, chain staleness IS the trigger, and gating on freshness
+ * would eventually suppress escalation for every instance permanently.
+ */
+export const ASSIGNED_BACKLOG_STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
 
 export interface IssueLivenessIssueInput {
   id: string;
@@ -28,6 +47,7 @@ export interface IssueLivenessIssueInput {
   executionState?: Record<string, unknown> | null;
   monitorNextCheckAt?: Date | string | null;
   monitorAttemptCount?: number | null;
+  updatedAt?: Date | string | null;
 }
 
 export interface IssueLivenessRelationInput {
@@ -385,6 +405,10 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
       blocker.status !== "cancelled" &&
       blocked.status === "blocked"
     ) {
+      // A backlog blocker recorded here is already reachable via the blocked-chain
+      // walk below (blockedFindingForLeaf), so the standalone orphan scan (which
+      // only ever looks at backlog-status issues) must skip anything in this set
+      // to avoid raising a second, duplicate escalation for the same issue.
       unresolvedBlockers.add(blocker.id);
     }
   }
@@ -589,6 +613,58 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
     return null;
   }
 
+  function isStaleAssignedBacklogIssue(issue: IssueLivenessIssueInput) {
+    const updatedAtMs = readDateMs(issue.updatedAt);
+    if (updatedAtMs === null) return false;
+    return nowMs - updatedAtMs >= ASSIGNED_BACKLOG_STALE_THRESHOLD_MS;
+  }
+
+  // Nothing couples issue_relations rows to issues.status (assertTransition only
+  // checks enum membership), so a `backlog` issue can carry its own unresolved
+  // `blockedByIssueIds` — e.g. PATCHed back from `blocked` without clearing them,
+  // or dependency-parked per the F2/INV-3 convention before a later status flip.
+  //
+  // Deliberately narrow: filters ONLY `done` (an unambiguous, single-field,
+  // no-interpretation-possible "no longer blocking" — the same test
+  // firstBlockedChainFinding itself applies before it will even look at a
+  // relation, and the same test `unresolvedBlockers` above already uses).
+  // Everything else that filter cares about (cross-company relations, a
+  // dangling blocker id) is left to firstBlockedChainFinding as the single
+  // source of truth for "is this relation actually live" — duplicating that
+  // part here would only recreate the class of bug this replaces (a gate and
+  // a walker silently drifting out of sync on which relations they consider
+  // real). A resolvable, non-done blocker is exactly the boundary where a
+  // duplicate check is risk-free because it can never legitimately diverge.
+  function hasOwnBlockerRelations(issue: IssueLivenessIssueInput) {
+    const relations = blockersByBlockedIssueId.get(issue.id) ?? [];
+    return relations.some((relation) => {
+      const blocker = issuesById.get(relation.blockerIssueId);
+      return blocker !== undefined && blocker.status !== "done";
+    });
+  }
+
+  function staleAssignedBacklogFinding(issue: IssueLivenessIssueInput): IssueLivenessFinding {
+    const ownerCandidates = ownerCandidatesForRecoveryIssue(issue, input.agents, agentsById, {
+      includeStalledAssignee: true,
+    });
+
+    return finding({
+      issue,
+      state: "stale_assigned_backlog_issue",
+      reason:
+        `${issueLabel(issue)} has been assigned and parked in backlog with no wake, active run, ` +
+        "human owner, interaction, approval, monitor, or recovery issue owning the next action, " +
+        "and nothing else is blocked on it to otherwise surface the incident.",
+      dependencyPath: [issue],
+      recoveryIssue: issue,
+      recommendedOwnerCandidateAgentIds: ownerCandidates.map((candidate) => candidate.agentId),
+      recommendedOwnerCandidates: ownerCandidates,
+      recommendedAction:
+        `Review ${issueLabel(issue)} and either move it to todo so the assignee wakes, assign a ` +
+        "human owner or interaction if it is intentionally parked, or cancel it if the work is no longer required.",
+    });
+  }
+
   for (const issue of input.issues) {
     if (issue.status === "blocked") {
       if (unresolvedBlockers.has(issue.id)) continue;
@@ -599,6 +675,28 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
     if (issue.status === "in_review" && !unresolvedBlockers.has(issue.id)) {
       const review = reviewFinding(issue, issue, [issue]);
       if (review) findings.push(review);
+    }
+
+    if (
+      issue.status === "backlog" &&
+      issue.assigneeAgentId &&
+      !unresolvedBlockers.has(issue.id) &&
+      isStaleAssignedBacklogIssue(issue) &&
+      !hasExplicitWaitingPath(issue)
+    ) {
+      if (hasOwnBlockerRelations(issue)) {
+        // Walk the SAME chain a status==="blocked" root would walk (the function
+        // doesn't read the root's own status), so a dead upstream blocker still
+        // gets surfaced as its own leaf finding instead of silently suppressing
+        // this one. A null result means the chain resolves to a genuinely live
+        // path (or every relation was filtered as malformed) — either way, that
+        // is the identical conclusion the same walk already reaches today for a
+        // status==="blocked" root in the same shape, so nothing to add here.
+        const chainFinding = firstBlockedChainFinding(issue, issue, [issue], new Set());
+        if (chainFinding) findings.push(chainFinding);
+      } else {
+        findings.push(staleAssignedBacklogFinding(issue));
+      }
     }
   }
 

@@ -372,6 +372,8 @@ An explicit assigned `backlog` issue remains valid when the creator is deliberat
 
 An assigned `backlog` issue becomes a liveness problem when another issue is blocked on it and there is no explicit waiting path such as a human owner, active run, queued wake, pending interaction or approval, monitor, or open recovery action. In that case the blocked parent should surface "blocked by parked work" rather than treating the dependency chain as healthy.
 
+An assigned `backlog` issue with no dependent is also a liveness problem once it has sat untouched past a bounded staleness threshold with no explicit waiting path. Nothing else is blocked on it to otherwise surface the incident, so the standalone scan is what stands between it and a permanent black hole (an issue born in `backlog` with an assignee — e.g. a rework leg a skill created without pinning `todo` — never gets a wake from any other native mechanism).
+
 ### Agent-assigned `in_progress`
 
 This is active-work state.
