@@ -547,11 +547,22 @@ describe("issue execution policy routes", () => {
 
       const res = await request(await createApp())
         .patch(`/api/issues/${issue.id}`)
-        .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+        .send({
+          status: "done",
+          comment: "Approved via test",
+          expectedExecutionStageId: STAGE_ID,
+          expectedLastDecisionToken: "none",
+        });
 
       expect(res.status).toBe(200);
       expect(mockIssueService.update).toHaveBeenCalled();
       expect(mockTxSelectFor).toHaveBeenCalledWith("update");
+      // codex P1 (round 6): these CAS-only fields must never reach the
+      // update patch (they aren't real issue columns) or the activity-log
+      // details blob — verified by asserting the exact patch shape.
+      const patch = mockIssueService.update.mock.calls[0][1] as Record<string, unknown>;
+      expect(patch).not.toHaveProperty("expectedExecutionStageId");
+      expect(patch).not.toHaveProperty("expectedLastDecisionToken");
     });
 
     it("row lock re-verification catches a stage that advanced BETWEEN the pre-transaction read and the lock (concurrent-decision race) → 409, no mutation", async () => {

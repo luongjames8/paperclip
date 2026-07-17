@@ -7209,6 +7209,13 @@ export function issueRoutes(
       resume: resumeRequested,
       interrupt: interruptRequested,
       hiddenAt: hiddenAtRaw,
+      // codex P1: these are read directly from req.body further below (for
+      // applyIssueExecutionPolicyTransition / assertExecutionStageStillPendingForUpdate)
+      // and must never reach svc.update's patch or the activity-log details
+      // blob — excluded here alongside every other non-column request field,
+      // matching this destructuring's existing convention.
+      expectedExecutionStageId: _expectedExecutionStageIdRaw,
+      expectedLastDecisionToken: _expectedLastDecisionTokenRaw,
       ...updateFields
     } = req.body;
     const shouldCancelActiveRunForCancelledStatus =
