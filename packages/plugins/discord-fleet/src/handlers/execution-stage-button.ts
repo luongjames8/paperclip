@@ -65,6 +65,14 @@ const NO_PERSONAL_KEY_MESSAGE =
 // instead of the one the card was about. Must run AFTER the interaction is
 // acked (deferUpdate/showModal already sent) — this is a real paperclip API
 // fetch, and Discord's 3s first-response window doesn't allow it before ack.
+//
+// status must be "pending", not just currentStageId matching (codex P2): a
+// changes-requested cycle returns to the SAME stageId once the executor
+// resubmits, so a card rendered for the ORIGINAL pending stage would
+// otherwise still read as "current" while the stage is actually back with
+// the executor (status: "changes_requested") — clicking Approve there resets
+// the stage to pending again rather than approving anything, while this
+// handler would still stamp the stale card "✅ Approved".
 async function isStageStillCurrent(
   paperclip: PaperclipClient,
   issueId: string,
@@ -76,7 +84,7 @@ async function isStageStillCurrent(
   } catch {
     return false;
   }
-  return issue?.executionState?.currentStageId === stageId;
+  return issue?.executionState?.status === "pending" && issue.executionState.currentStageId === stageId;
 }
 
 async function renderResolved(interaction: ButtonInteraction | ModalSubmitInteraction, label: string): Promise<void> {

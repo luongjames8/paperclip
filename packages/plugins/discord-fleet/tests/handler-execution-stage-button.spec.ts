@@ -68,8 +68,8 @@ function makeConfig(): DiscordFleetConfig {
 // against the card's stageId — default every test to "still current" so the
 // happy-path tests don't need to know about it; the dedicated staleness tests
 // override this per-case.
-function currentStageIssue(currentStageId = STAGE_ID) {
-  return { id: ISSUE_ID, executionState: { currentStageId } };
+function currentStageIssue(currentStageId = STAGE_ID, status = "pending") {
+  return { id: ISSUE_ID, executionState: { status, currentStageId } };
 }
 
 function makeButtonInteraction(customId: string, opts?: { username?: string; discordUserId?: string }): any {
@@ -256,6 +256,22 @@ describe("handleExecutionStageButton — stale-stage guard", () => {
       expect.objectContaining({ content: expect.stringContaining("already been resolved or superseded") }),
     );
     expect(mockUpdateIssueStatus).not.toHaveBeenCalled();
+  });
+
+  it("same stageId but status is 'changes_requested' (executor hasn't resubmitted yet) → refused, no API call (codex P2)", async () => {
+    const { handleExecutionStageButton } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+    mockGetIssueById.mockResolvedValue(currentStageIssue(STAGE_ID, "changes_requested"));
+    const interaction = makeButtonInteraction(`execstage-approve:${ISSUE_ID}:${STAGE_ID}`);
+
+    await handleExecutionStageButton(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("already been resolved or superseded") }),
+    );
+    expect(mockUpdateIssueStatus).not.toHaveBeenCalled();
+    expect(interaction.editReply).not.toHaveBeenCalled();
   });
 
   it("getIssueById failure → treated as stale (fail closed), no API call", async () => {

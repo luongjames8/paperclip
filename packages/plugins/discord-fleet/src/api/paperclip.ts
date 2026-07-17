@@ -21,8 +21,12 @@ export interface PaperclipIssue {
   // Present on blocked issues; empty/absent means no declared blockers (black-hole case).
   blockedByIssueIds?: string[];
   // Read by the execution-stage button handler's stale-card guard — the ONLY
-  // field of executionState this client reads (see updateIssueStatus).
-  executionState?: { currentStageId?: string | null } | null;
+  // fields of executionState this client reads. status must be checked
+  // alongside currentStageId (codex P2): a "changes requested" cycle keeps
+  // the SAME currentStageId (it returns to the same stage on resubmission),
+  // so stageId alone can't tell a still-awaiting-decision card from one whose
+  // decision window already closed.
+  executionState?: { status?: string | null; currentStageId?: string | null } | null;
 }
 
 export interface PaperclipInteraction {
