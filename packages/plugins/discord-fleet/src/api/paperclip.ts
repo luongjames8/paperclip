@@ -415,7 +415,23 @@ export class PaperclipClient {
     // still only reassign the stage. executionStageDecisionRecorded is the
     // server's own account of what happened, so the caller can render an
     // honest outcome instead of assuming success from the status code alone.
-    const body = (await res.json().catch(() => ({}))) as { executionStageDecisionRecorded?: boolean };
+    //
+    // adversarial-seam-hardening: a malformed/empty 2xx body (proxy error
+    // page, transport hiccup) must NOT be silently treated as "field absent,
+    // assume success" — that's the exact bug executionStageDecisionRecorded
+    // exists to catch, just reached via a swallowed parse failure instead of
+    // server logic. Throw instead of defaulting to {} so the caller's
+    // existing try/catch renders an honest failure, not "✅ Approved".
+    let body: { executionStageDecisionRecorded?: boolean };
+    try {
+      body = (await res.json()) as { executionStageDecisionRecorded?: boolean };
+    } catch (err) {
+      throw new PaperclipApiError(
+        `paperclip API updateIssueStatus: malformed response body: ${String(err)}`,
+        res.status,
+        url,
+      );
+    }
     return { executionStageDecisionRecorded: body.executionStageDecisionRecorded };
   }
 

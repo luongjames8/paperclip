@@ -271,6 +271,49 @@ describe("handleExecutionStageButton — approve happy path", () => {
     expect(call.embeds[0].title).toMatch(/^⚠️ Stage changed/);
     expect(call.embeds[0].title).not.toMatch(/Approved/);
   });
+
+  // adversarial-seam-hardening (round 11): secrets.resolve used to run
+  // OUTSIDE the try/catch that reports API failures — a missing/renamed
+  // secret threw uncaught past deferUpdate, leaving the click acknowledged
+  // but silent. Now folded into the same guarded call.
+  it("ctx.secrets.resolve throwing (missing/renamed secret) → ephemeral failure message, no crash, no card render", async () => {
+    const { handleExecutionStageButton } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockRejectedValue(new Error("secret ref not found"));
+    const interaction = makeButtonInteraction(`exs-ok:${ISSUE_ID}:${STAGE_ID}:${DECISION_TOKEN}`);
+
+    await expect(handleExecutionStageButton(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
+
+    expect(mockUpdateIssueStatus).not.toHaveBeenCalled();
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("Failed to approve:"), ephemeral: true }),
+    );
+    expect(interaction.editReply).not.toHaveBeenCalled();
+  });
+
+  // adversarial-seam-hardening (round 11): the render step (editReply/
+  // followUp) used to be unguarded — if it throws AFTER the decision already
+  // succeeded server-side, the operator saw a stale card with live buttons
+  // and no indication anything happened. Now caught, logged, and a
+  // best-effort ephemeral message names the outcome anyway.
+  it("render step (editReply) throwing after a SUCCESSFUL decision → logged, best-effort ephemeral message, no crash", async () => {
+    const { handleExecutionStageButton } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+    const interaction = makeButtonInteraction(`exs-ok:${ISSUE_ID}:${STAGE_ID}:${DECISION_TOKEN}`);
+    interaction.editReply = vi.fn().mockRejectedValue(new Error("interaction token expired"));
+
+    await expect(handleExecutionStageButton(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
+
+    expect(mockUpdateIssueStatus).toHaveBeenCalled();
+    const errorLog = harness.logs.find(
+      (l) => l.message === "execution-stage-button: decision succeeded server-side but rendering the outcome failed — Paperclip is correct, the Discord card may be stale",
+    );
+    expect(errorLog?.meta).toMatchObject({ issueId: ISSUE_ID });
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("couldn't update the card"), ephemeral: true }),
+    );
+  });
 });
 
 describe("handleExecutionStageButton — request changes opens a modal first", () => {
@@ -378,5 +421,80 @@ describe("handleExecutionStageChangesModal — submit happy + error paths", () =
     const call = interaction.editReply.mock.calls[0][0];
     expect(call.embeds[0].title).toMatch(/^⚠️ Stage changed/);
     expect(call.embeds[0].title).not.toMatch(/Changes requested/);
+  });
+
+  // adversarial-seam-hardening (round 11): the modal submit's deferUpdate()
+  // had NO try/catch at all — unlike the button handler's equivalent call,
+  // an expired-interaction (10062) throw here propagated uncaught. Both
+  // paths now share runExecutionStageDecision, so this is symmetric.
+  it("swallows DiscordAPIError[10062] from deferUpdate and returns early (no crash)", async () => {
+    const { handleExecutionStageChangesModal } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+    const expired: any = new Error("Unknown interaction");
+    expired.code = 10062;
+    const interaction = makeModalInteraction(`exs-chgm:${ISSUE_ID}:${STAGE_ID}:${DECISION_TOKEN}`, "some note");
+    interaction.deferUpdate = vi.fn().mockRejectedValue(expired);
+
+    await expect(handleExecutionStageChangesModal(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
+
+    expect(mockUpdateIssueStatus).not.toHaveBeenCalled();
+    expect(interaction.editReply).not.toHaveBeenCalled();
+  });
+
+  // adversarial-seam-hardening (round 11): same secrets.resolve-outside-try
+  // gap codex flagged for the button path also existed here.
+  it("ctx.secrets.resolve throwing (missing/renamed secret) → ephemeral failure message, no crash, no card render", async () => {
+    const { handleExecutionStageChangesModal } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockRejectedValue(new Error("secret ref not found"));
+    const interaction = makeModalInteraction(`exs-chgm:${ISSUE_ID}:${STAGE_ID}:${DECISION_TOKEN}`, "some note");
+
+    await expect(handleExecutionStageChangesModal(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
+
+    expect(mockUpdateIssueStatus).not.toHaveBeenCalled();
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("Failed to request changes:"), ephemeral: true }),
+    );
+    expect(interaction.editReply).not.toHaveBeenCalled();
+  });
+
+  it("render step (editReply) throwing after a SUCCESSFUL decision → logged, best-effort ephemeral message, no crash", async () => {
+    const { handleExecutionStageChangesModal } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+    const interaction = makeModalInteraction(`exs-chgm:${ISSUE_ID}:${STAGE_ID}:${DECISION_TOKEN}`, "some note");
+    interaction.editReply = vi.fn().mockRejectedValue(new Error("interaction token expired"));
+
+    await expect(handleExecutionStageChangesModal(harness.ctx, interaction, makeConfig())).resolves.toBeUndefined();
+
+    expect(mockUpdateIssueStatus).toHaveBeenCalled();
+    const errorLog = harness.logs.find(
+      (l) => l.message === "execution-stage-button: decision succeeded server-side but rendering the outcome failed — Paperclip is correct, the Discord card may be stale",
+    );
+    expect(errorLog?.meta).toMatchObject({ issueId: ISSUE_ID });
+    expect(interaction.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("couldn't update the card"), ephemeral: true }),
+    );
+  });
+
+  // adversarial-seam-hardening (round 11): renderResolved used to return
+  // silently with no log line if the interaction message had no embed
+  // snapshot — indistinguishable from every other silent failure this seam
+  // exists to eliminate.
+  it("missing embed on the interaction message → logs a warning instead of silently returning", async () => {
+    const { handleExecutionStageChangesModal } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+    const interaction = makeModalInteraction(`exs-chgm:${ISSUE_ID}:${STAGE_ID}:${DECISION_TOKEN}`, "some note");
+    interaction.message = { embeds: [] };
+
+    await handleExecutionStageChangesModal(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.editReply).not.toHaveBeenCalled();
+    const warnLog = harness.logs.find(
+      (l) => l.message === "execution-stage-button: no embed on the interaction message, outcome not rendered",
+    );
+    expect(warnLog?.meta).toMatchObject({ label: "✏️ Changes requested" });
   });
 });

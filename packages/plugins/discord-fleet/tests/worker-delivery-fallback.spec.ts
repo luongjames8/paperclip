@@ -226,6 +226,49 @@ describe("worker.ts — no-connected-client branches (companyId c-fail never joi
       expect.stringContaining("no Discord client"),
     );
   });
+
+  // adversarial-seam-hardening (round 11, worker.ts:397): an agent-owned
+  // stage never renders a Discord card in the first place
+  // (handleExecutionStagePending's own early return) — firing the no-client
+  // fallback for one anyway would post a misleading "could not deliver this
+  // card" comment for a card that was never supposed to exist. Uses the SAME
+  // isDiscordAddressableStageParticipant predicate as the render path so the
+  // two decision points can't diverge again.
+  it("(5) issue.execution_stage.pending for an AGENT participant, no connected client → no fallback comment posted (agent stages never had a card)", async () => {
+    const plugin = (await import("../src/worker.js")).default;
+    const { PaperclipClient } = await import("../src/api/paperclip.js");
+
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities, "jobs.schedule"],
+      config: makeMixedConfig() as unknown as Record<string, unknown>,
+    });
+
+    await plugin.definition.setup(harness.ctx);
+
+    await harness.emit(
+      "issue.execution_stage.pending",
+      {
+        issueId: "iss-cfail-agent-1",
+        identifier: "CF-2",
+        title: "Agent-owned stage",
+        projectId: "proj-1",
+        stageId: "stage-2",
+        stageType: "review",
+        lastDecisionId: null,
+        participant: { type: "agent", agentId: "agent-1", userId: null },
+      },
+      { companyId: "c-fail", entityId: "iss-cfail-agent-1", entityType: "issue" },
+    );
+
+    const errorLog = harness.logs.find(
+      (l) => l.message === "discord-fleet: issue.execution_stage.pending received for company with no connected client; posting fallback comment",
+    );
+    expect(errorLog).toBeUndefined();
+
+    // No fallback path means no PaperclipClient was even constructed for it.
+    expect(PaperclipClient).not.toHaveBeenCalled();
+  });
 });
 
 // ─── postExecutionStageDeliveryFailureFallback: dedup + double-failure ───────

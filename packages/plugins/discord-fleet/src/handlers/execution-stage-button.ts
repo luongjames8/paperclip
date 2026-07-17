@@ -84,9 +84,20 @@ function describeUpdateIssueStatusError(err: unknown, verb: string): string {
   return `Failed to ${verb}: ${String(err).slice(0, 200)}`;
 }
 
-async function renderResolved(interaction: ButtonInteraction | ModalSubmitInteraction, label: string): Promise<void> {
+async function renderResolved(
+  ctx: PluginContext,
+  interaction: ButtonInteraction | ModalSubmitInteraction,
+  label: string,
+): Promise<void> {
   const original = interaction.message?.embeds?.[0]?.toJSON();
-  if (!original) return;
+  if (!original) {
+    // adversarial-seam-hardening: this used to return silently — if the
+    // interaction message never carried an embed snapshot, the operator got
+    // no render AND no log line, indistinguishable from every other "nothing
+    // happened" failure this whole seam exists to eliminate.
+    ctx.logger.warn("execution-stage-button: no embed on the interaction message, outcome not rendered", { label });
+    return;
+  }
   const stamp = new Date().toISOString();
   await interaction.editReply({
     embeds: [
@@ -108,16 +119,102 @@ async function renderResolved(interaction: ButtonInteraction | ModalSubmitIntera
 // "trust the server's account, not just the status code" check lives in one
 // place, mirroring describeUpdateIssueStatusError's role for the error path.
 async function renderDecisionOutcome(
+  ctx: PluginContext,
   interaction: ButtonInteraction | ModalSubmitInteraction,
   result: { executionStageDecisionRecorded?: boolean },
   successLabel: string,
 ): Promise<void> {
   if (result.executionStageDecisionRecorded === false) {
     await interaction.followUp({ content: STALE_STAGE_MESSAGE, ephemeral: true });
-    await renderResolved(interaction, "⚠️ Stage changed");
+    await renderResolved(ctx, interaction, "⚠️ Stage changed");
     return;
   }
-  await renderResolved(interaction, successLabel);
+  await renderResolved(ctx, interaction, successLabel);
+}
+
+// adversarial-seam-hardening (round 11, fleet issue #631): the ONE place that
+// owns defer -> resolve secret -> call -> render for BOTH the approve button
+// and the request-changes modal submit, so an ACKNOWLEDGED interaction can
+// never end in silence regardless of which step throws. Enumerated failure
+// classes this closes (codex found the first two independently; the rest
+// fell out of enumerating the whole ack-to-render path):
+//   - deferUpdate() throwing DiscordAPIError[10062] (expired 3s window) — the
+//     button handler already caught this; the modal handler didn't.
+//   - ctx.secrets.resolve() throwing (missing/renamed secret) outside any
+//     try/catch — the click stayed acknowledged-but-silent.
+//   - the API call itself failing (already handled pre-existing, folded in).
+//   - the render step ITSELF (editReply/followUp) failing AFTER the decision
+//     already succeeded server-side — previously unguarded, so a Discord-side
+//     hiccup left a stale card with live buttons and no explanation, even
+//     though Paperclip's state was already correct.
+async function runExecutionStageDecision(
+  ctx: PluginContext,
+  interaction: ButtonInteraction | ModalSubmitInteraction,
+  opts: {
+    issueId: string;
+    stageId: string;
+    decisionToken: string;
+    status: string;
+    comment: string;
+    mapping: UserMapping;
+    company: CompanyConfig;
+    successLabel: string;
+    verb: string;
+  },
+): Promise<void> {
+  try {
+    await interaction.deferUpdate();
+  } catch (err: any) {
+    if (err?.code === 10062) {
+      ctx.logger.warn("execution-stage-button: interaction expired before deferUpdate (3s window)", {
+        issueId: opts.issueId,
+        verb: opts.verb,
+      });
+      return;
+    }
+    throw err;
+  }
+
+  let result: { executionStageDecisionRecorded?: boolean };
+  try {
+    const apiKey = await ctx.secrets.resolve(opts.mapping.boardApiKeySecretRef!);
+    const paperclip = new PaperclipClient(ctx, opts.company.paperclipApiUrl, apiKey);
+    result = await paperclip.updateIssueStatus(
+      opts.issueId,
+      opts.status,
+      opts.comment,
+      opts.stageId,
+      opts.decisionToken,
+    );
+  } catch (err) {
+    ctx.logger.warn(`execution-stage-button: ${opts.verb} failed`, { issueId: opts.issueId, err: String(err) });
+    await interaction
+      .followUp({ content: describeUpdateIssueStatusError(err, opts.verb), ephemeral: true })
+      .catch((followUpErr) => {
+        ctx.logger.error("execution-stage-button: failure follow-up ALSO failed — click is now silent", {
+          issueId: opts.issueId,
+          err: String(followUpErr),
+        });
+      });
+    return;
+  }
+
+  try {
+    await renderDecisionOutcome(ctx, interaction, result, opts.successLabel);
+  } catch (err) {
+    ctx.logger.error(
+      "execution-stage-button: decision succeeded server-side but rendering the outcome failed — Paperclip is correct, the Discord card may be stale",
+      { issueId: opts.issueId, err: String(err) },
+    );
+    await interaction
+      .followUp({
+        content: `${opts.successLabel.replace(/^[⚠️✅✏️]\s*/u, "")} — but I couldn't update the card. Check Paperclip to confirm.`,
+        ephemeral: true,
+      })
+      .catch(() => {
+        // best-effort last resort — nothing further to surface the failure with.
+      });
+  }
 }
 
 // Approve: PATCH {status:"done", expectedExecutionStageId}. The server's
@@ -182,33 +279,17 @@ export async function handleExecutionStageButton(
     return;
   }
 
-  try {
-    await interaction.deferUpdate();
-  } catch (err: any) {
-    if (err?.code === 10062) {
-      ctx.logger.warn("execution-stage-button: interaction expired before deferUpdate (3s window)", {
-        issueId: parsed.issueId,
-        action: parsed.action,
-      });
-      return;
-    }
-    throw err;
-  }
-
-  const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef);
-  const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
-
-  const comment = `Approved via Discord by ${interaction.user.username}`;
-  let result: Awaited<ReturnType<typeof paperclip.updateIssueStatus>>;
-  try {
-    result = await paperclip.updateIssueStatus(parsed.issueId, "done", comment, parsed.stageId, parsed.decisionToken);
-  } catch (err) {
-    ctx.logger.warn("execution-stage-button: approve API call failed", { issueId: parsed.issueId, err: String(err) });
-    await interaction.followUp({ content: describeUpdateIssueStatusError(err, "approve"), ephemeral: true });
-    return;
-  }
-
-  await renderDecisionOutcome(interaction, result, "✅ Approved");
+  await runExecutionStageDecision(ctx, interaction, {
+    issueId: parsed.issueId,
+    stageId: parsed.stageId,
+    decisionToken: parsed.decisionToken,
+    status: "done",
+    comment: `Approved via Discord by ${interaction.user.username}`,
+    mapping,
+    company,
+    successLabel: "✅ Approved",
+    verb: "approve",
+  });
 }
 
 // Handles the "Request changes" modal submit: PATCH {status:"in_progress",
@@ -249,19 +330,15 @@ export async function handleExecutionStageChangesModal(
     return;
   }
 
-  await interaction.deferUpdate();
-
-  const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef);
-  const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
-
-  let result: Awaited<ReturnType<typeof paperclip.updateIssueStatus>>;
-  try {
-    result = await paperclip.updateIssueStatus(issueId, "in_progress", note, stageId, decisionToken);
-  } catch (err) {
-    ctx.logger.warn("execution-stage-changes-modal: request-changes API call failed", { issueId, err: String(err) });
-    await interaction.followUp({ content: describeUpdateIssueStatusError(err, "request changes"), ephemeral: true });
-    return;
-  }
-
-  await renderDecisionOutcome(interaction, result, "✏️ Changes requested");
+  await runExecutionStageDecision(ctx, interaction, {
+    issueId,
+    stageId,
+    decisionToken,
+    status: "in_progress",
+    comment: note,
+    mapping,
+    company,
+    successLabel: "✏️ Changes requested",
+    verb: "request changes",
+  });
 }

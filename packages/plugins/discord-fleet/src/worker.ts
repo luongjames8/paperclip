@@ -12,7 +12,10 @@ import {
   handleCarouselConfirmationButton,
   handleCarouselConfirmationRejectModal,
 } from "./handlers/carousel-confirmation-button.js";
-import { handleExecutionStagePending } from "./handlers/execution-stage-pending.js";
+import {
+  handleExecutionStagePending,
+  isDiscordAddressableStageParticipant,
+} from "./handlers/execution-stage-pending.js";
 import {
   handleExecutionStageButton,
   handleExecutionStageChangesModal,
@@ -390,9 +393,17 @@ function bindEventHandlers(
     ctx.events.on("issue.execution_stage.pending", async (event) => {
       const client = getClientForCompany(event.companyId);
       if (!client) {
+        // codex round 11: an agent-owned stage never renders a card in the
+        // first place (handleExecutionStagePending's own early return below)
+        // — firing the fallback for one anyway would post a misleading
+        // "could not deliver this card" comment for a card that was never
+        // supposed to exist. Same predicate as that early return, so the two
+        // decision points can't diverge again.
+        const payload = event.payload as { issueId?: unknown; participant?: { type?: "agent" | "user" } | null };
+        if (!isDiscordAddressableStageParticipant(payload.participant)) return;
         ctx.logger.error("discord-fleet: issue.execution_stage.pending received for company with no connected client; posting fallback comment", {
           companyId: event.companyId,
-          issueId: (event.payload as { issueId?: unknown })?.issueId ?? event.entityId,
+          issueId: payload.issueId ?? event.entityId,
         });
         await postExecutionStageDeliveryFailureFallback(
           ctx,

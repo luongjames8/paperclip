@@ -347,3 +347,46 @@ describe("PaperclipClient.getInProgressIssues — pagination", () => {
     expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe("PaperclipClient.updateIssueStatus", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns executionStageDecisionRecorded from a well-formed response body", async () => {
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({
+      status: 200,
+      json: async () => ({ executionStageDecisionRecorded: true }),
+      text: async () => "",
+    } as any);
+
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    const result = await client.updateIssueStatus("iss-1", "done", "Approved", "stage-1", "abcd1234");
+    expect(result).toEqual({ executionStageDecisionRecorded: true });
+  });
+
+  // adversarial-seam-hardening (round 11): a malformed/empty 2xx body (proxy
+  // error page, transport hiccup) used to be swallowed via
+  // `.catch(() => ({}))`, collapsing to executionStageDecisionRecorded:
+  // undefined — indistinguishable from "field absent" and falling through to
+  // "assume success" in the caller. That's the exact bug this field exists
+  // to catch, reached through a different door. It must now throw so the
+  // caller's existing error-handling renders an honest failure instead of a
+  // silent "Approved".
+  it("a 2xx response with a body that fails to parse as JSON throws instead of silently defaulting to {}", async () => {
+    const harness = createTestHarness({ manifest });
+    vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON at position 0");
+      },
+      text: async () => "<html>502 Bad Gateway</html>",
+    } as any);
+
+    const client = new PaperclipClient(harness.ctx, "http://paperclip:3100", "tok");
+    await expect(client.updateIssueStatus("iss-1", "done", "Approved", "stage-1", "abcd1234")).rejects.toThrow(
+      /malformed response body/,
+    );
+  });
+});

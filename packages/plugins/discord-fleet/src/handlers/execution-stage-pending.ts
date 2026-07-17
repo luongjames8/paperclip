@@ -18,12 +18,26 @@ interface ExecutionStagePendingPayload {
   participant?: { type?: "agent" | "user"; agentId?: string | null; userId?: string | null } | null;
 }
 
-// Renders an executionPolicy review/approval stage as a clickable Discord
-// card (fleet issue #631 / PR-0). Only user-type participants get a card —
-// an agent-type participant is already woken natively via the runtime's
+// Only user-type participants ever get a Discord card — an agent-type
+// participant is already woken natively via the runtime's
 // buildExecutionStageWakeup path (heartbeat, acting via its own API access);
 // rendering an actionable card for that case would let a Discord user
 // override the assigned agent's review.
+//
+// adversarial-seam-hardening (round 11): exported so every place that
+// decides "should this event ever produce an operator-visible Discord
+// artifact" (the render path here, AND worker.ts's no-client fallback) calls
+// the SAME predicate. Before this, worker.ts re-derived nothing and just
+// fired the fallback unconditionally — the two decision points weren't
+// wrong by coincidence, they were just never forced to agree.
+export function isDiscordAddressableStageParticipant(
+  participant: ExecutionStagePendingPayload["participant"],
+): boolean {
+  return participant?.type === "user";
+}
+
+// Renders an executionPolicy review/approval stage as a clickable Discord
+// card (fleet issue #631 / PR-0).
 export async function handleExecutionStagePending(
   ctx: PluginContext,
   event: PluginEvent,
@@ -35,7 +49,7 @@ export async function handleExecutionStagePending(
   const issueId = payload.issueId ?? event.entityId ?? "";
   const identifier = payload.identifier ?? issueId.slice(0, 8);
 
-  if (payload.participant?.type !== "user") {
+  if (!isDiscordAddressableStageParticipant(payload.participant)) {
     ctx.logger.info("execution-stage-pending: participant is not a Discord-addressable user, skipping card", {
       companyId,
       issueId,
