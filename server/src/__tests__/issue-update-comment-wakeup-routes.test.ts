@@ -8,6 +8,9 @@ const MENTIONED_AGENT_ID = "33333333-3333-4333-8333-333333333333";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  // The router.param("id", ...) middleware resolves identifier-form path params (e.g.
+  // "PAP-999") to the UUID via this method BEFORE any route handler runs.
+  getByIdentifier: vi.fn(),
   update: vi.fn(),
   addComment: vi.fn(),
   findMentionedAgents: vi.fn(),
@@ -242,6 +245,7 @@ describe("issue update comment wakeups", () => {
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
     mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
+    mockIssueService.getByIdentifier.mockResolvedValue(null);
     mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([]);
   });
 
@@ -592,6 +596,111 @@ describe("issue update comment wakeups", () => {
           interactionId: "interaction-superseded-1",
           interactionKind: "request_confirmation",
           interactionStatus: "expired",
+        }),
+      }),
+    );
+  });
+
+  it("preserves the assignment wake when a PATCH both reassigns AND supersedes a pending carousel confirmation (codex P2)", async () => {
+    const existing = makeIssue({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      assigneeAgentId: PREVIOUS_AGENT_ID,
+      assigneeUserId: null,
+      status: "in_progress",
+    });
+    const updated = makeIssue({
+      id: existing.id,
+      assigneeAgentId: ASSIGNEE_AGENT_ID,
+      assigneeUserId: null,
+      status: "in_progress",
+    });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockResolvedValue(updated);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-reassign-supersede",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "hand this to someone else, redo it",
+    });
+    mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([
+      makeSupersededByCommentInteraction({
+        id: "interaction-superseded-reassign",
+        issueId: existing.id,
+        result: { version: 1, outcome: "superseded_by_comment", commentId: "comment-reassign-supersede" },
+      }),
+    ]);
+
+    const res = await request(await createApp())
+      .patch(`/api/issues/${existing.id}`)
+      .send({
+        assigneeAgentId: ASSIGNEE_AGENT_ID,
+        assigneeUserId: null,
+        comment: "hand this to someone else, redo it",
+      });
+
+    expect(res.status).toBe(200);
+    // Reassignment is the primary mutation for this request — the interaction-specific
+    // supersede wake must not clobber the issue_assigned wake (codex P2). Exactly one wake,
+    // carrying assignment context, not interaction context.
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        source: "assignment",
+        reason: "issue_assigned",
+        payload: expect.objectContaining({
+          issueId: existing.id,
+          mutation: "update",
+        }),
+      }),
+    );
+  });
+
+  it("dedupes the interaction wake against the generic comment wake when a PATCH is addressed by issue identifier (codex P2)", async () => {
+    const existing = makeIssue({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      identifier: "PAP-999",
+      assigneeAgentId: ASSIGNEE_AGENT_ID,
+      assigneeUserId: null,
+      status: "in_progress",
+    });
+    const updated = { ...existing };
+    mockIssueService.getById.mockResolvedValue(existing);
+    // router.param("id", ...) tries to resolve "PAP-999" to the UUID via getByIdentifier
+    // before the PATCH handler runs, but falls back to the raw identifier string unchanged
+    // if that lookup misses (resolveIssueRouteId's `return rawId`) — svc.getById still
+    // resolves the raw identifier further down, so the request still succeeds, but
+    // `const id = req.params.id` inside the handler is left as "PAP-999", not the UUID.
+    mockIssueService.getByIdentifier.mockResolvedValue(null);
+    mockIssueService.update.mockResolvedValue(updated);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-identifier-supersede",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "redo it",
+    });
+    mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([
+      makeSupersededByCommentInteraction({
+        id: "interaction-superseded-identifier",
+        issueId: existing.id,
+        result: { version: 1, outcome: "superseded_by_comment", commentId: "comment-identifier-supersede" },
+      }),
+    ]);
+    const res = await request(await createApp())
+      .patch(`/api/issues/PAP-999`)
+      .send({
+        comment: "redo it",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        reason: "issue_commented",
+        payload: expect.objectContaining({
+          issueId: existing.id,
+          interactionId: "interaction-superseded-identifier",
         }),
       }),
     );

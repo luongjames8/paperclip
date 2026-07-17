@@ -7894,12 +7894,25 @@ export function issueRoutes(
       };
       const dependencyReadinessSvc = svc as DependencyReadinessProvider;
       const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
-      const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
+      const wakeupKey = (agentId: string, wakeup: WakeupRequest) => {
         const wakeIssueId =
           wakeup.payload && typeof wakeup.payload === "object" && typeof wakeup.payload.issueId === "string"
             ? wakeup.payload.issueId
             : issue.id;
-        wakeups.set(`${agentId}:${wakeIssueId}`, { agentId, wakeup });
+        return `${agentId}:${wakeIssueId}`;
+      };
+      const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
+        wakeups.set(wakeupKey(agentId, wakeup), { agentId, wakeup });
+      };
+      // The interaction-specific supersede wake must beat a generic comment/mention wake
+      // queued for the same agent+issue key, but must never clobber an assignment/status
+      // wake — that's the primary mutation for this request (codex P2).
+      const GENERIC_COMMENT_WAKE_REASONS = new Set(["issue_commented", "issue_reopened_via_comment", "issue_comment_mentioned"]);
+      const addWakeupPreferringInteractionOverGenericComment = (agentId: string, wakeup: WakeupRequest) => {
+        const key = wakeupKey(agentId, wakeup);
+        const existing = wakeups.get(key);
+        if (existing && !GENERIC_COMMENT_WAKE_REASONS.has(existing.wakeup.reason ?? "")) return;
+        wakeups.set(key, { agentId, wakeup });
       };
       const addDependencyResolvedWakeup = async (input: {
         agentId: string;
@@ -8019,7 +8032,10 @@ export function issueRoutes(
             triggerDetail: "system",
             reason: reopened ? "issue_reopened_via_comment" : "issue_commented",
             payload: {
-              issueId: id,
+              // Resolved UUID, not the raw (possibly identifier-form, e.g. "PAP-999") path
+              // param `id` — must match what the interaction-supersede wake below keys on,
+              // or the two dedupe as different agent+issue keys and double-wake (codex P2).
+              issueId: issue.id,
               commentId: comment.id,
               mutation: "comment",
               ...(reopened ? { reopenedFrom: reopenFromStatus } : {}),
@@ -8029,8 +8045,8 @@ export function issueRoutes(
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
-              issueId: id,
-              taskId: id,
+              issueId: issue.id,
+              taskId: issue.id,
               commentId: comment.id,
               wakeCommentId: comment.id,
               source: reopened ? "issue.comment.reopen" : "issue.comment",
@@ -8055,12 +8071,13 @@ export function issueRoutes(
             source: "automation",
             triggerDetail: "system",
             reason: "issue_comment_mentioned",
-            payload: { issueId: id, commentId: comment.id },
+            // issue.id (resolved UUID) — see the comment-wake block above (codex P2).
+            payload: { issueId: issue.id, commentId: comment.id },
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
-              issueId: id,
-              taskId: id,
+              issueId: issue.id,
+              taskId: issue.id,
               commentId: comment.id,
               wakeCommentId: comment.id,
               wakeReason: "issue_comment_mentioned",
@@ -8069,12 +8086,12 @@ export function issueRoutes(
           });
         }
 
-        // Interaction-specific wake (richer context: interactionId/kind/result) must be added
-        // LAST — this route's addWakeup (see above) is last-write-wins per agent+issue key, and
-        // if the superseding comment also @mentions the assignee, the generic mention wake above
-        // must not clobber the interaction context (codex P2).
+        // Interaction-specific wake (richer context: interactionId/kind/result) must beat a
+        // generic comment/mention wake queued above for the same agent+issue key (this route's
+        // addWakeup is last-write-wins) — but must NOT clobber an assignment/status wake, which
+        // is the primary mutation for this request (codex P2).
         for (const { agentId, wakeup } of commentSupersededWakeups) {
-          addWakeup(agentId, wakeup);
+          addWakeupPreferringInteractionOverGenericComment(agentId, wakeup);
         }
       }
 
