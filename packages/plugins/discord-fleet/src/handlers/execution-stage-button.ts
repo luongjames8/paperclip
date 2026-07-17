@@ -46,6 +46,17 @@ function resolveUserMapping(company: CompanyConfig, discordUserId: string): User
 const STALE_STAGE_MESSAGE =
   "This card is for a stage that's already been resolved or superseded by a later one — check Paperclip for the current state.";
 
+// codex P2: unlike approvals (approval-button.ts), an executionPolicy stage
+// transition only advances when the request actor's identity EXACTLY matches
+// the stage's currentParticipant (principalsEqual in issue-execution-policy.ts)
+// — there's no "any authorized board user" fallback. Falling back to the
+// company-wide key when a mapping has no personal boardApiKeySecretRef would
+// authenticate as a DIFFERENT board identity than the assigned participant,
+// so the engine would reject the transition with an opaque 422 the operator
+// can't act on. Fail closed with a clear, actionable message instead.
+const NO_PERSONAL_KEY_MESSAGE =
+  "Your Discord mapping needs a personal boardApiKeySecretRef to act on execution-policy stages — the runtime checks exact participant identity, and the company-wide key would authenticate as a different Paperclip user. Ask an operator to configure one for you.";
+
 // Staleness guard (altitude review, PR-0): the engine's own authorization
 // (issue-execution-policy.ts) checks participant IDENTITY only, never
 // stageId — a participant assigned to two consecutive stages of the same
@@ -56,13 +67,12 @@ const STALE_STAGE_MESSAGE =
 // fetch, and Discord's 3s first-response window doesn't allow it before ack.
 async function isStageStillCurrent(
   paperclip: PaperclipClient,
-  companyId: string,
   issueId: string,
   stageId: string,
 ): Promise<boolean> {
   let issue;
   try {
-    issue = await paperclip.getIssueById(companyId, issueId);
+    issue = await paperclip.getIssueById(issueId);
   } catch {
     return false;
   }
@@ -113,6 +123,10 @@ export async function handleExecutionStageButton(
     });
     return;
   }
+  if (!mapping.boardApiKeySecretRef) {
+    await interaction.reply({ content: NO_PERSONAL_KEY_MESSAGE, ephemeral: true });
+    return;
+  }
 
   // "Request changes" opens a modal to collect the required comment — showModal
   // MUST be the interaction's first response, before any deferUpdate/API call.
@@ -158,10 +172,10 @@ export async function handleExecutionStageButton(
     throw err;
   }
 
-  const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
+  const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef);
   const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
 
-  const isCurrent = await isStageStillCurrent(paperclip, company.companyId, parsed.issueId, parsed.stageId);
+  const isCurrent = await isStageStillCurrent(paperclip, parsed.issueId, parsed.stageId);
   if (!isCurrent) {
     await interaction.followUp({ content: STALE_STAGE_MESSAGE, ephemeral: true });
     return;
@@ -208,6 +222,10 @@ export async function handleExecutionStageChangesModal(
     });
     return;
   }
+  if (!mapping.boardApiKeySecretRef) {
+    await interaction.reply({ content: NO_PERSONAL_KEY_MESSAGE, ephemeral: true });
+    return;
+  }
 
   const note = interaction.fields.getTextInputValue(EXECUTION_STAGE_CHANGES_NOTE_FIELD).trim();
   if (!note) {
@@ -217,10 +235,10 @@ export async function handleExecutionStageChangesModal(
 
   await interaction.deferUpdate();
 
-  const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
+  const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef);
   const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
 
-  const isCurrent = await isStageStillCurrent(paperclip, company.companyId, issueId, stageId);
+  const isCurrent = await isStageStillCurrent(paperclip, issueId, stageId);
   if (!isCurrent) {
     await interaction.followUp({ content: STALE_STAGE_MESSAGE, ephemeral: true });
     return;

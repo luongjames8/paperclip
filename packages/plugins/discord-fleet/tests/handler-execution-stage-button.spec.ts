@@ -33,6 +33,7 @@ const ISSUE_ID = "11111111-1111-1111-1111-111111111111";
 const STAGE_ID = "22222222-2222-2222-2222-222222222222";
 const OTHER_STAGE_ID = "33333333-3333-3333-3333-333333333333";
 const ALICE_DISCORD_ID = "discord-user-alice";
+const NO_KEY_DISCORD_ID = "discord-user-nokey";
 
 function makeConfig(): DiscordFleetConfig {
   return {
@@ -49,7 +50,14 @@ function makeConfig(): DiscordFleetConfig {
         paperclipApiUrl: "http://paperclip:3100",
         companyPrefix: "tc1",
         userMappings: [
-          { discordUserId: ALICE_DISCORD_ID, paperclipUserId: "pc-user-alice", role: "operator" },
+          {
+            discordUserId: ALICE_DISCORD_ID,
+            paperclipUserId: "pc-user-alice",
+            role: "operator",
+            boardApiKeySecretRef: "alice-personal-key-ref",
+          },
+          // No boardApiKeySecretRef — used by the "requires a personal key" tests.
+          { discordUserId: NO_KEY_DISCORD_ID, paperclipUserId: "pc-user-nokey", role: "operator" },
         ],
       },
     ],
@@ -159,13 +167,30 @@ describe("handleExecutionStageButton — approve happy path", () => {
   it("authorized → deferUpdate then updateIssueStatus(issueId, 'done', comment naming the clicker)", async () => {
     const { handleExecutionStageButton } = await import("../src/handlers/execution-stage-button.js");
     const harness = createTestHarness({ manifest });
-    vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
+    const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-abc");
     const interaction = makeButtonInteraction(`execstage-approve:${ISSUE_ID}:${STAGE_ID}`, { username: "alice" });
 
     await handleExecutionStageButton(harness.ctx, interaction, makeConfig());
 
     expect(interaction.deferUpdate).toHaveBeenCalledTimes(1);
     expect(mockUpdateIssueStatus).toHaveBeenCalledWith(ISSUE_ID, "done", expect.stringContaining("alice"));
+    // codex P2: must resolve the clicker's PERSONAL key, never fall back to
+    // the company-wide key — the engine checks exact participant identity.
+    expect(resolveSecret).toHaveBeenCalledWith("alice-personal-key-ref");
+  });
+
+  it("mapping has no personal boardApiKeySecretRef → ephemeral rejection, no API call (codex P2)", async () => {
+    const { handleExecutionStageButton } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    const interaction = makeButtonInteraction(`execstage-approve:${ISSUE_ID}:${STAGE_ID}`, { discordUserId: NO_KEY_DISCORD_ID });
+
+    await handleExecutionStageButton(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("personal boardApiKeySecretRef"), ephemeral: true }),
+    );
+    expect(mockUpdateIssueStatus).not.toHaveBeenCalled();
+    expect(mockGetIssueById).not.toHaveBeenCalled();
   });
 
   it("editReply shows a resolved (no-button) card after approving", async () => {
@@ -310,6 +335,20 @@ describe("handleExecutionStageChangesModal — submit happy + error paths", () =
 
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
     expect(mockUpdateIssueStatus).not.toHaveBeenCalled();
+  });
+
+  it("mapping has no personal boardApiKeySecretRef → ephemeral rejection, no API call (codex P2)", async () => {
+    const { handleExecutionStageChangesModal } = await import("../src/handlers/execution-stage-button.js");
+    const harness = createTestHarness({ manifest });
+    const interaction = makeModalInteraction(`execstage-changes-modal:${ISSUE_ID}:${STAGE_ID}`, "some note", { discordUserId: NO_KEY_DISCORD_ID });
+
+    await handleExecutionStageChangesModal(harness.ctx, interaction, makeConfig());
+
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("personal boardApiKeySecretRef"), ephemeral: true }),
+    );
+    expect(mockUpdateIssueStatus).not.toHaveBeenCalled();
+    expect(mockGetIssueById).not.toHaveBeenCalled();
   });
 
   it("stale stage (issue advanced past this card) → refused, no API call", async () => {

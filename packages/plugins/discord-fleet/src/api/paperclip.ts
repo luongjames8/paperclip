@@ -199,8 +199,14 @@ export class PaperclipClient {
     return this.requestArray<PaperclipAgent>(url);
   }
 
-  async getIssueById(companyId: string, issueId: string): Promise<PaperclipIssue | null> {
-    const url = `${this.baseUrl}/api/companies/${companyId}/issues/${issueId}`;
+  // Single-issue fetch. NOTE: the only registered GET route for one issue is
+  // /api/issues/:id (server/src/routes/issues.ts) — there is no company-scoped
+  // variant; company access is enforced server-side from the caller's auth,
+  // not a path segment (codex P1: an earlier company-scoped URL here always
+  // 404'd, so every stale-stage check silently treated the current stage as
+  // stale).
+  async getIssueById(issueId: string): Promise<PaperclipIssue | null> {
+    const url = `${this.baseUrl}/api/issues/${issueId}`;
     const res = await this.ctx.http.fetch(url, {
       method: "GET",
       headers: { Authorization: `Bearer ${this.apiKey}` },
