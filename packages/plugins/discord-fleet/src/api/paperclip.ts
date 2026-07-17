@@ -20,6 +20,9 @@ export interface PaperclipIssue {
   createdAt: string;
   // Present on blocked issues; empty/absent means no declared blockers (black-hole case).
   blockedByIssueIds?: string[];
+  // Read by the execution-stage button handler's stale-card guard — the ONLY
+  // field of executionState this client reads (see updateIssueStatus).
+  executionState?: { currentStageId?: string | null } | null;
 }
 
 export interface PaperclipInteraction {
@@ -352,6 +355,28 @@ export class PaperclipClient {
     if (res.status >= 400) {
       const text = await res.text().catch(() => "");
       throw new PaperclipApiError(`paperclip API rejectInteraction error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
+    }
+  }
+
+  // Drives an executionPolicy review/approval stage decision — NOT the
+  // approvals endpoints (a different entity family; issue.executionState vs
+  // the approvals table). status:"done" with a comment approves the current
+  // stage; any other status (typically "in_progress") with a comment
+  // requests changes and returns the issue to its executor. The runtime
+  // requires a non-empty comment on both outcomes (issue-execution-policy.ts).
+  async updateIssueStatus(issueId: string, status: string, comment: string): Promise<void> {
+    const url = `${this.baseUrl}/api/issues/${issueId}`;
+    const res = await this.ctx.http.fetch(url, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ status, comment }),
+    });
+    if (res.status >= 400) {
+      const text = await res.text().catch(() => "");
+      throw new PaperclipApiError(`paperclip API updateIssueStatus error: ${res.status} ${url} ${text.slice(0, 200)}`, res.status, url);
     }
   }
 

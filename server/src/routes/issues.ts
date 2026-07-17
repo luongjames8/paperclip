@@ -154,6 +154,8 @@ import { authorizationDeniedDetails } from "../services/authorization.js";
 import { environmentService } from "../services/environments.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
 import { redactSensitiveText } from "../redaction.js";
+import { publishPluginDomainEvent } from "../services/activity-log.js";
+import type { PluginEvent } from "@paperclipai/plugin-sdk";
 import {
   createCompanySearchRateLimiter,
   type CompanySearchRateLimiter,
@@ -1947,6 +1949,74 @@ function diffExecutionParticipants(
   };
 }
 
+// Shared "did a review/approval stage NEWLY become pending" predicate — used
+// both to decide whether to wake an agent participant (buildExecutionStageWakeup,
+// agent participants only) and whether to emit the issue.execution_stage.pending
+// plugin event (publishExecutionStagePendingEventIfChanged, below, fires for every
+// participant type). Kept as one function so the two consumers can never drift
+// on what "newly pending" means.
+function executionStagePendingChanged(
+  previousState: ParsedExecutionState | null,
+  nextState: ParsedExecutionState,
+): boolean {
+  return (
+    previousState?.status !== "pending" ||
+    previousState?.currentStageId !== nextState.currentStageId ||
+    !executionPrincipalsEqual(previousState?.currentParticipant ?? null, nextState.currentParticipant ?? null)
+  );
+}
+
+// Builds AND publishes the issue.execution_stage.pending plugin event for a
+// stage that just became pending (fleet issue #631 / PR-0: without a
+// dedicated event, a review/approval stage never reached Discord as a
+// clickable card — buildPendingStagePatch is a pure issue-row mutation with
+// no approvals row and no request_confirmation interaction). Unlike
+// buildExecutionStageWakeup below (agent participants ONLY — they're woken
+// directly via heartbeat and act via the API), this fires for every
+// participant type; it's a plugin's job to decide whether a given participant
+// (e.g. type "user") needs a rendered card. No-op (never publishes) when the
+// stage hasn't changed — both call sites can call this unconditionally.
+function publishExecutionStagePendingEventIfChanged(input: {
+  issue: {
+    id: string;
+    companyId: string;
+    identifier?: string | null;
+    title?: string | null;
+    projectId?: string | null;
+  };
+  previousState: ParsedExecutionState | null;
+  nextState: ParsedExecutionState | null;
+  actor: { actorType: "user" | "agent"; actorId: string };
+}): void {
+  const { issue, previousState, nextState, actor } = input;
+  if (!nextState || nextState.status !== "pending") return;
+  if (!executionStagePendingChanged(previousState, nextState)) return;
+
+  const event: PluginEvent = {
+    eventId: randomUUID(),
+    eventType: "issue.execution_stage.pending",
+    occurredAt: new Date().toISOString(),
+    actorType: actor.actorType,
+    actorId: actor.actorId,
+    entityId: issue.id,
+    entityType: "issue",
+    companyId: issue.companyId,
+    payload: {
+      issueId: issue.id,
+      identifier: issue.identifier ?? null,
+      title: issue.title ?? null,
+      projectId: issue.projectId ?? null,
+      // stageId rides in the Discord button's customId too (execution-stage-button.ts)
+      // so a click against a superseded card can be refused instead of silently
+      // acting on whatever stage is CURRENTLY pending — see PaperclipClient.getIssueById.
+      stageId: nextState.currentStageId,
+      stageType: nextState.currentStageType,
+      participant: nextState.currentParticipant,
+    },
+  };
+  publishPluginDomainEvent(event);
+}
+
 function buildExecutionStageWakeup(input: {
   issueId: string;
   previousState: ParsedExecutionState | null;
@@ -1961,10 +2031,7 @@ function buildExecutionStageWakeup(input: {
   if (nextState.status === "pending") {
     const agentId =
       nextState.currentParticipant?.type === "agent" ? (nextState.currentParticipant.agentId ?? null) : null;
-    const stageChanged =
-      previousState?.status !== "pending" ||
-      previousState?.currentStageId !== nextState.currentStageId ||
-      !executionPrincipalsEqual(previousState?.currentParticipant ?? null, nextState.currentParticipant ?? null);
+    const stageChanged = executionStagePendingChanged(previousState, nextState);
     if (!agentId || !stageChanged) return null;
 
     const reason =
@@ -7891,6 +7958,18 @@ export function issueRoutes(
       requestedByActorType: actor.actorType,
       requestedByActorId: actor.actorId,
     });
+    publishExecutionStagePendingEventIfChanged({
+      issue: {
+        id: issue.id,
+        companyId: issue.companyId,
+        identifier: issue.identifier,
+        title: issue.title,
+        projectId: issue.projectId,
+      },
+      previousState: previousExecutionState,
+      nextState: nextExecutionState,
+      actor: { actorType: actor.actorType, actorId: actor.actorId },
+    });
 
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
     void (async () => {
@@ -9358,13 +9437,26 @@ export function issueRoutes(
           },
         });
       }
+      const commentDecisionNextExecutionState = parseIssueExecutionState(currentIssue.executionState);
       commentDecisionStageWakeup = buildExecutionStageWakeup({
         issueId: currentIssue.id,
         previousState: currentExecutionState,
-        nextState: parseIssueExecutionState(currentIssue.executionState),
+        nextState: commentDecisionNextExecutionState,
         interruptedRunId,
         requestedByActorType: actor.actorType,
         requestedByActorId: actor.actorId,
+      });
+      publishExecutionStagePendingEventIfChanged({
+        issue: {
+          id: currentIssue.id,
+          companyId: currentIssue.companyId,
+          identifier: currentIssue.identifier,
+          title: currentIssue.title,
+          projectId: currentIssue.projectId,
+        },
+        previousState: currentExecutionState,
+        nextState: commentDecisionNextExecutionState,
+        actor: { actorType: actor.actorType, actorId: actor.actorId },
       });
     } else {
       // currentIssue.id (resolved UUID), not the raw path param — same

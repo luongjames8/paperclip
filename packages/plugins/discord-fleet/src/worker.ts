@@ -12,11 +12,18 @@ import {
   handleCarouselConfirmationButton,
   handleCarouselConfirmationRejectModal,
 } from "./handlers/carousel-confirmation-button.js";
+import { handleExecutionStagePending } from "./handlers/execution-stage-pending.js";
+import {
+  handleExecutionStageButton,
+  handleExecutionStageChangesModal,
+} from "./handlers/execution-stage-button.js";
 import {
   CAROUSEL_CONFIRM_BUTTON_PREFIX,
   CAROUSEL_CONFIRM_BUTTON_PREFIX_LEGACY,
   CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX,
   CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY,
+  EXECUTION_STAGE_BUTTON_PREFIX,
+  EXECUTION_STAGE_CHANGES_MODAL_PREFIX,
 } from "./render/embeds.js";
 import { postDeliveryFailureFallback } from "./handlers/delivery-fallback.js";
 import { runDigest } from "./jobs/digest.js";
@@ -321,6 +328,13 @@ async function dispatchButton(
     await handleCarouselConfirmationButton(ctx, interaction, config);
     return;
   }
+  if (
+    interaction.customId.startsWith(EXECUTION_STAGE_BUTTON_PREFIX.approve) ||
+    interaction.customId.startsWith(EXECUTION_STAGE_BUTTON_PREFIX.changes)
+  ) {
+    await handleExecutionStageButton(ctx, interaction, config);
+    return;
+  }
   await handleApprovalButton(ctx, interaction, config);
 }
 
@@ -337,6 +351,10 @@ async function dispatchModal(
     interaction.customId.startsWith(CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX_LEGACY)
   ) {
     await handleCarouselConfirmationRejectModal(ctx, interaction, config);
+    return;
+  }
+  if (interaction.customId.startsWith(EXECUTION_STAGE_CHANGES_MODAL_PREFIX)) {
+    await handleExecutionStageChangesModal(ctx, interaction, config);
     return;
   }
   await handleApprovalRevisionModal(ctx, interaction, config);
@@ -368,6 +386,11 @@ function bindEventHandlers(
         return;
       }
       await handleApprovalCreated(ctx, event, client, config);
+    }),
+    ctx.events.on("issue.execution_stage.pending", async (event) => {
+      const client = getClientForCompany(event.companyId);
+      if (!client) return;
+      await handleExecutionStagePending(ctx, event, client, config);
     }),
   ];
 }

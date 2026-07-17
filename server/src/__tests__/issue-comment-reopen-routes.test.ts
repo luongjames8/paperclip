@@ -35,6 +35,7 @@ const mockAgentService = vi.hoisted(() => ({
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockPublishPluginDomainEvent = vi.hoisted(() => vi.fn());
 const mockTxInsertValues = vi.hoisted(() => vi.fn(async () => undefined));
 const mockTxInsert = vi.hoisted(() => vi.fn(() => ({ values: mockTxInsertValues })));
 const mockTx = vi.hoisted(() => ({
@@ -99,6 +100,7 @@ vi.mock("../services/access.js", () => ({
 
 vi.mock("../services/activity-log.js", () => ({
   logActivity: mockLogActivity,
+  publishPluginDomainEvent: mockPublishPluginDomainEvent,
 }));
 
 vi.mock("../services/agents.js", () => ({

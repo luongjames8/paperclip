@@ -45,6 +45,7 @@ const mockDb = vi.hoisted(() => ({
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockPublishPluginDomainEvent = vi.hoisted(() => vi.fn());
 const mockIssueThreadInteractionService = vi.hoisted(() => ({
   listForIssue: vi.fn(async () => []),
   expireRequestConfirmationsSupersededByComment: vi.fn(async () => []),
@@ -54,6 +55,14 @@ const mockIssueApprovalService = vi.hoisted(() => ({
 }));
 
 function registerModuleMocks() {
+  // Routes import publishPluginDomainEvent directly from activity-log.js (not
+  // through the ../services/index.js barrel below, which only re-exports
+  // logActivity) — mocked separately so tests can assert on the
+  // issue.execution_stage.pending event without a real plugin event bus.
+  vi.doMock("../services/activity-log.js", () => ({
+    logActivity: mockLogActivity,
+    publishPluginDomainEvent: mockPublishPluginDomainEvent,
+  }));
   vi.doMock("../services/index.js", () => ({
     companyService: () => ({
       getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
@@ -345,6 +354,111 @@ describe("issue execution policy routes", () => {
           }),
         }),
       }),
+    );
+  });
+
+  // fleet issue #631 / PR-0: a review/approval stage becoming pending must
+  // emit a dedicated issue.execution_stage.pending plugin event so discord-fleet
+  // can render an Approve / Request-changes card — see buildExecutionStagePendingEvent
+  // (routes/issues.ts). Unlike buildExecutionStageWakeup (agent participants
+  // only), this fires for a "user" participant too — the case a Discord card
+  // actually needs.
+  it("emits issue.execution_stage.pending when a review stage becomes pending for a user participant", async () => {
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "todo",
+      assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1631",
+      title: "Carousel batch review",
+      projectId: "project-1",
+      executionPolicy: null,
+      executionState: null,
+    };
+    const policy = normalizeIssueExecutionPolicy({
+      stages: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          type: "review",
+          participants: [{ type: "user", userId: "local-board" }],
+        },
+      ],
+    })!;
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      companyId: "company-1",
+      runId: "run-1",
+    }))
+      .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+      .send({ status: "in_review", executionPolicy: policy });
+
+    expect(res.status).toBe(200);
+    expect(mockPublishPluginDomainEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "issue.execution_stage.pending",
+        companyId: "company-1",
+        entityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        payload: expect.objectContaining({
+          issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          identifier: "PAP-1631",
+          stageId: "11111111-1111-4111-8111-111111111111",
+          stageType: "review",
+          participant: expect.objectContaining({ type: "user", userId: "local-board" }),
+        }),
+      }),
+    );
+  });
+
+  it("does not emit issue.execution_stage.pending when attaching a policy without (re)starting the workflow", async () => {
+    // Mirrors "does not auto-start execution review when reviewers are added
+    // to an already in_review issue" above: attaching executionPolicy alone
+    // (no status:"in_review"/"done") never activates a stage — nextExecutionState
+    // stays null, so no stage has "newly become pending" and no event fires.
+    const policy = normalizeIssueExecutionPolicy({
+      stages: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          type: "review",
+          participants: [{ type: "user", userId: "local-board" }],
+        },
+      ],
+    })!;
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_review",
+      assigneeAgentId: null,
+      assigneeUserId: "local-board",
+      createdByUserId: "local-board",
+      identifier: "PAP-1632",
+      title: "Execution policy edit",
+      executionPolicy: null,
+      executionState: null,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+
+    const res = await request(await createApp())
+      .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+      .send({ executionPolicy: policy });
+
+    expect(res.status).toBe(200);
+    expect(mockPublishPluginDomainEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "issue.execution_stage.pending" }),
     );
   });
 

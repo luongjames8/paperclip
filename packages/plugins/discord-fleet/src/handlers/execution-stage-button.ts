@@ -1,0 +1,240 @@
+import type { ButtonInteraction, ModalSubmitInteraction } from "discord.js";
+import { ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from "discord.js";
+import type { PluginContext } from "@paperclipai/plugin-sdk";
+import type { CompanyConfig, DiscordFleetConfig, UserMapping } from "../config/schema.js";
+import { PaperclipClient, PaperclipApiError } from "../api/paperclip.js";
+import {
+  EXECUTION_STAGE_BUTTON_PREFIX,
+  EXECUTION_STAGE_CHANGES_MODAL_PREFIX,
+  EXECUTION_STAGE_CHANGES_NOTE_FIELD,
+} from "../render/embeds.js";
+
+export type ExecutionStageAction = "approve" | "changes";
+
+export function parseExecutionStageCustomId(
+  customId: string,
+): { action: ExecutionStageAction; issueId: string; stageId: string } | null {
+  for (const [action, prefix] of Object.entries(EXECUTION_STAGE_BUTTON_PREFIX) as Array<
+    [ExecutionStageAction, string]
+  >) {
+    if (!customId.startsWith(prefix)) continue;
+    const [issueId, stageId] = customId.slice(prefix.length).split(":");
+    if (!issueId || !stageId) return null;
+    return { action, issueId, stageId };
+  }
+  return null;
+}
+
+export function parseExecutionStageChangesModalCustomId(
+  customId: string,
+): { issueId: string; stageId: string } | null {
+  if (!customId.startsWith(EXECUTION_STAGE_CHANGES_MODAL_PREFIX)) return null;
+  const [issueId, stageId] = customId.slice(EXECUTION_STAGE_CHANGES_MODAL_PREFIX.length).split(":");
+  if (!issueId || !stageId) return null;
+  return { issueId, stageId };
+}
+
+function resolveCompany(config: DiscordFleetConfig, guildId: string | null): CompanyConfig | undefined {
+  if (!guildId) return undefined;
+  return config.companies.find((c) => c.guildId === guildId);
+}
+
+function resolveUserMapping(company: CompanyConfig, discordUserId: string): UserMapping | undefined {
+  return company.userMappings?.find((m) => m.discordUserId === discordUserId);
+}
+
+const STALE_STAGE_MESSAGE =
+  "This card is for a stage that's already been resolved or superseded by a later one — check Paperclip for the current state.";
+
+// Staleness guard (altitude review, PR-0): the engine's own authorization
+// (issue-execution-policy.ts) checks participant IDENTITY only, never
+// stageId — a participant assigned to two consecutive stages of the same
+// issue (e.g. the same person reviews then approves) could otherwise click a
+// stale, already-superseded card and silently resolve the CURRENT stage
+// instead of the one the card was about. Must run AFTER the interaction is
+// acked (deferUpdate/showModal already sent) — this is a real paperclip API
+// fetch, and Discord's 3s first-response window doesn't allow it before ack.
+async function isStageStillCurrent(
+  paperclip: PaperclipClient,
+  companyId: string,
+  issueId: string,
+  stageId: string,
+): Promise<boolean> {
+  let issue;
+  try {
+    issue = await paperclip.getIssueById(companyId, issueId);
+  } catch {
+    return false;
+  }
+  return issue?.executionState?.currentStageId === stageId;
+}
+
+async function renderResolved(interaction: ButtonInteraction | ModalSubmitInteraction, label: string): Promise<void> {
+  const original = interaction.message?.embeds?.[0]?.toJSON();
+  if (!original) return;
+  const stamp = new Date().toISOString();
+  await interaction.editReply({
+    embeds: [
+      {
+        ...original,
+        color: 0x99aab5,
+        title: `${label} — ${(original.title ?? "execution stage").replace(/^[🟡🔴🟢✅❌]\s*/u, "")}`,
+        footer: { text: `${label} at ${stamp}` },
+      },
+    ],
+    components: [],
+  });
+}
+
+// Approve: PATCH {status:"done"}. isStageStillCurrent guards against a stale
+// card (see its doc comment above); the engine's participant-identity check
+// (issue-execution-policy.ts) is a SEPARATE, complementary authorization
+// layer — it decides whether THIS actor may act at all, not which stage.
+export async function handleExecutionStageButton(
+  ctx: PluginContext,
+  interaction: ButtonInteraction,
+  config: DiscordFleetConfig,
+): Promise<void> {
+  const parsed = parseExecutionStageCustomId(interaction.customId);
+  if (!parsed) return;
+
+  const company = resolveCompany(config, interaction.guildId);
+  if (!company) {
+    await interaction.reply({ content: "No company configured for this guild.", ephemeral: true });
+    return;
+  }
+
+  const mapping = resolveUserMapping(company, interaction.user.id);
+  if (!mapping) {
+    await interaction.reply({
+      content:
+        "You're not authorized to act on this review/approval. Ask an operator to add your Discord user ID to the company's userMappings.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // "Request changes" opens a modal to collect the required comment — showModal
+  // MUST be the interaction's first response, before any deferUpdate/API call.
+  // The staleness check (isStageStillCurrent) is deferred to the modal SUBMIT,
+  // which gets its own fresh ack — mirrors carousel-confirmation-button.ts's
+  // reject flow exactly.
+  if (parsed.action === "changes") {
+    const modal = new ModalBuilder()
+      .setCustomId(`${EXECUTION_STAGE_CHANGES_MODAL_PREFIX}${parsed.issueId}:${parsed.stageId}`)
+      .setTitle("Request changes")
+      .addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
+          new TextInputBuilder()
+            .setCustomId(EXECUTION_STAGE_CHANGES_NOTE_FIELD)
+            .setLabel("What needs to change?")
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setMaxLength(1500),
+        ),
+      );
+    try {
+      await interaction.showModal(modal);
+    } catch (err: any) {
+      if (err?.code === 10062) {
+        ctx.logger.warn("execution-stage-button: interaction expired before showModal (3s window)", { issueId: parsed.issueId });
+        return;
+      }
+      throw err;
+    }
+    return;
+  }
+
+  try {
+    await interaction.deferUpdate();
+  } catch (err: any) {
+    if (err?.code === 10062) {
+      ctx.logger.warn("execution-stage-button: interaction expired before deferUpdate (3s window)", {
+        issueId: parsed.issueId,
+        action: parsed.action,
+      });
+      return;
+    }
+    throw err;
+  }
+
+  const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
+  const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
+
+  const isCurrent = await isStageStillCurrent(paperclip, company.companyId, parsed.issueId, parsed.stageId);
+  if (!isCurrent) {
+    await interaction.followUp({ content: STALE_STAGE_MESSAGE, ephemeral: true });
+    return;
+  }
+
+  const comment = `Approved via Discord by ${interaction.user.username}`;
+  try {
+    await paperclip.updateIssueStatus(parsed.issueId, "done", comment);
+  } catch (err) {
+    ctx.logger.warn("execution-stage-button: approve API call failed", { issueId: parsed.issueId, err: String(err) });
+    const status = err instanceof PaperclipApiError ? err.status : undefined;
+    const prefix = status === 422 ? "Rejected by server: " : "Failed to approve: ";
+    await interaction.followUp({ content: `${prefix}${String(err).slice(0, 200)}`, ephemeral: true });
+    return;
+  }
+
+  await renderResolved(interaction, "✅ Approved");
+}
+
+// Handles the "Request changes" modal submit: PATCH {status:"in_progress",
+// comment}. The runtime reassigns the issue back to its executor and returns
+// this same stage to review once the executor resubmits.
+export async function handleExecutionStageChangesModal(
+  ctx: PluginContext,
+  interaction: ModalSubmitInteraction,
+  config: DiscordFleetConfig,
+): Promise<void> {
+  const parsed = parseExecutionStageChangesModalCustomId(interaction.customId);
+  if (!parsed) return;
+  const { issueId, stageId } = parsed;
+
+  const company = resolveCompany(config, interaction.guildId);
+  if (!company) {
+    await interaction.reply({ content: "No company configured for this guild.", ephemeral: true });
+    return;
+  }
+
+  const mapping = resolveUserMapping(company, interaction.user.id);
+  if (!mapping) {
+    await interaction.reply({
+      content:
+        "You're not authorized to act on this review/approval. Ask an operator to add your Discord user ID to the company's userMappings.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const note = interaction.fields.getTextInputValue(EXECUTION_STAGE_CHANGES_NOTE_FIELD).trim();
+  if (!note) {
+    await interaction.reply({ content: "A note describing the needed changes is required.", ephemeral: true });
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
+  const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
+
+  const isCurrent = await isStageStillCurrent(paperclip, company.companyId, issueId, stageId);
+  if (!isCurrent) {
+    await interaction.followUp({ content: STALE_STAGE_MESSAGE, ephemeral: true });
+    return;
+  }
+
+  try {
+    await paperclip.updateIssueStatus(issueId, "in_progress", note);
+  } catch (err) {
+    ctx.logger.warn("execution-stage-changes-modal: request-changes API call failed", { issueId, err: String(err) });
+    const status = err instanceof PaperclipApiError ? err.status : undefined;
+    const prefix = status === 422 ? "Rejected by server: " : "Failed to request changes: ";
+    await interaction.followUp({ content: `${prefix}${String(err).slice(0, 200)}`, ephemeral: true });
+    return;
+  }
+
+  await renderResolved(interaction, "✏️ Changes requested");
+}

@@ -88,6 +88,12 @@ export interface DiscordFleetConfig {
   // (or channels.orphan if absent — see backward-compat note on
   // CompanyConfig.approvalFallbackChannelId).
   approvalsChannelsByType?: Record<string, ChannelTypeRoute[]>;
+  // Per-content-surface routing for executionPolicy review/approval stage
+  // cards (fleet issue #631 / PR-0), keyed by companyId. Same semantics as
+  // issuesChannelsByType; match candidates in order are the issue's
+  // identifier then title. On no match, falls back to routeIssue()
+  // (projectRouting → channels.orphan).
+  executionStageChannelsByType?: Record<string, ChannelTypeRoute[]>;
   // Config-driven auto-expiry for time-sensitive approvals, keyed by companyId.
   // In the approvals-reminder sweep: if a pending approval's title matches a
   // rule's titleRegex AND its age exceeds maxAgeHours, it is auto-rejected

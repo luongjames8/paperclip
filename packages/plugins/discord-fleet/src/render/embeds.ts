@@ -144,6 +144,76 @@ export function buildCarouselAnchorEmbed(opts: {
   });
 }
 
+// Execution-policy review/approval stage cards (fleet issue #631 / PR-0) — a
+// DIFFERENT entity from approvals (issues.executionState, not the approvals
+// table). customId carries issueId + stageId: PATCH /api/issues/{id} acts on
+// WHATEVER stage is currently pending for the clicking participant
+// (engine-enforced by participant identity only, issue-execution-policy.ts —
+// it never checks stageId), so a participant assigned to TWO consecutive
+// stages of the same issue (a normal config: reviewer == approver) could
+// click a stale, already-superseded card and silently resolve the wrong
+// stage. stageId lets the button handler refuse a click whose card no longer
+// matches the issue's currentStageId — same staleness class the
+// carousel-confirmation buttons guard with a content hash, keyed on stage
+// identity instead since stage identity (not content) is what's mutable here.
+export const EXECUTION_STAGE_BUTTON_PREFIX = {
+  approve: "execstage-approve:",
+  changes: "execstage-changes:",
+} as const;
+
+// Modal shown when the operator clicks "Request changes" — the runtime
+// requires a comment on every stage decision (issue-execution-policy.ts,
+// "Requesting changes requires a comment").
+export const EXECUTION_STAGE_CHANGES_MODAL_PREFIX = "execstage-changes-modal:";
+export const EXECUTION_STAGE_CHANGES_NOTE_FIELD = "changesNote";
+
+export function buildExecutionStageActionRow(opts: {
+  issueId: string;
+  stageId: string;
+  issueUrl: string;
+}): APIActionRowComponent<APIComponentInMessageActionRow> {
+  const suffix = `${opts.issueId}:${opts.stageId}`;
+  const approve: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Success,
+    label: "✅ Approve",
+    custom_id: `${EXECUTION_STAGE_BUTTON_PREFIX.approve}${suffix}`,
+  };
+  const changes: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Primary,
+    label: "✏️ Request changes",
+    custom_id: `${EXECUTION_STAGE_BUTTON_PREFIX.changes}${suffix}`,
+  };
+  const view: APIButtonComponent = {
+    type: ComponentType.Button,
+    style: ButtonStyle.Link,
+    label: "View",
+    url: opts.issueUrl,
+  };
+  return {
+    type: ComponentType.ActionRow,
+    components: [approve, changes, view],
+  };
+}
+
+export function buildExecutionStagePendingEmbed(opts: {
+  identifier: string;
+  title?: string;
+  stageType: "review" | "approval";
+  issueUrl: string;
+}): APIEmbed {
+  const headline = opts.title ? safe(opts.title, 220) : `${opts.identifier} — needs ${opts.stageType}`;
+  const verb = opts.stageType === "approval" ? "Approval" : "Review";
+  return enforceEmbedLimits({
+    color: 0xfee75c,
+    title: safe(`🟡 ${verb} needed — ${headline}`, 256),
+    url: opts.issueUrl,
+    description: safe(`**${opts.identifier}**\n\n[View & decide in Paperclip](${opts.issueUrl})`),
+    timestamp: new Date().toISOString(),
+  });
+}
+
 export function buildApprovalActionRow(opts: {
   approvalId: string;
   issueUrl: string;

@@ -9,6 +9,7 @@ vi.mock("../adapters/registry.js", () => ({
 
 vi.mock("../services/activity-log.js", () => ({
   logActivity: vi.fn().mockResolvedValue(undefined),
+  publishPluginDomainEvent: vi.fn(),
 }));
 
 const { findActiveServerAdapter } = await import("../adapters/registry.js");

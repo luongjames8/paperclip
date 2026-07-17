@@ -66,6 +66,20 @@ const manifest: PaperclipPluginManifestV1 = {
           },
         },
       },
+      executionStageChannelsByType: {
+        type: "object",
+        title: "Execution Stage Channels By Type",
+        description: "Per-companyId map of [regex, channelId] pairs. Matches executionPolicy review/approval stage cards against issue identifier/title; first match wins. Falls back to projectRouting / channels.orphan.",
+        additionalProperties: {
+          type: "array",
+          items: {
+            type: "array",
+            minItems: 2,
+            maxItems: 2,
+            items: { type: "string" },
+          },
+        },
+      },
       approvalExpiry: {
         type: "object",
         title: "Approval Expiry Rules",
