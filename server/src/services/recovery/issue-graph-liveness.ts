@@ -17,13 +17,16 @@ export type IssueLivenessState =
  * open recovery before it is treated as a stale orphan rather than deliberate parking
  * (doc/execution-semantics.md, "Agent-assigned backlog").
  *
- * This state's sole dependency-path entry is the stale issue itself, which is
- * inherently frozen once orphaned — so unlike the other finding types here, it is
- * exempt from the generic auto-recovery lookback window entirely
- * (service.ts, isLivenessFindingLookbackExempt): that window exists to avoid
- * re-litigating findings whose chain went cold long ago, but for this state chain
- * staleness IS the trigger, and gating on freshness would eventually suppress
- * escalation for every instance permanently.
+ * A backlog-rooted issue is inherently frozen once orphaned — nothing touches a
+ * parked backlog issue, including any upstream blocker the classifier's own-blocker
+ * chain walk surfaces instead (see hasOwnBlockerRelations below) — so findings
+ * rooted here are exempt from the generic auto-recovery lookback window entirely
+ * (service.ts, isLivenessFindingLookbackExempt, keyed on the root's status rather
+ * than the finding's state since the chain walk can surface this root as any of
+ * the pre-existing blocked-by or review states, not just stale_assigned_backlog_issue):
+ * that window exists to avoid re-litigating findings whose chain went cold long ago,
+ * but for a backlog root, chain staleness IS the trigger, and gating on freshness
+ * would eventually suppress escalation for every instance permanently.
  */
 export const ASSIGNED_BACKLOG_STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
 

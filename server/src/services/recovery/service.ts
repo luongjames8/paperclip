@@ -3741,18 +3741,27 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     firstTimestamp!);
   }
 
-  // stale_assigned_backlog_issue already gates on its own staleness threshold
+  // A finding whose ROOT issue (dependencyPath[0], always the source passed into
+  // staleAssignedBacklogFinding / firstBlockedChainFinding) was itself sitting in
+  // `backlog` already gates on its own staleness threshold
   // (ASSIGNED_BACKLOG_STALE_THRESHOLD_MS, issue-graph-liveness.ts) upstream in the
-  // classifier, and its sole dependency-path entry is the stale issue itself — which
-  // is inherently frozen once orphaned, since nothing touches a parked backlog issue.
-  // The generic "has the dependency chain moved recently" lookback exists to avoid
-  // re-litigating findings whose chain went cold long ago; for this state, chain
-  // staleness IS the trigger, not a reason to stop escalating. Without this
-  // exemption, a finding that ages past the configured lookback (or one raised while
-  // the scheduler was down) would never auto-recover again — silently reintroducing
-  // the exact black hole this state exists to close.
+  // classifier — nothing touches a parked backlog issue, so its own updatedAt (and
+  // an upstream blocker's, if the classifier walked into one) is inherently frozen
+  // once orphaned. The generic "has the dependency chain moved recently" lookback
+  // exists to avoid re-litigating findings whose chain went cold long ago; for a
+  // backlog-rooted finding, chain staleness IS the trigger, not a reason to stop
+  // escalating. This deliberately keys on the ROOT's status rather than
+  // `finding.state`: the classifier's own-blocker chain walk can surface this root
+  // as ANY of the pre-existing blocked_by_*/review states (not just
+  // stale_assigned_backlog_issue) depending on what its blocker chain looks like —
+  // keying on state alone would leave exactly those chain-walked outcomes
+  // unexempted, silently reintroducing the black hole this backstop exists to
+  // close. `dependencyPath[0].status === "backlog"` is unambiguous: every other
+  // entry point into this classifier (status==="blocked" roots, in_review roots)
+  // guarantees a different root status, so this can only ever be true for a
+  // finding this specific backlog-orphan branch produced.
   function isLivenessFindingLookbackExempt(finding: IssueLivenessFinding) {
-    return finding.state === "stale_assigned_backlog_issue";
+    return finding.dependencyPath[0]?.status === "backlog";
   }
 
   function isLivenessFindingInsideAutoRecoveryLookback(

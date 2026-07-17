@@ -746,6 +746,66 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     expect(orphanAfter?.status).toBe("blocked");
   });
 
+  it("still escalates a stale backlog root's own dead blocker when both are older than the lookback window", async () => {
+    // The classifier's own-blocker chain walk can surface a backlog root as a
+    // DIFFERENT state (blocked_by_unassigned_issue here) than
+    // stale_assigned_backlog_issue — the lookback exemption must key on the
+    // root's status, not the finding's state, or exactly this outcome silently
+    // ages out of auto-recovery under the default 24h lookback.
+    await enableAutoRecovery();
+    const { companyId, coderId, issuePrefix } = await seedCompanyWithCtoAndCoder("D");
+    const orphanIssueId = randomUUID();
+    const deadBlockerIssueId = randomUUID();
+    const oldTimestamp = new Date(Date.now() - 30 * 60 * 60 * 1000);
+
+    await db.insert(issues).values([
+      {
+        id: orphanIssueId,
+        companyId,
+        title: "Rework leg born in backlog with a dead blocker",
+        status: "backlog",
+        priority: "medium",
+        assigneeAgentId: coderId,
+        issueNumber: 1,
+        identifier: `${issuePrefix}-1`,
+        createdAt: oldTimestamp,
+        updatedAt: oldTimestamp,
+      },
+      {
+        id: deadBlockerIssueId,
+        companyId,
+        title: "Unowned upstream work",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId: null,
+        issueNumber: 2,
+        identifier: `${issuePrefix}-2`,
+        createdAt: oldTimestamp,
+        updatedAt: oldTimestamp,
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: deadBlockerIssueId,
+      relatedIssueId: orphanIssueId,
+      type: "blocks",
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileIssueGraphLiveness();
+
+    expect(result.findings).toBe(1);
+    expect(result.skippedOutsideLookback).toBe(0);
+    expect(result.escalationsCreated).toBe(1);
+
+    const escalations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "harness_liveness_escalation")));
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0]).toMatchObject({ parentId: deadBlockerIssueId });
+  });
+
   it("treats open recovery issues as active waiting paths for non-assigned-backlog states", async () => {
     await enableAutoRecovery();
     const { companyId, managerId, blockedIssueId, blockerIssueId } = await seedBlockedChain();
