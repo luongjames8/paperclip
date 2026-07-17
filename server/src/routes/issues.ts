@@ -162,6 +162,7 @@ import {
 } from "../services/company-search-rate-limit.js";
 import {
   applyIssueExecutionPolicyTransition,
+  executionStageDecisionToken,
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
   redactIssueMonitorExternalRef,
@@ -2006,12 +2007,17 @@ function publishExecutionStagePendingEventIfChanged(input: {
       identifier: issue.identifier ?? null,
       title: issue.title ?? null,
       projectId: issue.projectId ?? null,
-      // stageId rides in the Discord button's customId too (execution-stage-button.ts)
-      // so a click against a superseded card can be refused instead of silently
-      // acting on whatever stage is CURRENTLY pending — see expectedExecutionStageId
-      // and assertExecutionStageStillPendingForUpdate below.
+      // stageId + lastDecisionId ride in the Discord button's customId too
+      // (execution-stage-button.ts, as issueId:stageId:decisionToken) so a
+      // click against a superseded card — including one from BEFORE a
+      // changes-requested-then-resubmit cycle, which keeps the same stageId
+      // but stamps a fresh lastDecisionId — can be refused instead of
+      // silently acting on whatever's CURRENTLY pending. See
+      // expectedExecutionStageId/expectedLastDecisionToken and
+      // assertExecutionStageStillPendingForUpdate below.
       stageId: nextState.currentStageId,
       stageType: nextState.currentStageType,
+      lastDecisionId: nextState.lastDecisionId,
       participant: nextState.currentParticipant,
     },
   };
@@ -2031,12 +2037,17 @@ function publishExecutionStagePendingEventIfChanged(input: {
 // SELECT ... FOR UPDATE, which blocks a second concurrent transaction on the
 // SAME issue until the first commits. When the second transaction's lock
 // finally acquires, it re-reads the (by then already-mutated) executionState
-// and correctly fails the pending/stageId check here — never silently
-// proceeding to write on top of a decision that already landed.
+// and correctly fails the pending/stageId/decisionToken check here — never
+// silently proceeding to write on top of a decision that already landed.
+//
+// Also re-verifies expectedLastDecisionToken (round 5) for the SAME reason
+// the pre-transaction check does — see executionStageDecisionToken's doc
+// comment in issue-execution-policy.ts.
 async function assertExecutionStageStillPendingForUpdate(
   tx: Pick<Db, "select">,
   issueId: string,
   expectedExecutionStageId: string | null | undefined,
+  expectedLastDecisionToken: string | null | undefined,
 ): Promise<void> {
   if (expectedExecutionStageId === undefined || expectedExecutionStageId === null) return;
 
@@ -2048,9 +2059,13 @@ async function assertExecutionStageStillPendingForUpdate(
     .then((rows) => rows[0] ?? null);
   const lockedState = parseIssueExecutionState(locked?.executionState);
   const stillPending = lockedState?.status === "pending" && lockedState.currentStageId === expectedExecutionStageId;
-  if (!stillPending) {
+  const tokenMatches =
+    expectedLastDecisionToken === undefined ||
+    expectedLastDecisionToken === null ||
+    executionStageDecisionToken(lockedState?.lastDecisionId) === expectedLastDecisionToken;
+  if (!stillPending || !tokenMatches) {
     throw conflict(
-      "This execution stage is no longer pending — it may have already been decided, had changes requested, or been superseded by a later stage.",
+      "This execution stage is no longer pending — it may have already been decided, or a newer version was posted after changes were requested and resubmitted.",
     );
   }
 }
@@ -7387,6 +7402,8 @@ export function issueRoutes(
 
     const expectedExecutionStageId =
       typeof req.body.expectedExecutionStageId === "string" ? req.body.expectedExecutionStageId : undefined;
+    const expectedLastDecisionToken =
+      typeof req.body.expectedLastDecisionToken === "string" ? req.body.expectedLastDecisionToken : undefined;
     const transition = applyIssueExecutionPolicyTransition({
       issue: existing,
       policy: nextExecutionPolicy,
@@ -7405,6 +7422,7 @@ export function issueRoutes(
       reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
       monitorExplicitlyUpdated: req.body.executionPolicy !== undefined && monitorChanged,
       expectedExecutionStageId,
+      expectedLastDecisionToken,
     });
     const decisionId = transition.decision ? randomUUID() : null;
     if (decisionId) {
@@ -7484,7 +7502,7 @@ export function issueRoutes(
           // Row-lock re-verification FIRST (see assertExecutionStageStillPendingForUpdate) —
           // closes the race between the pre-transaction expectedExecutionStageId
           // check above and this transaction's write.
-          await assertExecutionStageStillPendingForUpdate(tx, existing.id, expectedExecutionStageId);
+          await assertExecutionStageStillPendingForUpdate(tx, existing.id, expectedExecutionStageId, expectedLastDecisionToken);
           // existing.id (resolved UUID), not the raw path param `id` — `id`
           // may be a human-readable identifier (svc.getById resolves both
           // forms above), but svc.update queries eq(issues.id, ...) against

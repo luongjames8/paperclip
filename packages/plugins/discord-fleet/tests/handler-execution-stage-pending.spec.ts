@@ -51,6 +51,7 @@ function makeEvent(overrides: Partial<PluginEvent> & { payload?: Record<string, 
       projectId: "proj-1",
       stageId: "stage-1",
       stageType: "review",
+      lastDecisionId: "d3c1d10n-0000-4000-8000-000000000000",
       participant: { type: "user", userId: "pc-user-alice", agentId: null },
       ...payloadOverride,
     },
@@ -85,10 +86,25 @@ describe("handleExecutionStagePending", () => {
     expect(components).toHaveLength(1);
     const customIds = components[0].components.map((c: any) => c.custom_id ?? c.url);
     expect(customIds).toEqual([
-      "execstage-approve:iss-1:stage-1",
-      "execstage-changes:iss-1:stage-1",
+      "exs-ok:iss-1:stage-1:d3c1d10n",
+      "exs-chg:iss-1:stage-1:d3c1d10n",
       "http://paperclip:3100/tc1/issues/ISS-1",
     ]);
+  });
+
+  it("missing lastDecisionId in payload → customId encodes the 'none' sentinel", async () => {
+    const { handleExecutionStagePending } = await import("../src/handlers/execution-stage-pending.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+
+    const event = makeEvent({ payload: { lastDecisionId: null } });
+    await handleExecutionStagePending(harness.ctx, event, client, config);
+
+    const [, , , components] = (postEmbedToChannel as any).mock.calls[0];
+    const customIds = components[0].components.map((c: any) => c.custom_id ?? c.url);
+    expect(customIds[0]).toBe("exs-ok:iss-1:stage-1:none");
   });
 
   it("missing stageId in payload → does NOT post a card (can't render a stale-safe button)", async () => {

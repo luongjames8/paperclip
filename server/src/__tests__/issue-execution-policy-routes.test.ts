@@ -442,6 +442,9 @@ describe("issue execution policy routes", () => {
           identifier: "PAP-1631",
           stageId: "11111111-1111-4111-8111-111111111111",
           stageType: "review",
+          // First-ever pending instance for this issue — no decision has
+          // been recorded yet, so lastDecisionId is still null (codex round 5).
+          lastDecisionId: null,
           participant: expect.objectContaining({ type: "user", userId: "local-board" }),
         }),
       }),
@@ -648,6 +651,122 @@ describe("issue execution policy routes", () => {
       // No client-observed stage to assert -> the row-lock re-verification
       // never runs (would be pure overhead for a caller with nothing to check).
       expect(mockTxSelectFor).not.toHaveBeenCalled();
+    });
+
+    // codex round 5 (adversarial-seam-hardening pass): stageId+status alone
+    // don't distinguish a stage's pending instance from a LATER pending
+    // instance of the SAME stage after a changes-requested-then-resubmit
+    // cycle — both have identical (status: "pending", currentStageId).
+    // expectedLastDecisionToken closes this: it's derived from
+    // executionState.lastDecisionId, which the route layer stamps to a fresh
+    // value every time ANY decision is recorded for the issue.
+    describe("expectedLastDecisionToken (pending-generation token)", () => {
+      it("matching token ('none', no decision recorded yet) → approves normally", async () => {
+        const issue = pendingReviewIssue();
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+          ...issue,
+          ...patch,
+          updatedAt: new Date(),
+        }));
+        mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState }]);
+
+        const res = await request(await createApp())
+          .patch(`/api/issues/${issue.id}`)
+          .send({
+            status: "done",
+            comment: "Approved via test",
+            expectedExecutionStageId: STAGE_ID,
+            expectedLastDecisionToken: "none",
+          });
+
+        expect(res.status).toBe(200);
+        expect(mockIssueService.update).toHaveBeenCalled();
+      });
+
+      it("stale token from BEFORE a changes-requested-then-resubmit cycle → 409, no mutation (the exact codex round-5 scenario)", async () => {
+        // Same stageId, status back to "pending" (executor resubmitted), but
+        // lastDecisionId is now the changes-request decision's id — a card
+        // rendered for the ORIGINAL pending instance (token "none") is stale.
+        const issue = pendingReviewIssue({
+          executionState: {
+            status: "pending",
+            currentStageId: STAGE_ID,
+            currentStageIndex: 0,
+            currentStageType: "review",
+            currentParticipant: { type: "user", userId: "local-board", agentId: null },
+            returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333", userId: null },
+            completedStageIds: [],
+            lastDecisionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            lastDecisionOutcome: "changes_requested",
+          },
+        });
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+          ...issue,
+          ...patch,
+          updatedAt: new Date(),
+        }));
+
+        const res = await request(await createApp())
+          .patch(`/api/issues/${issue.id}`)
+          .send({
+            status: "done",
+            comment: "Approved from a stale, pre-changes-request card",
+            expectedExecutionStageId: STAGE_ID,
+            expectedLastDecisionToken: "none",
+          });
+
+        expect(res.status).toBe(409);
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      });
+
+      it("row lock re-verification catches a decision recorded BETWEEN the pre-transaction read and the lock → 409, no mutation", async () => {
+        const issue = pendingReviewIssue();
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+          ...issue,
+          ...patch,
+          updatedAt: new Date(),
+        }));
+        // Pre-transaction read saw lastDecisionId: null ("none"); by the time
+        // this request's own lock acquires, a concurrent decision already
+        // landed and stamped a fresh lastDecisionId — same stageId+status
+        // (changes-requested loop back to pending), different generation.
+        mockTxSelectFor.mockResolvedValue([{
+          executionState: { ...issue.executionState, lastDecisionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+        }]);
+
+        const res = await request(await createApp())
+          .patch(`/api/issues/${issue.id}`)
+          .send({
+            status: "done",
+            comment: "Approved via test",
+            expectedExecutionStageId: STAGE_ID,
+            expectedLastDecisionToken: "none",
+          });
+
+        expect(res.status).toBe(409);
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      });
+
+      it("absent expectedLastDecisionToken (stageId provided but no token) → falls back to stageId-only check, behaves as before", async () => {
+        const issue = pendingReviewIssue();
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+          ...issue,
+          ...patch,
+          updatedAt: new Date(),
+        }));
+        mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState }]);
+
+        const res = await request(await createApp())
+          .patch(`/api/issues/${issue.id}`)
+          .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+        expect(res.status).toBe(200);
+        expect(mockIssueService.update).toHaveBeenCalled();
+      });
     });
   });
 

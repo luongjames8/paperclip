@@ -56,7 +56,33 @@ type TransitionInput = {
   // Optional and unused by callers with no client-observed stage to assert
   // against (e.g. the comment-driven auto-approval path).
   expectedExecutionStageId?: string | null;
+  // Generation token (codex round 5) — see executionStageDecisionToken.
+  // Optional even when expectedExecutionStageId is set, for backward
+  // compatibility with any future caller that only knows about the stage id.
+  expectedLastDecisionToken?: string | null;
 };
+
+// Length of the comparison token derived from lastDecisionId (a UUID) — long
+// enough that two independent decisions colliding is not a practical concern
+// (32 bits of a random UUID, combined with an exact stageId match), short
+// enough to fit a Discord button customId's 100-char limit alongside the
+// issueId and stageId it already carries. Mirrors the carousel-confirmation
+// buttons' CAROUSEL_HASH_TOKEN_LEN pattern (packages/plugins/discord-fleet).
+export const EXECUTION_STAGE_DECISION_TOKEN_LEN = 8;
+// Sentinel for "no decision has ever been recorded yet" (lastDecisionId is
+// still null) — the only state a stage's pending instance can have this
+// token in common with a LATER instance, and only because nothing has
+// happened yet to give it a real one.
+export const EXECUTION_STAGE_NO_DECISION_TOKEN = "none";
+
+export function executionStageDecisionToken(lastDecisionId: string | null | undefined): string {
+  return lastDecisionId
+    ? lastDecisionId.slice(0, EXECUTION_STAGE_DECISION_TOKEN_LEN)
+    : EXECUTION_STAGE_NO_DECISION_TOKEN;
+}
+
+const STALE_EXECUTION_STAGE_MESSAGE =
+  "This execution stage is no longer pending — it may have already been decided, or a newer version was posted after changes were requested and resubmitted.";
 
 type TransitionResult = {
   patch: Record<string, unknown>;
@@ -630,21 +656,38 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
     ? existingState?.reviewRequest ?? null
     : input.reviewRequest;
 
-  // Compare-and-swap guard (fleet issue #631 / PR-0, codex P1): evaluated
-  // FIRST, as a hard reject — never folded into the stageStateDrifted
-  // self-heal branch below, which is a DIFFERENT case (participant/assignee
-  // drift on the SAME still-current stage) and must never silently "heal" a
-  // request that named an already-superseded stage into approving whatever
-  // is now current. Runs before the participant-identity check too: if the
-  // named stage isn't even the live one, WHO is asking doesn't matter yet.
+  // Compare-and-swap guard (fleet issue #631 / PR-0, codex P1, hardened
+  // through round 5's adversarial-seam-hardening pass): evaluated FIRST, as a
+  // hard reject — never folded into the stageStateDrifted self-heal branch
+  // below, which is a DIFFERENT case (participant/assignee drift on the SAME
+  // still-current stage) and must never silently "heal" a request that named
+  // an already-superseded stage into approving whatever is now current. Runs
+  // before the participant-identity check too: if the named stage isn't even
+  // the live one, WHO is asking doesn't matter yet.
+  //
+  // stageId + status alone are NOT a unique "pending generation" (codex
+  // round 5): a changes-requested-then-resubmit cycle returns to the exact
+  // same stageId with status back to "pending", so a card rendered for the
+  // ORIGINAL pending instance would still read as current after the
+  // executor's resubmission — approving it skips the reviewer actually
+  // looking at the fresh resubmission. expectedLastDecisionToken closes this:
+  // lastDecisionId is stamped to a fresh value by the route layer every time
+  // ANY decision (approve or changes-request) is recorded for this issue,
+  // and is otherwise only ever carried forward unchanged — so comparing it
+  // uniquely identifies the decision-generation a stage's pending instance
+  // belongs to, without the self-heal branch (which doesn't record a
+  // decision) spuriously invalidating an untouched card.
   if (input.expectedExecutionStageId !== undefined && input.expectedExecutionStageId !== null) {
     const stageStillPending =
       existingState?.status === PENDING_STATUS &&
       existingState.currentStageId === input.expectedExecutionStageId;
     if (!stageStillPending) {
-      throw conflict(
-        "This execution stage is no longer pending — it may have already been decided, had changes requested, or been superseded by a later stage.",
-      );
+      throw conflict(STALE_EXECUTION_STAGE_MESSAGE);
+    }
+    if (input.expectedLastDecisionToken !== undefined && input.expectedLastDecisionToken !== null) {
+      if (executionStageDecisionToken(existingState?.lastDecisionId) !== input.expectedLastDecisionToken) {
+        throw conflict(STALE_EXECUTION_STAGE_MESSAGE);
+      }
     }
   }
 

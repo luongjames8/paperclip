@@ -466,6 +466,13 @@ export const updateIssueSchema = createIssueBaseSchema.omit({
   // still current" check and the actual mutation. Optional/unused by any
   // caller that isn't driving an executionPolicy decision.
   expectedExecutionStageId: z.string().optional(),
+  // Paired generation token (codex round 5): stageId + status alone don't
+  // distinguish a stage's pending instance from a LATER pending instance of
+  // the same stage after a changes-requested-then-resubmit cycle. An 8-char
+  // token derived from executionState.lastDecisionId (or "none" if no
+  // decision has ever been recorded) — see executionStageDecisionToken in
+  // services/issue-execution-policy.ts.
+  expectedLastDecisionToken: z.string().optional(),
   reopen: z.boolean().optional(),
   resume: z.boolean().optional(),
   interrupt: z.boolean().optional(),

@@ -13,6 +13,7 @@ interface ExecutionStagePendingPayload {
   projectId?: string;
   stageId?: string;
   stageType?: "review" | "approval";
+  lastDecisionId?: string | null;
   participant?: { type?: "agent" | "user"; agentId?: string | null; userId?: string | null } | null;
 }
 
@@ -67,7 +68,12 @@ export async function handleExecutionStagePending(
     stageType: payload.stageType === "approval" ? "approval" : "review",
     issueUrl: url,
   });
-  const actionRow = buildExecutionStageActionRow({ issueId, stageId: payload.stageId, issueUrl: url });
+  const actionRow = buildExecutionStageActionRow({
+    issueId,
+    stageId: payload.stageId,
+    lastDecisionId: payload.lastDecisionId,
+    issueUrl: url,
+  });
 
   await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
 }

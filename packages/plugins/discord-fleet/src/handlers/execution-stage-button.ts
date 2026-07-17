@@ -13,25 +13,25 @@ export type ExecutionStageAction = "approve" | "changes";
 
 export function parseExecutionStageCustomId(
   customId: string,
-): { action: ExecutionStageAction; issueId: string; stageId: string } | null {
+): { action: ExecutionStageAction; issueId: string; stageId: string; decisionToken: string } | null {
   for (const [action, prefix] of Object.entries(EXECUTION_STAGE_BUTTON_PREFIX) as Array<
     [ExecutionStageAction, string]
   >) {
     if (!customId.startsWith(prefix)) continue;
-    const [issueId, stageId] = customId.slice(prefix.length).split(":");
-    if (!issueId || !stageId) return null;
-    return { action, issueId, stageId };
+    const [issueId, stageId, decisionToken] = customId.slice(prefix.length).split(":");
+    if (!issueId || !stageId || !decisionToken) return null;
+    return { action, issueId, stageId, decisionToken };
   }
   return null;
 }
 
 export function parseExecutionStageChangesModalCustomId(
   customId: string,
-): { issueId: string; stageId: string } | null {
+): { issueId: string; stageId: string; decisionToken: string } | null {
   if (!customId.startsWith(EXECUTION_STAGE_CHANGES_MODAL_PREFIX)) return null;
-  const [issueId, stageId] = customId.slice(EXECUTION_STAGE_CHANGES_MODAL_PREFIX.length).split(":");
-  if (!issueId || !stageId) return null;
-  return { issueId, stageId };
+  const [issueId, stageId, decisionToken] = customId.slice(EXECUTION_STAGE_CHANGES_MODAL_PREFIX.length).split(":");
+  if (!issueId || !stageId || !decisionToken) return null;
+  return { issueId, stageId, decisionToken };
 }
 
 function resolveCompany(config: DiscordFleetConfig, guildId: string | null): CompanyConfig | undefined {
@@ -43,17 +43,22 @@ function resolveUserMapping(company: CompanyConfig, discordUserId: string): User
   return company.userMappings?.find((m) => m.discordUserId === discordUserId);
 }
 
-// Staleness guard (fleet issue #631 / PR-0, hardened across codex rounds 1-3):
-// the customId's stageId rides along as expectedExecutionStageId on the PATCH
-// itself, and the SERVER enforces it atomically as part of the same request
-// that applies the transition (server/src/services/issue-execution-policy.ts)
-// — rejecting with 409 if the stage is no longer the current pending one.
-// An earlier version of this guard did a separate client-side GET-then-PATCH
-// pre-check; that left a round-trip race window (a double-click, or the same
-// participant resolving a stage in the gap between the check and the act)
-// that only a server-side compare-and-swap closes by construction.
+// Staleness guard (fleet issue #631 / PR-0, hardened across codex rounds
+// 1-5): the customId's stageId + decisionToken ride along as
+// expectedExecutionStageId + expectedLastDecisionToken on the PATCH itself,
+// and the SERVER enforces both atomically as part of the same request that
+// applies the transition (server/src/services/issue-execution-policy.ts) —
+// rejecting with 409 if the stage is no longer the current pending one, OR
+// if a changes-requested-then-resubmit cycle happened since this card was
+// rendered (same stageId, but a fresh decisionToken — see
+// executionStageDecisionToken's doc comment in embeds.ts). An earlier
+// version of the stageId half of this guard did a separate client-side
+// GET-then-PATCH pre-check; that left a round-trip race window (a
+// double-click, or the same participant resolving a stage in the gap
+// between the check and the act) that only a server-side compare-and-swap
+// closes by construction.
 const STALE_STAGE_MESSAGE =
-  "This card is for a stage that's already been resolved, had changes requested, or been superseded by a later one — check Paperclip for the current state.";
+  "This card is for a stage that's already been resolved, or a newer version was posted after changes were requested and resubmitted — check Paperclip for the current state.";
 
 // codex P2: unlike approvals (approval-button.ts), an executionPolicy stage
 // transition only advances when the request actor's identity EXACTLY matches
@@ -134,7 +139,7 @@ export async function handleExecutionStageButton(
   // Mirrors carousel-confirmation-button.ts's reject flow exactly.
   if (parsed.action === "changes") {
     const modal = new ModalBuilder()
-      .setCustomId(`${EXECUTION_STAGE_CHANGES_MODAL_PREFIX}${parsed.issueId}:${parsed.stageId}`)
+      .setCustomId(`${EXECUTION_STAGE_CHANGES_MODAL_PREFIX}${parsed.issueId}:${parsed.stageId}:${parsed.decisionToken}`)
       .setTitle("Request changes")
       .addComponents(
         new ActionRowBuilder<TextInputBuilder>().addComponents(
@@ -176,7 +181,7 @@ export async function handleExecutionStageButton(
 
   const comment = `Approved via Discord by ${interaction.user.username}`;
   try {
-    await paperclip.updateIssueStatus(parsed.issueId, "done", comment, parsed.stageId);
+    await paperclip.updateIssueStatus(parsed.issueId, "done", comment, parsed.stageId, parsed.decisionToken);
   } catch (err) {
     ctx.logger.warn("execution-stage-button: approve API call failed", { issueId: parsed.issueId, err: String(err) });
     await interaction.followUp({ content: describeUpdateIssueStatusError(err, "approve"), ephemeral: true });
@@ -196,7 +201,7 @@ export async function handleExecutionStageChangesModal(
 ): Promise<void> {
   const parsed = parseExecutionStageChangesModalCustomId(interaction.customId);
   if (!parsed) return;
-  const { issueId, stageId } = parsed;
+  const { issueId, stageId, decisionToken } = parsed;
 
   const company = resolveCompany(config, interaction.guildId);
   if (!company) {
@@ -230,7 +235,7 @@ export async function handleExecutionStageChangesModal(
   const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
 
   try {
-    await paperclip.updateIssueStatus(issueId, "in_progress", note, stageId);
+    await paperclip.updateIssueStatus(issueId, "in_progress", note, stageId, decisionToken);
   } catch (err) {
     ctx.logger.warn("execution-stage-changes-modal: request-changes API call failed", { issueId, err: String(err) });
     await interaction.followUp({ content: describeUpdateIssueStatusError(err, "request changes"), ephemeral: true });
