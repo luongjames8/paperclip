@@ -7851,7 +7851,13 @@ export function issueRoutes(
           issue,
           interaction: expired,
           actor,
-          source: "issue.comment.superseded",
+          // Must match the "issue.comment" source the plain comment wake below uses — this
+          // wake's reason is also "issue_commented", and issue-tree-control's
+          // isVerifiedIssueTreeControlInteractionWake only lets an issue_commented wake
+          // through an active subtree pause hold when its source is exactly "issue.comment"
+          // (codex P2). This wake genuinely originates from that same real, persisted
+          // comment, so reusing the verified source is correct, not just permissive.
+          source: "issue.comment",
         }))
         .filter((built): built is NonNullable<typeof built> => built !== null);
 
@@ -9516,7 +9522,8 @@ export function issueRoutes(
           issue: currentIssue,
           interaction: expired,
           actor,
-          source: "issue.comment.superseded",
+          // Verified source — see the matching comment in the PATCH route (codex P2).
+          source: "issue.comment",
         });
         if (built) addWakeup(built.agentId, built.wakeup);
       }

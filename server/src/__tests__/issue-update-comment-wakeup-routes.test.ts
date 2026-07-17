@@ -547,7 +547,10 @@ describe("issue update comment wakeups", () => {
           commentId: "comment-superseding",
           wakeCommentId: "comment-superseding",
           wakeReason: "issue_commented",
-          source: "issue.comment.superseded",
+          // Must be the same verified source the plain comment wake uses ("issue.comment"),
+          // not a custom string — otherwise isVerifiedIssueTreeControlInteractionWake
+          // rejects this wake under an active subtree pause hold (codex P2).
+          source: "issue.comment",
         }),
       }),
     );
@@ -802,7 +805,10 @@ describe("issue update comment wakeups", () => {
           commentId: "comment-superseding-2",
           wakeCommentId: "comment-superseding-2",
           wakeReason: "issue_commented",
-          source: "issue.comment.superseded",
+          // Must be the same verified source the plain comment wake uses ("issue.comment"),
+          // not a custom string — otherwise isVerifiedIssueTreeControlInteractionWake
+          // rejects this wake under an active subtree pause hold (codex P2).
+          source: "issue.comment",
         }),
       }),
     );
