@@ -162,7 +162,6 @@ import {
 } from "../services/company-search-rate-limit.js";
 import {
   applyIssueExecutionPolicyTransition,
-  executionStageDecisionToken,
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
   redactIssueMonitorExternalRef,
@@ -2033,54 +2032,44 @@ function publishExecutionStagePendingEventIfChanged(input: {
 // shared signature, which dozens of unrelated callers use) — mirrors the
 // existing row-lock pattern in services/issues.ts's adoptStaleCheckoutRun.
 //
-// Must run FIRST inside the transaction, before svc.update: locks the row via
-// SELECT ... FOR UPDATE, which blocks a second concurrent transaction on the
-// SAME issue until the first commits. When the second transaction's lock
-// finally acquires, it re-reads the (by then already-mutated) executionState
-// and correctly fails the pending/stageId/decisionToken check here — never
-// silently proceeding to write on top of a decision that already landed.
-//
-// Also re-verifies expectedLastDecisionToken (round 5) for the SAME reason
-// the pre-transaction check does — see executionStageDecisionToken's doc
-// comment in issue-execution-policy.ts.
+// Rounds 5-9 added incremental field-by-field comparands here — lastDecisionId
+// (round 5), then currentParticipant (round 7) — because each round codex
+// found another field that could drift in the pre-transaction-read-to-lock
+// gap (a policy edit removing a stage was round 9's finding). Comparing
+// individual fields can never be complete; there's always another field.
+// This now compares the ENTIRE locked executionPolicy + executionState
+// against exactly what THIS request's transition was computed from
+// (preTransactionSnapshot, captured before the transaction opened) — if
+// EITHER differs at all for ANY reason (reassignment, a policy edit, another
+// decision landing first, anything), the pre-lock transition is stale and
+// must not be committed on top of it. This does NOT recompute the
+// transition under the lock (that would require moving the many OTHER
+// pre-transaction computations this route does — assignee-change
+// authorization, monitor scheduling, workspace checks — inside the
+// transaction too, a much larger restructure of the whole route); it only
+// detects that something changed and asks the client to retry, which is
+// sufficient for a Discord decision (the operator just sees "stale, check
+// Paperclip" and the next card/click reflects reality).
 async function assertExecutionStageStillPendingForUpdate(
   tx: Pick<Db, "select">,
   issueId: string,
   expectedExecutionStageId: string | null | undefined,
-  expectedLastDecisionToken: string | null | undefined,
-  // codex P2 (round 7): the transition this request is about to write was
-  // computed from the PRE-transaction read — including WHO the current
-  // participant was at that moment. If a policy edit or reassignment (e.g.
-  // an admin swaps the reviewer) lands in the gap between that read and this
-  // lock, stageId/lastDecisionId/status alone can stay identical while the
-  // participant has changed underneath — the stale request would otherwise
-  // still commit as the OLD participant. Comparing the locked row's
-  // currentParticipant against what was true pre-transaction closes this
-  // without recomputing the whole transition under the lock (a much larger
-  // restructure of this route, out of scope for this PR's own surface).
-  expectedCurrentParticipant: ParsedExecutionState["currentParticipant"] | null | undefined,
+  preTransactionSnapshot: { executionPolicy: unknown; executionState: unknown },
 ): Promise<void> {
   if (expectedExecutionStageId === undefined || expectedExecutionStageId === null) return;
 
   const locked = await tx
-    .select({ executionState: issueRows.executionState })
+    .select({ executionState: issueRows.executionState, executionPolicy: issueRows.executionPolicy })
     .from(issueRows)
     .where(eq(issueRows.id, issueId))
     .for("update")
     .then((rows) => rows[0] ?? null);
-  const lockedState = parseIssueExecutionState(locked?.executionState);
-  const stillPending = lockedState?.status === "pending" && lockedState.currentStageId === expectedExecutionStageId;
-  const tokenMatches =
-    expectedLastDecisionToken === undefined ||
-    expectedLastDecisionToken === null ||
-    executionStageDecisionToken(lockedState?.lastDecisionId) === expectedLastDecisionToken;
-  const participantMatches =
-    expectedCurrentParticipant === undefined ||
-    expectedCurrentParticipant === null ||
-    executionPrincipalsEqual(expectedCurrentParticipant, lockedState?.currentParticipant ?? null);
-  if (!stillPending || !tokenMatches || !participantMatches) {
+  const unchangedSincePreTransactionRead =
+    JSON.stringify(locked?.executionPolicy ?? null) === JSON.stringify(preTransactionSnapshot.executionPolicy ?? null) &&
+    JSON.stringify(locked?.executionState ?? null) === JSON.stringify(preTransactionSnapshot.executionState ?? null);
+  if (!unchangedSincePreTransactionRead) {
     throw conflict(
-      "This execution stage is no longer pending — it may have already been decided, reassigned, or a newer version was posted after changes were requested and resubmitted.",
+      "This execution stage is no longer pending — it may have already been decided, reassigned, had its policy edited, or a newer version was posted after changes were requested and resubmitted.",
     );
   }
 }
@@ -7523,18 +7512,15 @@ export function issueRoutes(
         issue = await db.transaction(async (tx) => {
           // Row-lock re-verification FIRST (see assertExecutionStageStillPendingForUpdate) —
           // closes the race between the pre-transaction expectedExecutionStageId
-          // check above and this transaction's write. Also re-verifies the
-          // participant hasn't drifted (e.g. a reassignment landing in the
-          // gap between the pre-transaction read and this lock) — the
-          // transition being written was computed against `existing`'s
-          // participant, so that's what must still hold under the lock.
-          await assertExecutionStageStillPendingForUpdate(
-            tx,
-            existing.id,
-            expectedExecutionStageId,
-            expectedLastDecisionToken,
-            parseIssueExecutionState(existing.executionState)?.currentParticipant,
-          );
+          // check above and this transaction's write. Compares the ENTIRE
+          // locked executionPolicy + executionState against what `existing`
+          // held when this transition was computed, so ANY drift in the gap
+          // (a decision landing first, a reassignment, a policy edit) is
+          // caught, not just the specific fields prior rounds enumerated.
+          await assertExecutionStageStillPendingForUpdate(tx, existing.id, expectedExecutionStageId, {
+            executionPolicy: existing.executionPolicy,
+            executionState: existing.executionState,
+          });
           // existing.id (resolved UUID), not the raw path param `id` — `id`
           // may be a human-readable identifier (svc.getById resolves both
           // forms above), but svc.update queries eq(issues.id, ...) against

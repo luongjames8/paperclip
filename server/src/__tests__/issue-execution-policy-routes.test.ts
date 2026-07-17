@@ -51,7 +51,7 @@ const mockTxInsert = vi.hoisted(() => vi.fn(() => ({ values: mockTxInsertValues 
 // routes/issues.ts) does tx.select(...).from(issues).where(...).for("update")
 // as the FIRST thing inside the decision-committing transaction — tests that
 // drive a real decision through the transaction must mock this chain too.
-const mockTxSelectFor = vi.hoisted(() => vi.fn(async () => [] as Array<{ executionState: unknown }>));
+const mockTxSelectFor = vi.hoisted(() => vi.fn(async () => [] as Array<{ executionState: unknown; executionPolicy: unknown }>));
 const mockTxSelectWhere = vi.hoisted(() => vi.fn(() => ({ for: mockTxSelectFor })));
 const mockTxSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockTxSelectWhere })));
 const mockTxSelect = vi.hoisted(() => vi.fn(() => ({ from: mockTxSelectFrom })));
@@ -543,7 +543,7 @@ describe("issue execution policy routes", () => {
       // The transaction's own row-lock re-verification re-reads the SAME
       // still-pending state — mirrors what a real, uncontested Postgres
       // FOR UPDATE read would see.
-      mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState }]);
+      mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState, executionPolicy: issue.executionPolicy }]);
 
       const res = await request(await createApp())
         .patch(`/api/issues/${issue.id}`)
@@ -581,6 +581,7 @@ describe("issue execution policy routes", () => {
       // check alone cannot.
       mockTxSelectFor.mockResolvedValue([{
         executionState: { ...issue.executionState, status: "completed", currentStageId: null },
+        executionPolicy: issue.executionPolicy,
       }]);
 
       const res = await request(await createApp())
@@ -612,6 +613,44 @@ describe("issue execution policy routes", () => {
           ...issue.executionState,
           currentParticipant: { type: "user", userId: "someone-else", agentId: null },
         },
+        executionPolicy: issue.executionPolicy,
+      }]);
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    // codex round 9: an executionPolicy edit (e.g. an approval stage added/
+    // removed, or the reviewer's participant list changed) in the gap
+    // between the pre-transaction read and this request's lock leaves
+    // executionState nominally unchanged (same stageId/status/participant/
+    // lastDecisionId) but the transition was computed against a policy that
+    // no longer matches the locked row. Field-by-field comparands on
+    // executionState alone can never catch this — the whole-object compare
+    // (executionPolicy AND executionState) is what closes it.
+    it("row lock re-verification catches an executionPolicy edit BETWEEN the pre-transaction read and the lock → 409, no mutation", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+      // executionState is byte-for-byte identical to the pre-transaction
+      // read; only executionPolicy drifted (an approval stage was appended).
+      const editedPolicy = normalizeIssueExecutionPolicy({
+        stages: [
+          { id: STAGE_ID, type: "review", participants: [{ type: "user", userId: "local-board" }] },
+          { type: "approval", participants: [{ type: "user", userId: "second-approver" }] },
+        ],
+      })!;
+      mockTxSelectFor.mockResolvedValue([{
+        executionState: issue.executionState,
+        executionPolicy: editedPolicy,
       }]);
 
       const res = await request(await createApp())
@@ -711,7 +750,7 @@ describe("issue execution policy routes", () => {
           ...patch,
           updatedAt: new Date(),
         }));
-        mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState }]);
+        mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState, executionPolicy: issue.executionPolicy }]);
 
         const res = await request(await createApp())
           .patch(`/api/issues/${issue.id}`)
@@ -777,6 +816,7 @@ describe("issue execution policy routes", () => {
         // (changes-requested loop back to pending), different generation.
         mockTxSelectFor.mockResolvedValue([{
           executionState: { ...issue.executionState, lastDecisionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+          executionPolicy: issue.executionPolicy,
         }]);
 
         const res = await request(await createApp())
@@ -800,7 +840,7 @@ describe("issue execution policy routes", () => {
           ...patch,
           updatedAt: new Date(),
         }));
-        mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState }]);
+        mockTxSelectFor.mockResolvedValue([{ executionState: issue.executionState, executionPolicy: issue.executionPolicy }]);
 
         const res = await request(await createApp())
           .patch(`/api/issues/${issue.id}`)

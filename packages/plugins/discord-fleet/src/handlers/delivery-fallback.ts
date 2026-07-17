@@ -74,3 +74,70 @@ export async function postDeliveryFailureFallback(
     });
   }
 }
+
+// Same last-resort trace as postDeliveryFailureFallback, but for
+// issue.execution_stage.pending (codex P2, fleet issue #631 round 9): unlike
+// approvals, the SAME issue can cycle through this pending state repeatedly
+// (review then approval; a changes-requested-then-resubmit loop can even
+// re-pend the SAME stage), so a durable marker keyed only by issueId would
+// permanently suppress every later occurrence after the first undelivered
+// one. Keyed by stageId + the decision-generation token instead — the same
+// token that already distinguishes pending "instances" on the Discord card
+// itself (execution-stage-pending.ts / issue-execution-policy.ts), so each
+// genuinely new pending instance gets its own fallback trace exactly once.
+export async function postExecutionStageDeliveryFailureFallback(
+  ctx: PluginContext,
+  config: DiscordFleetConfig,
+  event: PluginEvent,
+  reason: string,
+): Promise<void> {
+  const companyConfig = config.companies.find((c) => c.companyId === event.companyId);
+  const payload = event.payload as {
+    issueId?: unknown;
+    identifier?: unknown;
+    stageId?: unknown;
+    lastDecisionId?: unknown;
+  };
+  const issueId = typeof payload?.issueId === "string" ? payload.issueId : event.entityId;
+  const stageId = payload?.stageId;
+  if (!companyConfig || typeof issueId !== "string" || !issueId || typeof stageId !== "string" || !stageId) return;
+  const decisionToken = typeof payload?.lastDecisionId === "string" ? payload.lastDecisionId.slice(0, 8) : "none";
+  const postedKey = {
+    scopeKind: "company" as const,
+    scopeId: event.companyId,
+    stateKey: `${FALLBACK_POSTED_MARKER_PREFIX}stage:${issueId}:${stageId}:${decisionToken}`,
+  };
+  try {
+    if (await ctx.state.get(postedKey)) {
+      ctx.logger.info("discord-fleet: execution-stage fallback comment already posted for this pending instance, skipping duplicate", {
+        issueId,
+        stageId,
+        companyId: event.companyId,
+      });
+      return;
+    }
+  } catch (err) {
+    ctx.logger.warn("discord-fleet: execution-stage fallback dedup check failed, posting anyway", {
+      issueId,
+      stageId,
+      companyId: event.companyId,
+      error: String(err),
+    });
+  }
+  try {
+    const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
+    const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
+    await paperclip.addIssueComment(
+      issueId,
+      `⚠️ discord-fleet could not deliver this review/approval stage card to Discord: ${reason}. Check plugin logs / bot guild membership — decide directly in Paperclip in the meantime.`,
+    );
+    await ctx.state.set(postedKey, new Date().toISOString());
+  } catch (err) {
+    ctx.logger.error("discord-fleet: execution-stage fallback comment post also failed — non-delivery is now doubly silent", {
+      issueId,
+      stageId,
+      companyId: event.companyId,
+      error: String(err),
+    });
+  }
+}

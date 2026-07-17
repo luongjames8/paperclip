@@ -25,7 +25,7 @@ import {
   EXECUTION_STAGE_BUTTON_PREFIX,
   EXECUTION_STAGE_CHANGES_MODAL_PREFIX,
 } from "./render/embeds.js";
-import { postDeliveryFailureFallback } from "./handlers/delivery-fallback.js";
+import { postDeliveryFailureFallback, postExecutionStageDeliveryFailureFallback } from "./handlers/delivery-fallback.js";
 import { runDigest } from "./jobs/digest.js";
 import { runStuckDetector } from "./jobs/stuck-detector.js";
 import { runRoutineHealth } from "./jobs/routine-health.js";
@@ -389,7 +389,19 @@ function bindEventHandlers(
     }),
     ctx.events.on("issue.execution_stage.pending", async (event) => {
       const client = getClientForCompany(event.companyId);
-      if (!client) return;
+      if (!client) {
+        ctx.logger.error("discord-fleet: issue.execution_stage.pending received for company with no connected client; posting fallback comment", {
+          companyId: event.companyId,
+          issueId: (event.payload as { issueId?: unknown })?.issueId ?? event.entityId,
+        });
+        await postExecutionStageDeliveryFailureFallback(
+          ctx,
+          config,
+          event,
+          "no Discord client connected for this company (bot not in guild, or connect failed)",
+        );
+        return;
+      }
       await handleExecutionStagePending(ctx, event, client, config);
     }),
   ];
