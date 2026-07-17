@@ -616,6 +616,21 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
     return nowMs - updatedAtMs >= ASSIGNED_BACKLOG_STALE_THRESHOLD_MS;
   }
 
+  // Nothing couples issue_relations rows to issues.status (assertTransition only
+  // checks enum membership), so a `backlog` issue can carry its own unresolved
+  // `blockedByIssueIds` — e.g. PATCHed back from `blocked` without clearing them,
+  // or dependency-parked per the F2/INV-3 convention before a later status flip.
+  // That is itself an explicit waiting path (checkout also refuses in_progress
+  // while unresolved blockers exist), so the orphan scan must not recommend
+  // "move to todo" when the real next action is upstream of this issue.
+  function hasUnresolvedOwnBlockers(issue: IssueLivenessIssueInput) {
+    const relations = blockersByBlockedIssueId.get(issue.id) ?? [];
+    return relations.some((relation) => {
+      const blocker = issuesById.get(relation.blockerIssueId);
+      return Boolean(blocker) && blocker!.status !== "done" && blocker!.status !== "cancelled";
+    });
+  }
+
   function staleAssignedBacklogFinding(issue: IssueLivenessIssueInput): IssueLivenessFinding {
     const ownerCandidates = ownerCandidatesForRecoveryIssue(issue, input.agents, agentsById, {
       includeStalledAssignee: true,
@@ -655,6 +670,7 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
       issue.assigneeAgentId &&
       !unresolvedBlockers.has(issue.id) &&
       isStaleAssignedBacklogIssue(issue) &&
+      !hasUnresolvedOwnBlockers(issue) &&
       !hasExplicitWaitingPath(issue)
     ) {
       findings.push(staleAssignedBacklogFinding(issue));

@@ -314,6 +314,36 @@ describe("issue graph liveness classifier", () => {
     })).toEqual([]);
   });
 
+  it("does not flag a stale assigned backlog issue that is itself waiting on its own unresolved blocker", () => {
+    // Nothing couples issue_relations to issues.status, so a `backlog` issue can
+    // carry its own unresolved blockedByIssueIds (e.g. PATCHed back from `blocked`
+    // without clearing them). The real next action is upstream — "move to todo"
+    // would be wrong (checkout refuses in_progress while unresolved blockers exist).
+    const staleUpdatedAt = new Date(Date.now() - 8 * 60 * 60 * 1000);
+    const orphan = issue({
+      id: blockerId,
+      identifier: "PAP-1704",
+      title: "Dependency-parked rework leg still backlog",
+      status: "backlog",
+      assigneeAgentId: "blocker-agent",
+      updatedAt: staleUpdatedAt,
+    });
+    const ownBlocker = issue({
+      id: "own-blocker-1",
+      identifier: "PAP-1705",
+      title: "Upstream work the orphan is waiting on",
+      status: "todo",
+      assigneeAgentId: null,
+      updatedAt: staleUpdatedAt,
+    });
+
+    expect(classifyIssueGraphLiveness({
+      issues: [orphan, ownBlocker],
+      relations: [{ companyId, blockerIssueId: "own-blocker-1", blockedIssueId: blockerId }],
+      agents: [manager, agent({ id: "blocker-agent", name: "Blocker Agent", reportsTo: managerId })],
+    })).toEqual([]);
+  });
+
   it("does not flag an unassigned blocker that already has an active execution path", () => {
     const findings = classifyIssueGraphLiveness({
       issues: [
