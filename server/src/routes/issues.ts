@@ -526,6 +526,15 @@ function readConfirmationResultForWake(result: unknown) {
   };
 }
 
+// A user comment superseded a pending request_confirmation/request_checkbox_confirmation/
+// ask_user_questions before it was answered — as opposed to a silent stale-target or
+// background-sweep expiry. This is the one "expired" shape that still represents a live
+// operator signal the assignee needs to react to (see queueResolvedInteractionContinuationWakeup).
+function isInteractionResultSupersededByComment(result: unknown): boolean {
+  const parsed = readObject(result);
+  return parsed.outcome === "superseded_by_comment" || parsed.expirationReason === "superseded_by_comment";
+}
+
 function hasIssueWorkspaceAuditChange(previous: Record<string, unknown>) {
   return Object.keys(previous).some((key) => ISSUE_WORKSPACE_AUDIT_FIELDS.has(key));
 }
@@ -1764,8 +1773,7 @@ function isAssigneeSelfCommentOnTerminalIssue(input: {
   return input.actorId === input.assigneeAgentId;
 }
 
-function queueResolvedInteractionContinuationWakeup(input: {
-  heartbeat: ReturnType<typeof heartbeatService>;
+type ResolvedInteractionContinuationInput = {
   issue: { id: string; assigneeAgentId: string | null; status: string };
   interaction: {
     id: string;
@@ -1781,17 +1789,29 @@ function queueResolvedInteractionContinuationWakeup(input: {
   source: string;
   forceFreshSession?: boolean;
   workspaceRefreshReason?: string | null;
-}) {
+};
+
+// Shared payload builder so both the direct accept/reject/respond/cancel routes and the
+// comment-triggered supersede-expiry paths produce the identical wake_assignee continuation
+// wakeup — callers that need to merge it with other same-request wakeups (see the "merge all
+// wakeups" dedupe map in the comment routes) can use the returned { agentId, wakeup } directly
+// instead of going through queueResolvedInteractionContinuationWakeup's own heartbeat.wakeup call.
+function buildResolvedInteractionContinuationWakeup(input: ResolvedInteractionContinuationInput) {
   if (
     input.interaction.continuationPolicy !== "wake_assignee"
     && input.interaction.continuationPolicy !== "wake_assignee_on_accept"
-  ) return;
+  ) return null;
   if (
     input.interaction.continuationPolicy === "wake_assignee_on_accept"
     && input.interaction.status !== "accepted"
-  ) return;
-  if (input.interaction.status === "expired") return;
-  if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status)) return;
+  ) return null;
+  // A silent stale-target/background-sweep expiry means the interaction never got a real
+  // resolution to continue from — but an expiry caused by the operator commenting IS a live
+  // signal (the operator just told the assignee something), so it still needs to wake.
+  if (input.interaction.status === "expired" && !isInteractionResultSupersededByComment(input.interaction.result)) {
+    return null;
+  }
+  if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status)) return null;
 
   const forceFreshSession = input.forceFreshSession === true;
   const workspaceRefreshReason = readNonEmptyString(input.workspaceRefreshReason);
@@ -1809,43 +1829,63 @@ function queueResolvedInteractionContinuationWakeup(input: {
           result: interactionResult,
         }
       : null;
-  void input.heartbeat.wakeup(input.issue.assigneeAgentId, {
-    source: "automation",
-    triggerDetail: "system",
-    reason: "issue_commented",
-    payload: {
-      issueId: input.issue.id,
-      interactionId: input.interaction.id,
-      interactionKind: input.interaction.kind,
-      interactionStatus: input.interaction.status,
-      sourceCommentId: input.interaction.sourceCommentId ?? null,
-      sourceRunId: input.interaction.sourceRunId ?? null,
-      ...(planReviewInteraction ? { planReviewInteraction } : {}),
-      ...(checkboxSelection ? { checkboxSelection } : {}),
-      mutation: "interaction",
+  return {
+    agentId: input.issue.assigneeAgentId,
+    wakeup: {
+      source: "automation" as const,
+      triggerDetail: "system" as const,
+      reason: "issue_commented",
+      payload: {
+        issueId: input.issue.id,
+        interactionId: input.interaction.id,
+        interactionKind: input.interaction.kind,
+        interactionStatus: input.interaction.status,
+        sourceCommentId: input.interaction.sourceCommentId ?? null,
+        sourceRunId: input.interaction.sourceRunId ?? null,
+        // The comment that RESOLVED this interaction (e.g. the operator's superseding
+        // "redo it"), distinct from sourceCommentId above (the comment that created the
+        // original card). heartbeat.enrichWakeContextSnapshot derives
+        // PAPERCLIP_WAKE_COMMENT_ID from payload.commentId — without this the adapter never
+        // sees the comment that actually triggered the wake (codex P2).
+        ...(interactionResult?.commentId ? { commentId: interactionResult.commentId } : {}),
+        ...(planReviewInteraction ? { planReviewInteraction } : {}),
+        ...(checkboxSelection ? { checkboxSelection } : {}),
+        mutation: "interaction",
+      },
+      requestedByActorType: input.actor.actorType,
+      requestedByActorId: input.actor.actorId,
+      contextSnapshot: {
+        issueId: input.issue.id,
+        taskId: input.issue.id,
+        interactionId: input.interaction.id,
+        interactionKind: input.interaction.kind,
+        interactionStatus: input.interaction.status,
+        sourceCommentId: input.interaction.sourceCommentId ?? null,
+        sourceRunId: input.interaction.sourceRunId ?? null,
+        ...(interactionResult?.commentId
+          ? { commentId: interactionResult.commentId, wakeCommentId: interactionResult.commentId }
+          : {}),
+        ...(planReviewInteraction ? { planReviewInteraction } : {}),
+        ...(checkboxSelection ? { checkboxSelection } : {}),
+        wakeReason: "issue_commented",
+        source: input.source,
+        ...(forceFreshSession ? { forceFreshSession: true } : {}),
+        ...(workspaceRefreshReason ? { workspaceRefreshReason } : {}),
+      },
     },
-    requestedByActorType: input.actor.actorType,
-    requestedByActorId: input.actor.actorId,
-    contextSnapshot: {
-      issueId: input.issue.id,
-      taskId: input.issue.id,
-      interactionId: input.interaction.id,
-      interactionKind: input.interaction.kind,
-      interactionStatus: input.interaction.status,
-      sourceCommentId: input.interaction.sourceCommentId ?? null,
-      sourceRunId: input.interaction.sourceRunId ?? null,
-      ...(planReviewInteraction ? { planReviewInteraction } : {}),
-      ...(checkboxSelection ? { checkboxSelection } : {}),
-      wakeReason: "issue_commented",
-      source: input.source,
-      ...(forceFreshSession ? { forceFreshSession: true } : {}),
-      ...(workspaceRefreshReason ? { workspaceRefreshReason } : {}),
-    },
-  }).catch((err) => logger.warn({
+  };
+}
+
+function queueResolvedInteractionContinuationWakeup(
+  input: ResolvedInteractionContinuationInput & { heartbeat: ReturnType<typeof heartbeatService> },
+) {
+  const built = buildResolvedInteractionContinuationWakeup(input);
+  if (!built) return;
+  void input.heartbeat.wakeup(built.agentId, built.wakeup).catch((err) => logger.warn({
     err,
     issueId: input.issue.id,
     interactionId: input.interaction.id,
-    agentId: input.issue.assigneeAgentId,
+    agentId: built.agentId,
   }, "failed to wake assignee on issue interaction resolution"));
 }
 
@@ -7732,6 +7772,7 @@ export function issueRoutes(
     }
 
     let comment = null;
+    let commentSupersededWakeups: NonNullable<ReturnType<typeof buildResolvedInteractionContinuationWakeup>>[] = [];
     if (commentBody) {
       const commentReferenceSummaryBefore = updateReferenceSummaryAfter
         ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
@@ -7805,6 +7846,20 @@ export function issueRoutes(
         actor,
         source: "issue.comment",
       });
+      commentSupersededWakeups = expiredInteractions
+        .map((expired) => buildResolvedInteractionContinuationWakeup({
+          issue,
+          interaction: expired,
+          actor,
+          // Must match the "issue.comment" source the plain comment wake below uses — this
+          // wake's reason is also "issue_commented", and issue-tree-control's
+          // isVerifiedIssueTreeControlInteractionWake only lets an issue_commented wake
+          // through an active subtree pause hold when its source is exactly "issue.comment"
+          // (codex P2). This wake genuinely originates from that same real, persisted
+          // comment, so reusing the verified source is correct, not just permissive.
+          source: "issue.comment",
+        }))
+        .filter((built): built is NonNullable<typeof built> => built !== null);
 
     } else if (updateReferenceSummaryAfter) {
       issueResponse = {
@@ -7845,12 +7900,25 @@ export function issueRoutes(
       };
       const dependencyReadinessSvc = svc as DependencyReadinessProvider;
       const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
-      const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
+      const wakeupKey = (agentId: string, wakeup: WakeupRequest) => {
         const wakeIssueId =
           wakeup.payload && typeof wakeup.payload === "object" && typeof wakeup.payload.issueId === "string"
             ? wakeup.payload.issueId
             : issue.id;
-        wakeups.set(`${agentId}:${wakeIssueId}`, { agentId, wakeup });
+        return `${agentId}:${wakeIssueId}`;
+      };
+      const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
+        wakeups.set(wakeupKey(agentId, wakeup), { agentId, wakeup });
+      };
+      // The interaction-specific supersede wake must beat a generic comment/mention wake
+      // queued for the same agent+issue key, but must never clobber an assignment/status
+      // wake — that's the primary mutation for this request (codex P2).
+      const GENERIC_COMMENT_WAKE_REASONS = new Set(["issue_commented", "issue_reopened_via_comment", "issue_comment_mentioned"]);
+      const addWakeupPreferringInteractionOverGenericComment = (agentId: string, wakeup: WakeupRequest) => {
+        const key = wakeupKey(agentId, wakeup);
+        const existing = wakeups.get(key);
+        if (existing && !GENERIC_COMMENT_WAKE_REASONS.has(existing.wakeup.reason ?? "")) return;
+        wakeups.set(key, { agentId, wakeup });
       };
       const addDependencyResolvedWakeup = async (input: {
         agentId: string;
@@ -7970,7 +8038,10 @@ export function issueRoutes(
             triggerDetail: "system",
             reason: reopened ? "issue_reopened_via_comment" : "issue_commented",
             payload: {
-              issueId: id,
+              // Resolved UUID, not the raw (possibly identifier-form, e.g. "PAP-999") path
+              // param `id` — must match what the interaction-supersede wake below keys on,
+              // or the two dedupe as different agent+issue keys and double-wake (codex P2).
+              issueId: issue.id,
               commentId: comment.id,
               mutation: "comment",
               ...(reopened ? { reopenedFrom: reopenFromStatus } : {}),
@@ -7980,8 +8051,8 @@ export function issueRoutes(
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
-              issueId: id,
-              taskId: id,
+              issueId: issue.id,
+              taskId: issue.id,
               commentId: comment.id,
               wakeCommentId: comment.id,
               source: reopened ? "issue.comment.reopen" : "issue.comment",
@@ -8006,18 +8077,27 @@ export function issueRoutes(
             source: "automation",
             triggerDetail: "system",
             reason: "issue_comment_mentioned",
-            payload: { issueId: id, commentId: comment.id },
+            // issue.id (resolved UUID) — see the comment-wake block above (codex P2).
+            payload: { issueId: issue.id, commentId: comment.id },
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
-              issueId: id,
-              taskId: id,
+              issueId: issue.id,
+              taskId: issue.id,
               commentId: comment.id,
               wakeCommentId: comment.id,
               wakeReason: "issue_comment_mentioned",
               source: "comment.mention",
             },
           });
+        }
+
+        // Interaction-specific wake (richer context: interactionId/kind/result) must beat a
+        // generic comment/mention wake queued above for the same agent+issue key (this route's
+        // addWakeup is last-write-wins) — but must NOT clobber an assignment/status wake, which
+        // is the primary mutation for this request (codex P2).
+        for (const { agentId, wakeup } of commentSupersededWakeups) {
+          addWakeupPreferringInteractionOverGenericComment(agentId, wakeup);
         }
       }
 
@@ -9432,6 +9512,20 @@ export function issueRoutes(
 
       if (commentDecisionStageWakeup) {
         addWakeup(commentDecisionStageWakeup.agentId, commentDecisionStageWakeup.wakeup);
+      }
+
+      // Interaction-specific wake (richer context: interactionId/kind/result) must be added
+      // before the generic issue_commented wake below — this addWakeup is first-write-wins
+      // per agent+issue key, so the richer payload needs to claim the key first.
+      for (const expired of expiredInteractions) {
+        const built = buildResolvedInteractionContinuationWakeup({
+          issue: currentIssue,
+          interaction: expired,
+          actor,
+          // Verified source — see the matching comment in the PATCH route (codex P2).
+          source: "issue.comment",
+        });
+        if (built) addWakeup(built.agentId, built.wakeup);
       }
 
       const assigneeId = currentIssue.assigneeAgentId;
