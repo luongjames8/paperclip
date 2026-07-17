@@ -219,6 +219,101 @@ describe("issue graph liveness classifier", () => {
     })).toEqual([]);
   });
 
+  it("detects a stale orphan assigned backlog issue with no dependents (HIN-2245 class)", () => {
+    const staleUpdatedAt = new Date(Date.now() - 8 * 60 * 60 * 1000);
+    const orphan = issue({
+      id: blockerId,
+      identifier: "PAP-1704",
+      title: "Rework leg born in backlog",
+      status: "backlog",
+      assigneeAgentId: "blocker-agent",
+      updatedAt: staleUpdatedAt,
+    });
+
+    const findings = classifyIssueGraphLiveness({
+      issues: [orphan],
+      relations: [],
+      agents: [manager, agent({ id: "blocker-agent", name: "Blocker Agent", reportsTo: managerId })],
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      issueId: blockerId,
+      identifier: "PAP-1704",
+      state: "stale_assigned_backlog_issue",
+      recoveryIssueId: blockerId,
+      recommendedOwnerAgentId: "blocker-agent",
+      dependencyPath: [expect.objectContaining({ issueId: blockerId, status: "backlog" })],
+      incidentKey: `harness_liveness:${companyId}:${blockerId}:stale_assigned_backlog_issue:none`,
+    });
+  });
+
+  it("does not flag a freshly parked assigned backlog issue with no dependents", () => {
+    const orphan = issue({
+      id: blockerId,
+      identifier: "PAP-1704",
+      title: "Deliberately parked for later",
+      status: "backlog",
+      assigneeAgentId: "blocker-agent",
+      updatedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+    });
+
+    const findings = classifyIssueGraphLiveness({
+      issues: [orphan],
+      relations: [],
+      agents: [manager, agent({ id: "blocker-agent", name: "Blocker Agent", reportsTo: managerId })],
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it("does not double-escalate a stale assigned backlog issue that already blocks a live blocked issue", () => {
+    const staleUpdatedAt = new Date(Date.now() - 8 * 60 * 60 * 1000);
+    const findings = classifyIssueGraphLiveness({
+      issues: [
+        issue({ updatedAt: staleUpdatedAt }),
+        issue({
+          id: blockerId,
+          identifier: "PAP-1704",
+          title: "Parked assigned unblock work",
+          status: "backlog",
+          assigneeAgentId: "blocker-agent",
+          updatedAt: staleUpdatedAt,
+        }),
+      ],
+      relations: blocks,
+      agents: [
+        agent(),
+        manager,
+        agent({ id: "blocker-agent", name: "Blocker Agent", reportsTo: managerId }),
+      ],
+    });
+
+    // Already covered by the blocked-chain walk (blocked_by_assigned_backlog_issue);
+    // the standalone orphan scan must not raise a second finding for the same issue.
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.state).toBe("blocked_by_assigned_backlog_issue");
+  });
+
+  it("does not flag a stale assigned backlog issue that already has an explicit waiting path", () => {
+    const staleUpdatedAt = new Date(Date.now() - 8 * 60 * 60 * 1000);
+    const orphan = issue({
+      id: blockerId,
+      identifier: "PAP-1704",
+      title: "Rework leg with an open recovery issue",
+      status: "backlog",
+      assigneeAgentId: "blocker-agent",
+      updatedAt: staleUpdatedAt,
+    });
+
+    expect(classifyIssueGraphLiveness({
+      issues: [orphan],
+      relations: [],
+      agents: [manager, agent({ id: "blocker-agent", name: "Blocker Agent", reportsTo: managerId })],
+      openRecoveryIssues: [{ companyId, issueId: blockerId, status: "todo" }],
+    })).toEqual([]);
+  });
+
   it("does not flag an unassigned blocker that already has an active execution path", () => {
     const findings = classifyIssueGraphLiveness({
       issues: [

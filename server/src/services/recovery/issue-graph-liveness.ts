@@ -9,7 +9,27 @@ export type IssueLivenessState =
   | "blocked_by_uninvokable_assignee"
   | "blocked_by_cancelled_issue"
   | "invalid_review_participant"
-  | "in_review_without_action_path";
+  | "in_review_without_action_path"
+  | "stale_assigned_backlog_issue";
+
+/**
+ * How long an issue may sit assigned + `backlog` with no dependent, waiting path, or
+ * open recovery before it is treated as a stale orphan rather than deliberate parking
+ * (doc/execution-semantics.md, "Agent-assigned backlog").
+ *
+ * Must stay below the auto-recovery lookback window (default 24h,
+ * DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS in
+ * packages/shared/src/types/instance.ts) — reconcileIssueGraphLiveness only acts on
+ * findings whose dependency-path issues were updated within that window
+ * (service.ts, isLivenessFindingInsideAutoRecoveryLookback), and this finding's sole
+ * dependency-path entry is the stale issue itself, so an at-or-above threshold would
+ * make every finding go stale-and-out-of-window the instant it is raised. Known edge
+ * case: an operator-configured lookback below this threshold (floor is 1h,
+ * MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS) reintroduces the same
+ * silent-suppression failure for this state specifically — not auto-defended against,
+ * since fixing it needs the classifier to know the configured lookback.
+ */
+export const ASSIGNED_BACKLOG_STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
 
 export interface IssueLivenessIssueInput {
   id: string;
@@ -28,6 +48,7 @@ export interface IssueLivenessIssueInput {
   executionState?: Record<string, unknown> | null;
   monitorNextCheckAt?: Date | string | null;
   monitorAttemptCount?: number | null;
+  updatedAt?: Date | string | null;
 }
 
 export interface IssueLivenessRelationInput {
@@ -385,6 +406,10 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
       blocker.status !== "cancelled" &&
       blocked.status === "blocked"
     ) {
+      // A backlog blocker recorded here is already reachable via the blocked-chain
+      // walk below (blockedFindingForLeaf), so the standalone orphan scan (which
+      // only ever looks at backlog-status issues) must skip anything in this set
+      // to avoid raising a second, duplicate escalation for the same issue.
       unresolvedBlockers.add(blocker.id);
     }
   }
@@ -589,6 +614,34 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
     return null;
   }
 
+  function isStaleAssignedBacklogIssue(issue: IssueLivenessIssueInput) {
+    const updatedAtMs = readDateMs(issue.updatedAt);
+    if (updatedAtMs === null) return false;
+    return nowMs - updatedAtMs >= ASSIGNED_BACKLOG_STALE_THRESHOLD_MS;
+  }
+
+  function staleAssignedBacklogFinding(issue: IssueLivenessIssueInput): IssueLivenessFinding {
+    const ownerCandidates = ownerCandidatesForRecoveryIssue(issue, input.agents, agentsById, {
+      includeStalledAssignee: true,
+    });
+
+    return finding({
+      issue,
+      state: "stale_assigned_backlog_issue",
+      reason:
+        `${issueLabel(issue)} has been assigned and parked in backlog with no wake, active run, ` +
+        "human owner, interaction, approval, monitor, or recovery issue owning the next action, " +
+        "and nothing else is blocked on it to otherwise surface the incident.",
+      dependencyPath: [issue],
+      recoveryIssue: issue,
+      recommendedOwnerCandidateAgentIds: ownerCandidates.map((candidate) => candidate.agentId),
+      recommendedOwnerCandidates: ownerCandidates,
+      recommendedAction:
+        `Review ${issueLabel(issue)} and either move it to todo so the assignee wakes, assign a ` +
+        "human owner or interaction if it is intentionally parked, or cancel it if the work is no longer required.",
+    });
+  }
+
   for (const issue of input.issues) {
     if (issue.status === "blocked") {
       if (unresolvedBlockers.has(issue.id)) continue;
@@ -599,6 +652,16 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
     if (issue.status === "in_review" && !unresolvedBlockers.has(issue.id)) {
       const review = reviewFinding(issue, issue, [issue]);
       if (review) findings.push(review);
+    }
+
+    if (
+      issue.status === "backlog" &&
+      issue.assigneeAgentId &&
+      !unresolvedBlockers.has(issue.id) &&
+      isStaleAssignedBacklogIssue(issue) &&
+      !hasExplicitWaitingPath(issue)
+    ) {
+      findings.push(staleAssignedBacklogFinding(issue));
     }
   }
 
