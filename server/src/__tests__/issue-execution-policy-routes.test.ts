@@ -591,6 +591,37 @@ describe("issue execution policy routes", () => {
       expect(mockIssueService.update).not.toHaveBeenCalled();
     });
 
+    // codex round 7: the transition being written was computed from the
+    // PRE-transaction read's participant. If a reassignment (same stageId,
+    // same lastDecisionId — no decision was recorded, just a policy/assignee
+    // edit) lands in the gap before this request's own lock acquires, the
+    // stale request must not silently commit as the OLD participant.
+    it("row lock re-verification catches a participant reassignment BETWEEN the pre-transaction read and the lock → 409, no mutation", async () => {
+      const issue = pendingReviewIssue();
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...issue,
+        ...patch,
+        updatedAt: new Date(),
+      }));
+      // Same stageId + same lastDecisionId (no decision recorded), but the
+      // reviewer was reassigned from local-board to a different user in the
+      // gap between the pre-transaction read and this request's lock.
+      mockTxSelectFor.mockResolvedValue([{
+        executionState: {
+          ...issue.executionState,
+          currentParticipant: { type: "user", userId: "someone-else", agentId: null },
+        },
+      }]);
+
+      const res = await request(await createApp())
+        .patch(`/api/issues/${issue.id}`)
+        .send({ status: "done", comment: "Approved via test", expectedExecutionStageId: STAGE_ID });
+
+      expect(res.status).toBe(409);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
     it("mismatched expectedExecutionStageId → 409, no mutation applied", async () => {
       const issue = pendingReviewIssue();
       mockIssueService.getById.mockResolvedValue(issue);

@@ -2048,6 +2048,17 @@ async function assertExecutionStageStillPendingForUpdate(
   issueId: string,
   expectedExecutionStageId: string | null | undefined,
   expectedLastDecisionToken: string | null | undefined,
+  // codex P2 (round 7): the transition this request is about to write was
+  // computed from the PRE-transaction read — including WHO the current
+  // participant was at that moment. If a policy edit or reassignment (e.g.
+  // an admin swaps the reviewer) lands in the gap between that read and this
+  // lock, stageId/lastDecisionId/status alone can stay identical while the
+  // participant has changed underneath — the stale request would otherwise
+  // still commit as the OLD participant. Comparing the locked row's
+  // currentParticipant against what was true pre-transaction closes this
+  // without recomputing the whole transition under the lock (a much larger
+  // restructure of this route, out of scope for this PR's own surface).
+  expectedCurrentParticipant: ParsedExecutionState["currentParticipant"] | null | undefined,
 ): Promise<void> {
   if (expectedExecutionStageId === undefined || expectedExecutionStageId === null) return;
 
@@ -2063,9 +2074,13 @@ async function assertExecutionStageStillPendingForUpdate(
     expectedLastDecisionToken === undefined ||
     expectedLastDecisionToken === null ||
     executionStageDecisionToken(lockedState?.lastDecisionId) === expectedLastDecisionToken;
-  if (!stillPending || !tokenMatches) {
+  const participantMatches =
+    expectedCurrentParticipant === undefined ||
+    expectedCurrentParticipant === null ||
+    executionPrincipalsEqual(expectedCurrentParticipant, lockedState?.currentParticipant ?? null);
+  if (!stillPending || !tokenMatches || !participantMatches) {
     throw conflict(
-      "This execution stage is no longer pending — it may have already been decided, or a newer version was posted after changes were requested and resubmitted.",
+      "This execution stage is no longer pending — it may have already been decided, reassigned, or a newer version was posted after changes were requested and resubmitted.",
     );
   }
 }
@@ -7508,8 +7523,18 @@ export function issueRoutes(
         issue = await db.transaction(async (tx) => {
           // Row-lock re-verification FIRST (see assertExecutionStageStillPendingForUpdate) —
           // closes the race between the pre-transaction expectedExecutionStageId
-          // check above and this transaction's write.
-          await assertExecutionStageStillPendingForUpdate(tx, existing.id, expectedExecutionStageId, expectedLastDecisionToken);
+          // check above and this transaction's write. Also re-verifies the
+          // participant hasn't drifted (e.g. a reassignment landing in the
+          // gap between the pre-transaction read and this lock) — the
+          // transition being written was computed against `existing`'s
+          // participant, so that's what must still hold under the lock.
+          await assertExecutionStageStillPendingForUpdate(
+            tx,
+            existing.id,
+            expectedExecutionStageId,
+            expectedLastDecisionToken,
+            parseIssueExecutionState(existing.executionState)?.currentParticipant,
+          );
           // existing.id (resolved UUID), not the raw path param `id` — `id`
           // may be a human-readable identifier (svc.getById resolves both
           // forms above), but svc.update queries eq(issues.id, ...) against
