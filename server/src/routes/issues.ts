@@ -2188,19 +2188,30 @@ function buildExecutionStageWakeup(input: {
       previousState?.status !== "completed" ||
       previousState?.lastDecisionId !== nextState.lastDecisionId ||
       !executionPrincipalsEqual(previousState?.returnAssignee ?? null, nextState.returnAssignee ?? null);
-    if (!agentId || !becameCompleted) return null;
+    // codex P2 (round 2): a policy whose only remaining stages are review
+    // stages the executor is the sole eligible participant for can auto-skip
+    // straight to "completed" (issue-execution-policy.ts's
+    // canAutoSkipPendingStage) on ANY actor's PATCH — not just the
+    // executor's own, since canAutoSkipPendingStage never checks who the
+    // actor is, only that the stage's participants all equal returnAssignee.
+    // That path never records a decision, so lastDecisionOutcome stays
+    // whatever it was before (never "approved"). Require a REAL approval to
+    // have actually closed the workflow: this is both semantically correct
+    // (this wake means "someone else signed off", which didn't happen here)
+    // and avoids the prompt builder having no sane copy for "nobody actually
+    // reviewed this".
+    if (!agentId || !becameCompleted || nextState.lastDecisionOutcome !== "approved") return null;
 
-    // No-self-wake guard: a policy whose every stage is a review stage the
-    // executor is themselves the sole eligible participant for can auto-skip
-    // straight to "completed" on the EXECUTOR'S OWN submitting PATCH
-    // (issue-execution-policy.ts's canAutoSkipPendingStage) — no distinct
-    // approver ever decides, and previousState never went "pending" so it
-    // carries no participant to compare against. Compare the ACTOR who
-    // triggered THIS transition instead (reusing the same actor/participant
-    // predicate the comment-driven auto-approval path already trusts) —
-    // covers both that auto-skip path and, defensively, a hypothetical
-    // approver === executor should some future policy-selection change ever
-    // allow it (today selectStageParticipant always excludes returnAssignee).
+    // No-self-wake guard (defense-in-depth): the lastDecisionOutcome check
+    // above already screens out every reachable auto-skip-to-completed path
+    // (it never records "approved"). This guards a DIFFERENT, still-live
+    // case — a genuine recorded approval where the approving actor happens
+    // to equal returnAssignee — which the exclusion invariant in
+    // selectStageParticipant (issue-execution-policy.ts) is supposed to make
+    // impossible today, but this branch has no visibility into that
+    // invariant holding. Compare the ACTOR who triggered THIS transition
+    // (reusing the same actor/participant predicate the comment-driven
+    // auto-approval path already trusts).
     if (
       actorMatchesExecutionParticipant(
         { actorType: input.requestedByActorType, actorId: input.requestedByActorId },

@@ -3100,4 +3100,62 @@ describe.sequential("issue comment reopen routes", () => {
     });
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
+
+  // Codex P2 (round 2, fleet issue #657): canAutoSkipPendingStage doesn't
+  // check WHO the actor is — only that the stage's participants all equal
+  // returnAssignee. A BOARD user marking the issue done directly (not the
+  // executor themselves) hits the exact same auto-skip with no recorded
+  // decision. The round-1 self-wake guard alone (actor === returnAssignee)
+  // would NOT catch this since the actor here is the board, not the
+  // executor — the lastDecisionOutcome !== "approved" gate is what suppresses it.
+  it("does not wake the executor when a BOARD user (not the executor) marks the issue done and the sole review participant auto-skips", async () => {
+    const executorAgentId = "22222222-2222-4222-8222-222222222222";
+    const policy = await normalizePolicy({
+      stages: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          type: "review",
+          participants: [{ type: "agent", agentId: executorAgentId }],
+        },
+      ],
+    })!;
+    const issue = {
+      ...makeIssue("todo"),
+      status: "in_progress",
+      assigneeAgentId: executorAgentId,
+      executionPolicy: policy,
+      executionState: null,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+
+    const res = await request(
+      await installActor(createApp()), // default actor = board (local-board), NOT the executor
+    )
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({
+        status: "done",
+        comment: "Marking done directly; policy's only stage auto-skips.",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("done");
+    expect(res.body.executionState).toMatchObject({
+      status: "completed",
+      completedStageIds: [policy.stages[0].id],
+      lastDecisionId: null,
+    });
+    expect(res.body.executionState.lastDecisionOutcome).not.toBe("approved");
+    // A board comment on the issue legitimately wakes the assignee via the
+    // generic (unrelated) issue_commented path — that's expected. What must
+    // NOT happen is an execution_completed wake for this un-approved auto-skip.
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
+      executorAgentId,
+      expect.objectContaining({ reason: "execution_completed" }),
+    );
+  });
 });
