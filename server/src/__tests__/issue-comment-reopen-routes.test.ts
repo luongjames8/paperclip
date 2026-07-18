@@ -2974,6 +2974,14 @@ describe.sequential("issue comment reopen routes", () => {
             allowedActions: [],
           }),
         }),
+        // Codex P2 (round 3): the executor is the SAME agent identity as
+        // whoever executed the issue — if their own run for it is still
+        // "running" when this wake enqueues, heartbeat.ts's same-issue
+        // active-run coalescing would otherwise silently merge this
+        // notification into that already-executing (and already-prompted)
+        // process instead of queueing a real follow-up. forceFreshSession
+        // routes it through shouldDeferFollowupWakeForSameIssue instead.
+        contextSnapshot: expect.objectContaining({ forceFreshSession: true }),
       }),
     ));
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);

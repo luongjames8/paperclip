@@ -30,7 +30,6 @@ describe("PF-4 shouldResetTaskSessionForWake", () => {
       "execution_review_requested",
       "execution_approval_requested",
       "execution_changes_requested",
-      "execution_completed",
     ] as const) {
       expect(shouldResetTaskSessionForWake({ wakeReason })).toBe(true);
     }
@@ -79,9 +78,20 @@ describe("PF-4 describeSessionResetReason", () => {
     expect(describeSessionResetReason({ wakeReason: "execution_changes_requested" })).toBe(
       "wake reason is execution_changes_requested",
     );
-    expect(describeSessionResetReason({ wakeReason: "execution_completed" })).toBe(
-      "wake reason is execution_completed",
-    );
+  });
+
+  it("execution_completed relies on forceFreshSession rather than a reason-string branch (fleet issue #657)", () => {
+    // buildExecutionStageWakeup sets contextSnapshot.forceFreshSession
+    // directly on this wake (also needed to route it out of same-issue
+    // active-run coalescing) — the reason string alone does not reset.
+    expect(shouldResetTaskSessionForWake({ wakeReason: "execution_completed" })).toBe(false);
+    expect(describeSessionResetReason({ wakeReason: "execution_completed" })).toBeNull();
+    expect(
+      shouldResetTaskSessionForWake({ wakeReason: "execution_completed", forceFreshSession: true }),
+    ).toBe(true);
+    expect(
+      describeSessionResetReason({ wakeReason: "execution_completed", forceFreshSession: true }),
+    ).toBe("forceFreshSession was requested");
   });
 
   it("returns the forceFreshSession message when explicitly requested", () => {
@@ -105,7 +115,6 @@ describe("PF-4 describeSessionResetReason", () => {
       { wakeReason: "execution_review_requested" },
       { wakeReason: "execution_approval_requested" },
       { wakeReason: "execution_changes_requested" },
-      { wakeReason: "execution_completed" },
       { forceFreshSession: true },
       { wakeReason: "issue_commented" },
       { wakeReason: "transient_failure_retry" },

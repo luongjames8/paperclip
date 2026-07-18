@@ -1571,8 +1571,15 @@ describe("shouldResetTaskSessionForWake", () => {
     expect(shouldResetTaskSessionForWake({ wakeReason: "execution_changes_requested" })).toBe(true);
   });
 
-  it("resets session context on execution completed wakes", () => {
-    expect(shouldResetTaskSessionForWake({ wakeReason: "execution_completed" })).toBe(true);
+  it("relies on forceFreshSession (not the wakeReason alone) for execution completed wakes (fleet issue #657)", () => {
+    // buildExecutionStageWakeup sets contextSnapshot.forceFreshSession
+    // directly on this wake, so the wakeReason string on its own is not the
+    // reset signal — that avoids a second reason-string branch drifting
+    // from the wake's actual forceFreshSession behavior.
+    expect(shouldResetTaskSessionForWake({ wakeReason: "execution_completed" })).toBe(false);
+    expect(
+      shouldResetTaskSessionForWake({ wakeReason: "execution_completed", forceFreshSession: true }),
+    ).toBe(true);
   });
 
   it("preserves session context on timer heartbeats", () => {

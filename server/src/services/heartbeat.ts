@@ -2671,11 +2671,13 @@ export function shouldResetTaskSessionForWake(
     wakeReason === EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON ||
     wakeReason === "execution_approval_requested" ||
     wakeReason === "execution_changes_requested" ||
-    // Fleet issue #657: execution_completed notifies the original executor
-    // that a gate they're waiting on just opened — a fresh session is more
-    // appropriate than resuming whatever (possibly long-exhausted) session
-    // handled the original work.
-    wakeReason === "execution_completed" ||
+    // execution_completed (fleet issue #657) is deliberately NOT listed here
+    // — buildExecutionStageWakeup sets contextSnapshot.forceFreshSession
+    // directly on that wake (also required to route it out of same-issue
+    // active-run coalescing, codex P2 round 3), which the check above
+    // already covers. A second, reason-string-based path to the same
+    // decision would be redundant and could drift from the wake's actual
+    // behavior.
     // PF-4: timer-driven wakes are exploratory ("any new work?"). They do not
     // carry meaningful continuation state, so reusing the prior task session
     // for repeated timer wakes accumulates low-value context and pushes the
@@ -2798,7 +2800,8 @@ export function describeSessionResetReason(
   }
   if (wakeReason === "execution_approval_requested") return "wake reason is execution_approval_requested";
   if (wakeReason === "execution_changes_requested") return "wake reason is execution_changes_requested";
-  if (wakeReason === "execution_completed") return "wake reason is execution_completed";
+  // execution_completed is covered by the forceFreshSession check above —
+  // see shouldResetTaskSessionForWake for why no reason-string branch here.
   // PF-4: paired with shouldResetTaskSessionForWake — keep the reason wording
   // explicit so run logs make session reuse/reset behavior legible.
   if (wakeReason === "heartbeat_timer") return "wake reason is heartbeat_timer (timer-driven wake starts fresh)";

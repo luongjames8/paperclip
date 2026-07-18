@@ -2258,6 +2258,22 @@ function buildExecutionStageWakeup(input: {
           wakeReason: "execution_completed",
           source: "issue.execution_stage",
           executionStage,
+          // codex P2 (round 3): unlike execution_review_requested/
+          // execution_approval_requested (which wake a DIFFERENT agent —
+          // the reviewer/approver — from whoever executed the issue),
+          // execution_completed targets the SAME agent identity as the
+          // original executor. If that agent's own run for this issue is
+          // still "running" (e.g. still finishing workspace-finalize work)
+          // when the approver's PATCH lands, heartbeat.ts's same-issue
+          // active-run coalescing (enqueueWakeup, isSameExecutionAgent
+          // branch) would silently merge this wake's contextSnapshot into
+          // that ALREADY-EXECUTING process instead of queueing a follow-up
+          // — an adapter process that already received its prompt will
+          // never observe the merge, so the notification is lost exactly
+          // like the bug this wake exists to fix. forceFreshSession routes
+          // through shouldDeferFollowupWakeForSameIssue to force a genuine
+          // deferred follow-up instead of a silent coalesce.
+          forceFreshSession: true,
           ...(interruptedRunId ? { interruptedRunId } : {}),
         },
       },
