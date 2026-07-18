@@ -3244,4 +3244,103 @@ describe.sequential("issue comment reopen routes", () => {
     expect(executorWakeupCalls).toHaveLength(1);
     expect(executorWakeupCalls[0][1]).toMatchObject({ reason: "execution_completed" });
   });
+
+  // Codex P2 (round 7, fleet issue #657): the comment auto-approval route
+  // (POST /issues/:id/comments) keys its local wakeup map on
+  // payload.issueId. Before this fix the mention loop used the RAW path
+  // param (which can be the identifier form, e.g. "PAP-580", not the
+  // resolved UUID) while the execution_completed insert used the resolved
+  // UUID — different keys entirely, so the mention wake was never
+  // recognized as competing for the same slot and could still reach
+  // heartbeat.wakeup as a second, separate call for the same agent+issue.
+  // This test drives the fixed code path (both wakes now keyed on
+  // currentIssue.id) and asserts exactly one wake survives with the correct
+  // canonical issueId. Posting to the identifier-form URL itself (e.g.
+  // "/api/issues/PAP-580/comments") to reproduce the pre-fix divergence
+  // literally hits an unrelated pre-existing gap in this route's mock
+  // harness (a 500 unconnected to wake precedence) — verified by code
+  // inspection instead: the fix makes payload.issueId always currentIssue.id
+  // for both wakes, so they collide on the SAME key regardless of what the
+  // caller's raw path param looked like.
+  it("preserves the execution_completed wake when auto-approving via comment and the comment also @-mentions the executor", async () => {
+    const executorAgentId = "22222222-2222-4222-8222-222222222222";
+    const approverAgentId = "44444444-4444-4444-8444-444444444444";
+    const policy = await normalizePolicy({
+      stages: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          type: "review",
+          participants: [{ type: "agent", agentId: approverAgentId }],
+        },
+      ],
+    })!;
+    const issue = {
+      ...makeIssue("todo"),
+      status: "in_review",
+      assigneeAgentId: approverAgentId,
+      executionPolicy: policy,
+      executionState: {
+        status: "pending",
+        currentStageId: policy.stages[0].id,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: approverAgentId },
+        returnAssignee: { type: "agent", agentId: executorAgentId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    };
+    const reviewBody = "## Review: PAP-580 - APPROVED\n\n@executor please ship it.";
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-review-mention",
+      issueId: issue.id,
+      companyId: issue.companyId,
+      body: reviewBody,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      authorAgentId: approverAgentId,
+      authorUserId: null,
+    });
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>, tx?: unknown) => ({
+      ...issue,
+      ...patch,
+      executionState: patch.executionState,
+      status: "done",
+      completedAt: new Date(),
+      updatedAt: new Date(),
+      _tx: tx,
+    }));
+    mockIssueService.findMentionedAgents.mockResolvedValue([executorAgentId]);
+
+    const res = await request(
+      await installActor(createApp(), {
+        type: "agent",
+        agentId: approverAgentId,
+        companyId: "company-1",
+        source: "agent_key",
+        runId: "run-review-mention",
+      }),
+    )
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: reviewBody });
+
+    expect(res.status).toBe(201);
+    await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      executorAgentId,
+      expect.objectContaining({
+        reason: "execution_completed",
+        payload: expect.objectContaining({
+          issueId: issue.id,
+          executionStage: expect.objectContaining({ wakeRole: "executor", lastDecisionOutcome: "approved" }),
+        }),
+      }),
+    ));
+    const executorWakeupCalls = mockHeartbeatService.wakeup.mock.calls.filter(
+      ([agentId]: [string, unknown]) => agentId === executorAgentId,
+    );
+    expect(executorWakeupCalls).toHaveLength(1);
+    expect(executorWakeupCalls[0][1]).toMatchObject({ reason: "execution_completed" });
+  });
 });

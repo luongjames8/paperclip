@@ -9912,16 +9912,27 @@ export function issueRoutes(
 
       for (const mentionedId of mentionedIds) {
         if (actorIsAgent && actor.actorId === mentionedId) continue;
+        // codex P2 (round 7, fleet issue #657): this route's addWakeup keys
+        // on issueId (first-write-wins — see its definition above), so the
+        // key MUST match the earlier commentDecisionStageWakeup insert's
+        // key (currentIssue.id, the resolved UUID) or the two are treated
+        // as different agent+issue pairs entirely — the mention wake then
+        // reaches heartbeat.wakeup as a SEPARATE call, which can
+        // canonicalize/coalesce over the execution_completed run and lose
+        // its wakeReason. currentIssue.id (resolved UUID), not the raw path
+        // param `id` (may be an identifier like "PAP-123") — same
+        // identifier-vs-uuid fix already applied to the other wakes in this
+        // function (see the addComment call above).
         addWakeup(mentionedId, {
           source: "automation",
           triggerDetail: "system",
           reason: "issue_comment_mentioned",
-          payload: { issueId: id, commentId: comment.id },
+          payload: { issueId: currentIssue.id, commentId: comment.id },
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
           contextSnapshot: {
-            issueId: id,
-            taskId: id,
+            issueId: currentIssue.id,
+            taskId: currentIssue.id,
             commentId: comment.id,
             wakeCommentId: comment.id,
             wakeReason: "issue_comment_mentioned",
