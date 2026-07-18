@@ -153,9 +153,19 @@ function registerModuleMocks() {
     budgetService: () => mockBudgetService,
   }));
 
-  vi.doMock("../services/heartbeat.js", () => ({
-    heartbeatService: () => mockHeartbeatService,
-  }));
+  vi.doMock("../services/heartbeat.js", async () => {
+    // Partial mock (mirrors the adapter-opencode-local pattern above): only
+    // heartbeatService itself is faked. Real named exports (e.g.
+    // SERVER_ONLY_EXECUTION_STAGE_WAKE_REASONS, imported directly by
+    // routes/agents.ts) must pass through, or any route-level code that
+    // relies on them breaks under this file's mock with no relation to what
+    // it's actually testing.
+    const actual = await vi.importActual<typeof import("../services/heartbeat.js")>("../services/heartbeat.js");
+    return {
+      ...actual,
+      heartbeatService: () => mockHeartbeatService,
+    };
+  });
 
   vi.doMock("../services/issue-approvals.js", () => ({
     issueApprovalService: () => mockIssueApprovalService,
@@ -550,6 +560,71 @@ describe.sequential("agent permission routes", () => {
       .send({}));
 
     expect(res.status).toBe(403);
+  });
+
+  // Fleet issue #657 (codex round 5, adversarial-seam-hardening): reserved,
+  // server-only execution-stage wake reasons must never be settable through
+  // a caller-facing route — evaluateQueuedRunStaleness (heartbeat.ts) trusts
+  // wakeReason==="execution_completed" to exempt a queued run from the
+  // terminal-status staleness gate, so if a caller could set that reason
+  // here they could ride the exemption to start an on-demand run against a
+  // closed issue outside the real approval flow.
+  it("rejects a caller-supplied execution_completed reason on POST /agents/:id/wakeup", async () => {
+    mockAgentService.getById.mockResolvedValue(baseAgent);
+
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/wakeup`)
+      .send({ reason: "execution_completed", payload: { issueId: "some-issue" } }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("execution_completed");
+    expect(res.body.error).toContain("server-generated");
+  });
+
+  it("rejects a caller-supplied execution_completed reason on the legacy POST /agents/:id/heartbeat/invoke", async () => {
+    mockAgentService.getById.mockResolvedValue(baseAgent);
+
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/heartbeat/invoke`)
+      .send({ reason: "execution_completed", payload: { issueId: "some-issue" } }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("execution_completed");
+    expect(res.body.error).toContain("server-generated");
+  });
+
+  it("still allows a normal caller-supplied reason on POST /agents/:id/wakeup (reserved-reason check is narrowly scoped)", async () => {
+    mockAgentService.getById.mockResolvedValue(baseAgent);
+
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/wakeup`)
+      .send({ reason: "manual_followup" }));
+
+    expect(res.status).not.toBe(400);
   });
 
   it("blocks agent-authenticated self-updates that set host-executed workspace commands", async () => {

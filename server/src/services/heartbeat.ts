@@ -481,6 +481,28 @@ const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   "approval_revision_requested",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
 ]);
+// Fleet issue #657 (codex round 5, adversarial-seam-hardening): these four
+// wake reasons are exclusively produced by buildExecutionStageWakeup
+// (routes/issues.ts) from server-computed executionState — never from
+// caller input. execution_completed in particular gets a claim-time
+// staleness EXEMPTION (evaluateQueuedRunStaleness, below) keyed partly on
+// this reason string; if a caller could ever get this reason onto a queued
+// run themselves (the manual /agents/:id/wakeup route and its legacy
+// heartbeat/invoke sibling both accept an arbitrary caller-supplied
+// `reason` with no restriction), they could ride that exemption to start an
+// on-demand run against a closed issue outside the server's own approval
+// flow. Closing this at claim time would mean re-deriving/verifying the
+// wake's entire payload against fresh state — this closes it at the INPUT
+// boundary instead: these reasons are structurally unreachable via any
+// caller-facing route (see the reservedWakeReason check in routes/agents.ts),
+// so the exemption never needs to ask "was this wake really server
+// generated" — it can only ever exist because it was.
+export const SERVER_ONLY_EXECUTION_STAGE_WAKE_REASONS = new Set([
+  "execution_review_requested",
+  "execution_approval_requested",
+  "execution_changes_requested",
+  "execution_completed",
+]);
 const ISSUE_RESPONSIBLE_USER_WAKE_REASONS = new Set([
   "issue_assigned",
   "issue_checked_out",

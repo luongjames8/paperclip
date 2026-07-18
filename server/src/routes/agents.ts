@@ -68,6 +68,7 @@ import type {
   AdapterEnvironmentTestResult,
 } from "@paperclipai/adapter-utils";
 import { skillVersionSelectionMap } from "../services/runtime-skill-selections.js";
+import { SERVER_ONLY_EXECUTION_STAGE_WAKE_REASONS } from "../services/heartbeat.js";
 import { secretService } from "../services/secrets.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
 import {
@@ -3286,6 +3287,21 @@ export function agentRoutes(
       });
       return;
     }
+    // Fleet issue #657 (codex round 5): execution_review_requested/
+    // execution_approval_requested/execution_changes_requested/
+    // execution_completed are exclusively produced by buildExecutionStageWakeup
+    // from server-computed executionState. execution_completed specifically
+    // gets a claim-time staleness exemption keyed on this reason string —
+    // letting a caller set it here would let them ride that exemption to
+    // start an on-demand run against a closed issue outside the real
+    // approval flow. See SERVER_ONLY_EXECUTION_STAGE_WAKE_REASONS.
+    if (
+      typeof req.body.reason === "string" &&
+      SERVER_ONLY_EXECUTION_STAGE_WAKE_REASONS.has(req.body.reason)
+    ) {
+      res.status(400).json({ error: `reason "${req.body.reason}" is server-generated and cannot be set manually` });
+      return;
+    }
 
     const run = await heartbeat.wakeup(id, {
       source: opts.source,
@@ -3368,6 +3384,12 @@ export function agentRoutes(
       forceFreshSession: unknown;
       triggerDetail: unknown;
     }>;
+    // Fleet issue #657 (codex round 5): same reserved-reason boundary as
+    // POST /agents/:id/wakeup above — see SERVER_ONLY_EXECUTION_STAGE_WAKE_REASONS.
+    if (typeof body.reason === "string" && SERVER_ONLY_EXECUTION_STAGE_WAKE_REASONS.has(body.reason)) {
+      res.status(400).json({ error: `reason "${body.reason}" is server-generated and cannot be set manually` });
+      return;
+    }
     const contextSnapshot: Record<string, unknown> = {
       triggeredBy: req.actor.type,
       actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
