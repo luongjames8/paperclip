@@ -8348,7 +8348,21 @@ export function issueRoutes(
 
         for (const mentionedId of mentionedIds) {
           if (actor.actorType === "agent" && actor.actorId === mentionedId) continue;
-          addWakeup(mentionedId, {
+          // codex P2 (round 6, fleet issue #657): plain addWakeup is
+          // last-write-wins on the SAME agent+issue key. If this comment
+          // both closes the workflow (execution_completed already queued
+          // for the returnAssignee, above) AND @-mentions that same
+          // executor — a natural thing for an approver to write ("approved,
+          // @executor please publish") — this generic mention wake would
+          // silently clobber the execution_completed wake, dropping its
+          // executionStage follow-through context entirely. Reuse the same
+          // generic-vs-specific precedence helper the interaction-supersede
+          // wakes below already rely on: "issue_comment_mentioned" is
+          // already in GENERIC_COMMENT_WAKE_REASONS, so this refuses to
+          // overwrite a more specific (e.g. execution_completed,
+          // execution_review_requested, issue_assigned) wake already queued
+          // for the same key.
+          addWakeupPreferringInteractionOverGenericComment(mentionedId, {
             source: "automation",
             triggerDetail: "system",
             reason: "issue_comment_mentioned",

@@ -3166,4 +3166,82 @@ describe.sequential("issue comment reopen routes", () => {
       expect.objectContaining({ reason: "execution_completed" }),
     );
   });
+
+  // Codex P2 (round 6, fleet issue #657): addWakeup on this route is
+  // last-write-wins per agent+issue key. If the approver's comment BOTH
+  // closes the workflow (queuing execution_completed for the executor)
+  // AND @-mentions that same executor ("approved, @executor please
+  // publish"), the later generic issue_comment_mentioned wake for the
+  // mention must NOT clobber the earlier, more specific execution_completed
+  // wake and its executionStage follow-through context.
+  it("preserves the execution_completed wake when the approval comment also @-mentions the executor", async () => {
+    const executorAgentId = "22222222-2222-4222-8222-222222222222";
+    const approverAgentId = "44444444-4444-4444-8444-444444444444";
+    const policy = await normalizePolicy({
+      stages: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          type: "approval",
+          participants: [{ type: "agent", agentId: approverAgentId }],
+        },
+      ],
+    })!;
+    const issue = {
+      ...makeIssue("todo"),
+      status: "in_review",
+      assigneeAgentId: approverAgentId,
+      executionPolicy: policy,
+      executionState: {
+        status: "pending",
+        currentStageId: policy.stages[0].id,
+        currentStageIndex: 0,
+        currentStageType: "approval",
+        currentParticipant: { type: "agent", agentId: approverAgentId },
+        returnAssignee: { type: "agent", agentId: executorAgentId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+    // The approver @-mentions the executor in the SAME comment that approves.
+    mockIssueService.findMentionedAgents.mockResolvedValue([executorAgentId]);
+
+    const res = await request(
+      await installActor(createApp(), {
+        type: "agent",
+        agentId: approverAgentId,
+        companyId: "company-1",
+        runId: "run-6",
+      }),
+    )
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({
+        status: "done",
+        comment: "Approved, @executor please ship it.",
+      });
+
+    expect(res.status).toBe(200);
+    await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      executorAgentId,
+      expect.objectContaining({
+        reason: "execution_completed",
+        payload: expect.objectContaining({
+          executionStage: expect.objectContaining({ wakeRole: "executor", lastDecisionOutcome: "approved" }),
+        }),
+      }),
+    ));
+    // Exactly one wake for the executor — the mention must not have added a
+    // SECOND, competing wake either.
+    const executorWakeupCalls = mockHeartbeatService.wakeup.mock.calls.filter(
+      ([agentId]: [string, unknown]) => agentId === executorAgentId,
+    );
+    expect(executorWakeupCalls).toHaveLength(1);
+    expect(executorWakeupCalls[0][1]).toMatchObject({ reason: "execution_completed" });
+  });
 });
