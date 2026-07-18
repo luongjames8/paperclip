@@ -1267,7 +1267,10 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     ]);
 
     expect(run?.status).toBe("cancelled");
-    expect(run?.errorCode).toBe("issue_terminal_status");
+    // execution_completed now gets its own dedicated staleness branch
+    // (adversarial-seam-hardening, round 8) rather than falling through to
+    // the generic terminal-status check — see the errorCode name.
+    expect(run?.errorCode).toBe("execution_completed_target_changed");
     expect(wakeup?.status).toBe("skipped");
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
@@ -1357,7 +1360,73 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     ]);
 
     expect(run?.status).toBe("cancelled");
-    expect(run?.errorCode).toBe("issue_terminal_status");
+    expect(run?.errorCode).toBe("execution_completed_target_changed");
+    expect(wakeup?.status).toBe("skipped");
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
+
+  // Codex P2 (round 8) + adversarial-seam-hardening (fleet issue #657): a
+  // queued execution_completed run whose issue was REOPENED and reassigned
+  // back to the SAME agent before the run started used to pass staleness —
+  // the generic assignee-mismatch check's precondition doesn't fire
+  // (assignee matches again) and the generic terminal-status check's
+  // precondition doesn't fire either (status is no longer done/cancelled),
+  // so neither check ever got a chance to evaluate the (previously bolted-
+  // on) execution_completed exemption. The dedicated branch fixes this: it
+  // owns execution_completed's fate completely, independent of what the
+  // other checks' preconditions happen to be.
+  it("still cancels a queued execution_completed run if the issue was reopened and reassigned back to the same executor before the run started", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ agentName: "OriginalExecutor" });
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Reopened after approval, back in progress",
+      status: "in_progress",
+      priority: "medium",
+      // Reassigned back to the SAME agent the execution_completed wake
+      // targets — the generic assignee-mismatch check alone would NOT
+      // catch this.
+      assigneeAgentId: agentId,
+      // Reopening clears executionState in the real transition
+      // (issue-execution-policy.ts's !input.policy / policy-removed
+      // branch); simulate that here.
+      executionState: null,
+    });
+
+    const { runId, wakeupRequestId } = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      wakeReason: "execution_completed",
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "cancelled";
+    });
+
+    const [run, wakeup] = await Promise.all([
+      db
+        .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ status: agentWakeupRequests.status })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId))
+        .then((rows) => rows[0] ?? null),
+    ]);
+
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("execution_completed_target_changed");
     expect(wakeup?.status).toBe("skipped");
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });

@@ -9323,7 +9323,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           | "issue_not_in_progress"
           | "issue_execution_lock_changed"
           | "issue_review_participant_changed"
-          | "issue_continuation_waiting_on_review";
+          | "issue_continuation_waiting_on_review"
+          | "execution_completed_target_changed";
         details: Record<string, unknown>;
       };
 
@@ -9358,49 +9359,74 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const resumeIntent = context.resumeIntent === true || context.followUpRequested === true;
     const wakeReason = readNonEmptyString(context.wakeReason);
     const retryReason = readNonEmptyString(context.retryReason) ?? run.scheduledRetryReason ?? null;
-    // Fleet issue #657: every OTHER wake this staleness check guards against
-    // (issue_assigned, execution_review_requested, execution_approval_requested,
-    // execution_changes_requested) makes its target the issue's assignee as
-    // part of the SAME transition that queues the wake, and targets a
-    // non-terminal issue — so "assignee changed" / "reached done/cancelled"
-    // are genuine staleness signals for them. execution_completed is
-    // structurally different: it notifies the ORIGINAL EXECUTOR after the
-    // issue reached "done" via an executionPolicy completing, deliberately
-    // WITHOUT reassigning it back to them (reassignment would be a state
-    // change this notification-only wake must not make — see
-    // buildExecutionStageWakeup). The two checks below would therefore
-    // reject every execution_completed run unconditionally, not just on an
-    // actual race.
+    // Fleet issue #657 + adversarial-seam-hardening (codex rounds 1, 4, 8):
+    // execution_completed notifies the ORIGINAL EXECUTOR after an
+    // executionPolicy completes on an issue that is (by definition, at
+    // wake-creation time) "done" — deliberately WITHOUT reassigning the
+    // issue back to them (that would be a state change this
+    // notification-only wake must not make; see buildExecutionStageWakeup).
+    // Every OTHER wake this function guards (issue_assigned,
+    // execution_review_requested, execution_approval_requested,
+    // execution_changes_requested) makes its target the CURRENT assignee of
+    // a NON-terminal issue as part of the same transition that queues it —
+    // so "assignee changed" / "reached done/cancelled" are genuine
+    // staleness signals for THEM. For execution_completed those same
+    // signals are backwards (the assignee is expected to differ, and "done"
+    // is the expected, not stale, state) — so it needs an entirely
+    // DIFFERENT, self-contained validity condition, not exemptions bolted
+    // onto checks built for a different wake shape.
     //
-    // codex P2 (round 4) + adversarial-seam-hardening: the exemption below
-    // used to check only the ISSUE's coarse state (status "done",
-    // executionState.status "completed") — never WHO the queued run
-    // actually belongs to. That let it through for wrong reasons the
-    // reviewer round found one at a time: (1) a caller of
-    // POST /api/agents/:id/wakeup (or the legacy heartbeat/invoke route)
-    // supplying an arbitrary reason + payload.issueId — neither route
-    // restricts wake-reason values, and no reason gets that treatment
-    // anywhere else in this codebase, so a route-level allowlist would be an
-    // inconsistent, easily-bypassed patch, not a fix; (2) a queued run for
-    // executor A surviving a full reopen -> reassign-to-B -> re-complete
-    // cycle on the SAME issue (buildCompletedState's returnAssignee is
-    // never inspected, so A's stale run would still pass once the issue is
-    // done+completed again, this time for B). Both collapse to the same
-    // root cause: the check never bound itself to the run's actual target.
-    // Bind it: require run.agentId to equal the CURRENT executionState's
-    // returnAssignee (type-discriminated, mirroring this same function's
-    // "in_review" participant-match check a few lines below) — this makes
-    // the wake-reason string irrelevant to security (a spoofed or
-    // superseded run simply fails the identity check regardless of what the
-    // reason claims) and generalizes to any future wake-creation call site
-    // without needing to enumerate/allowlist every one of them.
+    // Layering `!isValidExecutionCompletedTarget` onto those two OTHER
+    // checks (as this used to) was the wrong shape: each generic check only
+    // evaluates when ITS OWN precondition holds (assignee mismatch; status
+    // done/cancelled) — so if the issue is REOPENED and reassigned back to
+    // the SAME executor before the queued run is claimed (codex round 8),
+    // NEITHER generic check's precondition even fires (assignee now
+    // matches; status is no longer terminal) — the stale run still starts,
+    // delivering a "your work was approved, publish now" prompt while the
+    // executor is actively back in progress on the SAME issue. Two
+    // narrowly-reactive exemption rounds (identity binding, round 4; the
+    // done-vs-cancelled scope, round 1) each closed one symptom without
+    // fixing the underlying mismatch between the exemption's shape and what
+    // it was exempting.
+    //
+    // Fix: execution_completed gets its OWN dedicated, POSITIVE branch,
+    // evaluated first and independent of every other check below —
+    // isValidExecutionCompletedTarget is the complete, self-sufficient
+    // definition of "this run is still valid" (issue currently done, its
+    // executionState currently completed, and run.agentId currently equal
+    // to that state's returnAssignee — type-discriminated, mirroring this
+    // same function's "in_review" participant-match check a few lines
+    // below). If it holds, the wake is valid full stop — nothing else in
+    // this function needs to agree. If it doesn't, the wake is stale full
+    // stop — no other check gets a chance to accidentally wave it through
+    // because its own unrelated precondition didn't happen to fire.
     const completedExecutionState = parseIssueExecutionState(issue.executionState);
     const isValidExecutionCompletedTarget =
-      wakeReason === "execution_completed" &&
       issue.status === "done" &&
       completedExecutionState?.status === "completed" &&
       completedExecutionState.returnAssignee?.type === "agent" &&
       completedExecutionState.returnAssignee.agentId === run.agentId;
+
+    if (wakeReason === "execution_completed") {
+      if (isValidExecutionCompletedTarget) return { stale: false };
+      return {
+        stale: true,
+        errorCode: "execution_completed_target_changed",
+        reason:
+          "Cancelled because the issue's execution-completion state no longer matches this wake (reopened, reassigned to a different executor, or the executionPolicy changed) before the queued run could start",
+        details: {
+          issueId,
+          expectedReturnAssigneeAgentId: run.agentId,
+          currentStatus: issue.status,
+          currentExecutionStateStatus: completedExecutionState?.status ?? null,
+          currentReturnAssigneeAgentId:
+            completedExecutionState?.returnAssignee?.type === "agent"
+              ? completedExecutionState.returnAssignee.agentId
+              : null,
+        },
+      };
+    }
 
     if (
       issue.status === "in_progress" &&
@@ -9431,7 +9457,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
     }
 
-    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake && !isValidExecutionCompletedTarget) {
+    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake) {
       return {
         stale: true,
         errorCode: "issue_assignee_changed",
@@ -9446,7 +9472,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     if (issue.status === "done" || issue.status === "cancelled") {
-      if (!resumeIntent && !wakeCommentId && !isValidExecutionCompletedTarget) {
+      if (!resumeIntent && !wakeCommentId) {
         return {
           stale: true,
           errorCode: "issue_terminal_status",
