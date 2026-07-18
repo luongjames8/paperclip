@@ -9348,14 +9348,37 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // change this notification-only wake must not make — see
     // buildExecutionStageWakeup). The two checks below would therefore
     // reject every execution_completed run unconditionally, not just on an
-    // actual race — but the exemption must stay narrow (codex P2, round 1):
-    // only "done" is what execution_completed is valid for — if the issue
-    // was CANCELLED (or its policy edited away) before the run started, that
-    // is still genuine staleness the run should respect, not exempt.
+    // actual race.
+    //
+    // codex P2 (round 4) + adversarial-seam-hardening: the exemption below
+    // used to check only the ISSUE's coarse state (status "done",
+    // executionState.status "completed") — never WHO the queued run
+    // actually belongs to. That let it through for wrong reasons the
+    // reviewer round found one at a time: (1) a caller of
+    // POST /api/agents/:id/wakeup (or the legacy heartbeat/invoke route)
+    // supplying an arbitrary reason + payload.issueId — neither route
+    // restricts wake-reason values, and no reason gets that treatment
+    // anywhere else in this codebase, so a route-level allowlist would be an
+    // inconsistent, easily-bypassed patch, not a fix; (2) a queued run for
+    // executor A surviving a full reopen -> reassign-to-B -> re-complete
+    // cycle on the SAME issue (buildCompletedState's returnAssignee is
+    // never inspected, so A's stale run would still pass once the issue is
+    // done+completed again, this time for B). Both collapse to the same
+    // root cause: the check never bound itself to the run's actual target.
+    // Bind it: require run.agentId to equal the CURRENT executionState's
+    // returnAssignee (type-discriminated, mirroring this same function's
+    // "in_review" participant-match check a few lines below) — this makes
+    // the wake-reason string irrelevant to security (a spoofed or
+    // superseded run simply fails the identity check regardless of what the
+    // reason claims) and generalizes to any future wake-creation call site
+    // without needing to enumerate/allowlist every one of them.
+    const completedExecutionState = parseIssueExecutionState(issue.executionState);
     const isValidExecutionCompletedTarget =
       wakeReason === "execution_completed" &&
       issue.status === "done" &&
-      parseIssueExecutionState(issue.executionState)?.status === "completed";
+      completedExecutionState?.status === "completed" &&
+      completedExecutionState.returnAssignee?.type === "agent" &&
+      completedExecutionState.returnAssignee.agentId === run.agentId;
 
     if (
       issue.status === "in_progress" &&

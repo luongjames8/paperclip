@@ -1272,6 +1272,96 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
+  // Codex P2 (round 4) + adversarial-seam-hardening (fleet issue #657): the
+  // exemption used to trust wakeReason==="execution_completed" against only
+  // the issue's coarse status/executionState.status, never checking WHO the
+  // queued run actually targets — letting (a) a spoofed wake via
+  // POST /api/agents/:id/wakeup for an agent that is NOT the real
+  // returnAssignee, or (b) a stale run left over from a PRIOR
+  // reopen->reassign->re-complete cycle, both bypass the assignee-mismatch
+  // gate. This test isolates exactly that: issue.assigneeAgentId IS set to
+  // the run's agent (so the plain assignee-mismatch check alone would NOT
+  // catch it) but executionState.returnAssignee names a DIFFERENT agent —
+  // only the identity-bound fix (run.agentId === returnAssignee.agentId)
+  // rejects this.
+  it("still cancels a queued execution_completed run whose agent does not match the executionState's returnAssignee, even when it matches issue.assigneeAgentId", async () => {
+    const { companyId, agentId: notTheReturnAssignee } = await seedCompanyAndAgent({
+      agentName: "NotTheReturnAssignee",
+    });
+    const realReturnAssigneeAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: realReturnAssigneeAgentId,
+      companyId,
+      name: "RealReturnAssignee",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Completed for a different executor",
+      status: "done",
+      priority: "medium",
+      // Deliberately matches the queued run's agent — proves the
+      // pre-existing assignee-mismatch gate alone would NOT reject this;
+      // only the returnAssignee identity check does.
+      assigneeAgentId: notTheReturnAssignee,
+      executionState: {
+        status: "completed",
+        currentStageId: null,
+        currentStageIndex: null,
+        currentStageType: null,
+        currentParticipant: null,
+        returnAssignee: { type: "agent", agentId: realReturnAssigneeAgentId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: "approved",
+      },
+    });
+
+    const { runId, wakeupRequestId } = await seedQueuedRun({
+      companyId,
+      agentId: notTheReturnAssignee,
+      issueId,
+      wakeReason: "execution_completed",
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "cancelled";
+    });
+
+    const [run, wakeup] = await Promise.all([
+      db
+        .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ status: agentWakeupRequests.status })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId))
+        .then((rows) => rows[0] ?? null),
+    ]);
+
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("issue_terminal_status");
+    expect(wakeup?.status).toBe("skipped");
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
+
   it("cancels queued max-turn continuations when the issue is no longer in_progress before the run starts", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const issueId = randomUUID();
