@@ -2896,4 +2896,208 @@ describe.sequential("issue comment reopen routes", () => {
       }),
     ));
   });
+
+  // Fleet issue #657: the FINAL stage's approval used to close the workflow
+  // (and the issue itself, to "done") without ever waking anyone —
+  // buildExecutionStageWakeup had wake branches for pending/changes_requested
+  // but none for "completed". These tests exercise the new execution_completed
+  // wake through the same PATCH /api/issues/:id route the two tests above use.
+  it("wakes the original executor with execution_completed when the final (only) stage approves", async () => {
+    const executorAgentId = "22222222-2222-4222-8222-222222222222";
+    const approverAgentId = "44444444-4444-4444-8444-444444444444";
+    const policy = await normalizePolicy({
+      stages: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          type: "approval",
+          participants: [{ type: "agent", agentId: approverAgentId }],
+        },
+      ],
+    })!;
+    const issue = {
+      ...makeIssue("todo"),
+      status: "in_review",
+      assigneeAgentId: approverAgentId,
+      executionPolicy: policy,
+      executionState: {
+        status: "pending",
+        currentStageId: policy.stages[0].id,
+        currentStageIndex: 0,
+        currentStageType: "approval",
+        currentParticipant: { type: "agent", agentId: approverAgentId },
+        returnAssignee: { type: "agent", agentId: executorAgentId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+
+    const res = await request(
+      await installActor(createApp(), {
+        type: "agent",
+        agentId: approverAgentId,
+        companyId: "company-1",
+        runId: "run-3",
+      }),
+    )
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({
+        status: "done",
+        comment: "Approved, ship it.",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("done");
+    expect(res.body.executionState).toMatchObject({
+      status: "completed",
+      returnAssignee: { type: "agent", agentId: executorAgentId },
+    });
+    await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      executorAgentId,
+      expect.objectContaining({
+        reason: "execution_completed",
+        payload: expect.objectContaining({
+          issueId: "11111111-1111-4111-8111-111111111111",
+          executionStage: expect.objectContaining({
+            wakeRole: "executor",
+            stageId: policy.stages[0].id,
+            stageType: "approval",
+            currentParticipant: { type: "agent", agentId: approverAgentId },
+            returnAssignee: { type: "agent", agentId: executorAgentId },
+            lastDecisionOutcome: "approved",
+            allowedActions: [],
+          }),
+        }),
+      }),
+    ));
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT wake the executor when a mid-workflow stage approves (only advances to the next stage)", async () => {
+    const executorAgentId = "22222222-2222-4222-8222-222222222222";
+    const reviewerAgentId = "33333333-3333-4333-8333-333333333333";
+    const approverAgentId = "44444444-4444-4444-8444-444444444444";
+    const policy = await normalizePolicy({
+      stages: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          type: "review",
+          participants: [{ type: "agent", agentId: reviewerAgentId }],
+        },
+        {
+          id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          type: "approval",
+          participants: [{ type: "agent", agentId: approverAgentId }],
+        },
+      ],
+    })!;
+    const issue = {
+      ...makeIssue("todo"),
+      status: "in_review",
+      assigneeAgentId: reviewerAgentId,
+      executionPolicy: policy,
+      executionState: {
+        status: "pending",
+        currentStageId: policy.stages[0].id,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerAgentId },
+        returnAssignee: { type: "agent", agentId: executorAgentId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+
+    const res = await request(
+      await installActor(createApp(), {
+        type: "agent",
+        agentId: reviewerAgentId,
+        companyId: "company-1",
+        runId: "run-4",
+      }),
+    )
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({
+        status: "done",
+        comment: "Reviewed, looks good.",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.executionState).toMatchObject({
+      status: "pending",
+      currentStageType: "approval",
+      currentParticipant: { type: "agent", agentId: approverAgentId },
+    });
+    await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      approverAgentId,
+      expect.objectContaining({ reason: "execution_approval_requested" }),
+    ));
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
+      executorAgentId,
+      expect.objectContaining({ reason: "execution_completed" }),
+    );
+  });
+
+  it("does not wake the executor about their own submission (sole review participant IS the executor, auto-skips to completed)", async () => {
+    const executorAgentId = "22222222-2222-4222-8222-222222222222";
+    const policy = await normalizePolicy({
+      stages: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          type: "review",
+          participants: [{ type: "agent", agentId: executorAgentId }],
+        },
+      ],
+    })!;
+    const issue = {
+      ...makeIssue("todo"),
+      status: "in_progress",
+      assigneeAgentId: executorAgentId,
+      executionPolicy: policy,
+      executionState: null,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+
+    const res = await request(
+      await installActor(createApp(), {
+        type: "agent",
+        agentId: executorAgentId,
+        companyId: "company-1",
+        runId: "run-5",
+      }),
+    )
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({
+        status: "done",
+        comment: "Only reviewer configured is myself; policy auto-skips this stage.",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("done");
+    expect(res.body.executionState).toMatchObject({
+      status: "completed",
+      completedStageIds: [policy.stages[0].id],
+      lastDecisionId: null,
+    });
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
 });

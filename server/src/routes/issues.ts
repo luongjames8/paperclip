@@ -2165,6 +2165,94 @@ function buildExecutionStageWakeup(input: {
     };
   }
 
+  // Fleet issue #657: the FINAL stage's approval closes the workflow (and
+  // usually the issue itself, to "done") without ever waking anyone —
+  // buildCompletedState (issue-execution-policy.ts) clears currentStageId/
+  // currentParticipant and the route lets the approver's own requested
+  // status pass straight through. Every consumer of a review/approval gate
+  // needs SOME way to act after the gate opens (e.g. "now publish"), so wake
+  // the original executor (returnAssignee — stable across multi-stage
+  // policies and changes-requested loops, see issue-execution-policy.ts).
+  // This is a notification wake, not a state transition: it must never
+  // reopen the issue or touch executionState — the wake payload only, same
+  // as the two branches above.
+  if (nextState.status === "completed") {
+    const agentId = nextState.returnAssignee?.type === "agent" ? (nextState.returnAssignee.agentId ?? null) : null;
+    // Mirrors becameChangesRequested's three-way check below: lastDecisionId
+    // alone can miss a returnAssignee change that isn't accompanied by a
+    // fresh decision (defensive symmetry with the sibling branch — no known
+    // path produces this today since buildCompletedState always carries
+    // returnAssignee forward unchanged, but drifting from that invariant
+    // silently would otherwise wake the WRONG executor).
+    const becameCompleted =
+      previousState?.status !== "completed" ||
+      previousState?.lastDecisionId !== nextState.lastDecisionId ||
+      !executionPrincipalsEqual(previousState?.returnAssignee ?? null, nextState.returnAssignee ?? null);
+    if (!agentId || !becameCompleted) return null;
+
+    // No-self-wake guard: a policy whose every stage is a review stage the
+    // executor is themselves the sole eligible participant for can auto-skip
+    // straight to "completed" on the EXECUTOR'S OWN submitting PATCH
+    // (issue-execution-policy.ts's canAutoSkipPendingStage) — no distinct
+    // approver ever decides, and previousState never went "pending" so it
+    // carries no participant to compare against. Compare the ACTOR who
+    // triggered THIS transition instead (reusing the same actor/participant
+    // predicate the comment-driven auto-approval path already trusts) —
+    // covers both that auto-skip path and, defensively, a hypothetical
+    // approver === executor should some future policy-selection change ever
+    // allow it (today selectStageParticipant always excludes returnAssignee).
+    if (
+      actorMatchesExecutionParticipant(
+        { actorType: input.requestedByActorType, actorId: input.requestedByActorId },
+        nextState.returnAssignee,
+      )
+    ) {
+      return null;
+    }
+
+    // currentStageId/currentStageType/currentParticipant are cleared on
+    // nextState by buildCompletedState — pull the just-approved stage's
+    // identity from previousState (the pending stage this decision closed)
+    // so the wake context still names which stage/who approved.
+    const executionStage = buildExecutionStageWakeContext({
+      state: {
+        ...nextState,
+        currentStageId: previousState?.currentStageId ?? null,
+        currentStageType: previousState?.currentStageType ?? null,
+        currentParticipant: previousState?.currentParticipant ?? null,
+      },
+      wakeRole: "executor",
+      // No gated decision to make here (unlike the two wake types above) —
+      // this is FYI only, so an executor/skill that ignores it is harmless.
+      allowedActions: [],
+    });
+
+    return {
+      agentId,
+      wakeup: {
+        source: "assignment" as const,
+        triggerDetail: "system" as const,
+        reason: "execution_completed",
+        payload: {
+          issueId,
+          mutation: "update",
+          executionStage,
+          ...(interruptedRunId ? { interruptedRunId } : {}),
+        },
+        requestedByActorType: input.requestedByActorType,
+        requestedByActorId: input.requestedByActorId,
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          wakeReason: "execution_completed",
+          source: "issue.execution_stage",
+          executionStage,
+          ...(interruptedRunId ? { interruptedRunId } : {}),
+        },
+      },
+    };
+  }
+
   return null;
 }
 

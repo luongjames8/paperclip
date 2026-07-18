@@ -1127,6 +1127,69 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
+  // Fleet issue #657: execution_completed wakes the ORIGINAL EXECUTOR after
+  // an executionPolicy's final stage approves — deliberately WITHOUT
+  // reassigning the issue back to them (that would be a state change this
+  // notification-only wake must not make), on an issue that is by definition
+  // already "done". Both staleness checks above would otherwise cancel this
+  // run unconditionally (not just on an actual race), making the feature a
+  // no-op — they must exempt this wake reason.
+  it("does NOT cancel a queued execution_completed run for a done issue whose assignee is someone else (fleet issue #657)", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ agentName: "OriginalExecutor" });
+    const approverAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: approverAgentId,
+      companyId,
+      name: "Approver",
+      role: "manager",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Gated work, approved",
+      status: "done",
+      priority: "medium",
+      // The approver — not the executor being notified — is left as the
+      // issue's assignee once the final stage approves (buildCompletedState
+      // never reassigns back to returnAssignee).
+      assigneeAgentId: approverAgentId,
+    });
+
+    const { runId } = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      wakeReason: "execution_completed",
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "succeeded";
+    });
+
+    const run = await db
+      .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(run?.status).toBe("succeeded");
+    expect(run?.errorCode).toBeNull();
+    expect(countExecuteCallsForRun(runId)).toBe(1);
+  });
+
   it("cancels queued max-turn continuations when the issue is no longer in_progress before the run starts", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const issueId = randomUUID();

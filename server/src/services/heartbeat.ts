@@ -2671,6 +2671,11 @@ export function shouldResetTaskSessionForWake(
     wakeReason === EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON ||
     wakeReason === "execution_approval_requested" ||
     wakeReason === "execution_changes_requested" ||
+    // Fleet issue #657: execution_completed notifies the original executor
+    // that a gate they're waiting on just opened — a fresh session is more
+    // appropriate than resuming whatever (possibly long-exhausted) session
+    // handled the original work.
+    wakeReason === "execution_completed" ||
     // PF-4: timer-driven wakes are exploratory ("any new work?"). They do not
     // carry meaningful continuation state, so reusing the prior task session
     // for repeated timer wakes accumulates low-value context and pushes the
@@ -2688,6 +2693,13 @@ function shouldRequireIssueCommentForWake(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ) {
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
+  // Fleet issue #657: execution_completed is deliberately NOT in this list.
+  // The other execution_* reasons gate a review/approval decision that needs
+  // an audit-trail comment; execution_completed fires on an issue that's
+  // already done, purely as an FYI. Requiring a comment here would enqueue a
+  // "missing_issue_comment" retry wake on every completion whose executor
+  // skill doesn't (yet) act on it — the opposite of the harmless-if-ignored
+  // backward compatibility this wake is designed for.
   return (
     wakeReason === "issue_assigned" ||
     wakeReason === "execution_review_requested" ||
@@ -2786,6 +2798,7 @@ export function describeSessionResetReason(
   }
   if (wakeReason === "execution_approval_requested") return "wake reason is execution_approval_requested";
   if (wakeReason === "execution_changes_requested") return "wake reason is execution_changes_requested";
+  if (wakeReason === "execution_completed") return "wake reason is execution_completed";
   // PF-4: paired with shouldResetTaskSessionForWake — keep the reason wording
   // explicit so run logs make session reuse/reset behavior legible.
   if (wakeReason === "heartbeat_timer") return "wake reason is heartbeat_timer (timer-driven wake starts fresh)";
@@ -9320,6 +9333,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const resumeIntent = context.resumeIntent === true || context.followUpRequested === true;
     const wakeReason = readNonEmptyString(context.wakeReason);
     const retryReason = readNonEmptyString(context.retryReason) ?? run.scheduledRetryReason ?? null;
+    // Fleet issue #657: every OTHER wake this staleness check guards against
+    // (issue_assigned, execution_review_requested, execution_approval_requested,
+    // execution_changes_requested) makes its target the issue's assignee as
+    // part of the SAME transition that queues the wake, and targets a
+    // non-terminal issue — so "assignee changed" / "reached done/cancelled"
+    // are genuine staleness signals for them. execution_completed is
+    // structurally different: it notifies the ORIGINAL EXECUTOR after the
+    // issue is ALREADY done, deliberately WITHOUT reassigning it back to them
+    // (reassignment would be a state change this notification-only wake must
+    // not make — see buildExecutionStageWakeup). Both checks below would
+    // therefore reject every execution_completed run unconditionally, not
+    // just on an actual race — exempt this reason from both.
+    const isExecutionCompletedNotification = wakeReason === "execution_completed";
 
     if (
       issue.status === "in_progress" &&
@@ -9350,7 +9376,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
     }
 
-    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake) {
+    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake && !isExecutionCompletedNotification) {
       return {
         stale: true,
         errorCode: "issue_assignee_changed",
@@ -9365,7 +9391,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     if (issue.status === "done" || issue.status === "cancelled") {
-      if (!resumeIntent && !wakeCommentId) {
+      if (!resumeIntent && !wakeCommentId && !isExecutionCompletedNotification) {
         return {
           stale: true,
           errorCode: "issue_terminal_status",
