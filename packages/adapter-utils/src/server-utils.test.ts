@@ -1164,6 +1164,63 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain("You are waking as the active reviewer for this issue.");
   });
 
+  it("tells the executor changes were requested when lastDecisionOutcome is changes_requested", () => {
+    const prompt = renderPaperclipWakePrompt({
+      reason: "execution_changes_requested",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-2012",
+        title: "Changes requested handoff",
+        status: "in_progress",
+      },
+      executionStage: {
+        wakeRole: "executor",
+        stageId: "stage-1",
+        stageType: "review",
+        currentParticipant: { type: "agent", agentId: "agent-1" },
+        returnAssignee: { type: "agent", agentId: "agent-2" },
+        lastDecisionOutcome: "changes_requested",
+        allowedActions: ["address_changes", "resubmit"],
+      },
+      fallbackFetchNeeded: false,
+    });
+
+    expect(prompt).toContain("You are waking because changes were requested in the execution workflow.");
+    expect(prompt).not.toContain("was just approved");
+  });
+
+  // Fleet issue #657 / codex P1 (round 1): execution_completed reuses
+  // wakeRole "executor" but means the OPPOSITE of changes-requested — the
+  // gate passed, not "go fix it". Without this branch the shared prompt told
+  // approved executors to "address the requested changes", which is wrong
+  // and could send an agent to redo already-approved work.
+  it("tells the executor their gated work was approved, not to address changes, when lastDecisionOutcome is approved", () => {
+    const prompt = renderPaperclipWakePrompt({
+      reason: "execution_completed",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-2013",
+        title: "Final approval handoff",
+        status: "done",
+      },
+      executionStage: {
+        wakeRole: "executor",
+        stageId: "stage-1",
+        stageType: "approval",
+        currentParticipant: { type: "agent", agentId: "approver-1" },
+        returnAssignee: { type: "agent", agentId: "agent-2" },
+        lastDecisionOutcome: "approved",
+        allowedActions: [],
+      },
+      fallbackFetchNeeded: false,
+    });
+
+    expect(prompt).toContain("Your gated work on this issue was just approved");
+    expect(prompt).toContain("not a request to reopen, resubmit, or change the issue's status");
+    expect(prompt).not.toContain("You are waking because changes were requested in the execution workflow.");
+    expect(prompt).not.toContain("Address the requested changes on this issue and resubmit");
+  });
+
   it("includes continuation and child issue summaries in structured wake context", () => {
     const payload = {
       reason: "issue_children_completed",

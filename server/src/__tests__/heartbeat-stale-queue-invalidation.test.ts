@@ -1160,6 +1160,20 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       // issue's assignee once the final stage approves (buildCompletedState
       // never reassigns back to returnAssignee).
       assigneeAgentId: approverAgentId,
+      // Codex P2 (round 1): the staleness exemption re-checks that
+      // executionState is ACTUALLY "completed" at claim time, not just that
+      // the wake reason claims it — this is what makes that re-check pass.
+      executionState: {
+        status: "completed",
+        currentStageId: null,
+        currentStageIndex: null,
+        currentStageType: null,
+        currentParticipant: null,
+        returnAssignee: { type: "agent", agentId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: "approved",
+      },
     });
 
     const { runId } = await seedQueuedRun({
@@ -1188,6 +1202,74 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(run?.status).toBe("succeeded");
     expect(run?.errorCode).toBeNull();
     expect(countExecuteCallsForRun(runId)).toBe(1);
+  });
+
+  // Codex P2 (round 1, fleet issue #657): the execution_completed exemption
+  // above must stay narrow — valid ONLY for a "done" issue whose
+  // executionState is actually "completed". If the issue is cancelled (or
+  // its policy edited away) before the queued run starts, that is still
+  // genuine staleness the run should respect, not exempt.
+  it("still cancels a queued execution_completed run if the issue was cancelled before the run started", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ agentName: "OriginalExecutor" });
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Gated work, then cancelled",
+      status: "cancelled",
+      priority: "medium",
+      // Same agentId as the wake target — isolates the assertion to the
+      // terminal-status gate (not the separate assignee-mismatch gate,
+      // covered by the sibling "does NOT cancel" test above).
+      assigneeAgentId: agentId,
+      executionState: {
+        status: "completed",
+        currentStageId: null,
+        currentStageIndex: null,
+        currentStageType: null,
+        currentParticipant: null,
+        returnAssignee: { type: "agent", agentId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: "approved",
+      },
+    });
+
+    const { runId, wakeupRequestId } = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      wakeReason: "execution_completed",
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "cancelled";
+    });
+
+    const [run, wakeup] = await Promise.all([
+      db
+        .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ status: agentWakeupRequests.status })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId))
+        .then((rows) => rows[0] ?? null),
+    ]);
+
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("issue_terminal_status");
+    expect(wakeup?.status).toBe("skipped");
+    expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
   it("cancels queued max-turn continuations when the issue is no longer in_progress before the run starts", async () => {

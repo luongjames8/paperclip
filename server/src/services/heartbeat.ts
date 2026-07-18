@@ -9340,12 +9340,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // non-terminal issue — so "assignee changed" / "reached done/cancelled"
     // are genuine staleness signals for them. execution_completed is
     // structurally different: it notifies the ORIGINAL EXECUTOR after the
-    // issue is ALREADY done, deliberately WITHOUT reassigning it back to them
-    // (reassignment would be a state change this notification-only wake must
-    // not make — see buildExecutionStageWakeup). Both checks below would
-    // therefore reject every execution_completed run unconditionally, not
-    // just on an actual race — exempt this reason from both.
-    const isExecutionCompletedNotification = wakeReason === "execution_completed";
+    // issue reached "done" via an executionPolicy completing, deliberately
+    // WITHOUT reassigning it back to them (reassignment would be a state
+    // change this notification-only wake must not make — see
+    // buildExecutionStageWakeup). The two checks below would therefore
+    // reject every execution_completed run unconditionally, not just on an
+    // actual race — but the exemption must stay narrow (codex P2, round 1):
+    // only "done" is what execution_completed is valid for — if the issue
+    // was CANCELLED (or its policy edited away) before the run started, that
+    // is still genuine staleness the run should respect, not exempt.
+    const isValidExecutionCompletedTarget =
+      wakeReason === "execution_completed" &&
+      issue.status === "done" &&
+      parseIssueExecutionState(issue.executionState)?.status === "completed";
 
     if (
       issue.status === "in_progress" &&
@@ -9376,7 +9383,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
     }
 
-    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake && !isExecutionCompletedNotification) {
+    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake && !isValidExecutionCompletedTarget) {
       return {
         stale: true,
         errorCode: "issue_assignee_changed",
@@ -9391,7 +9398,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     if (issue.status === "done" || issue.status === "cancelled") {
-      if (!resumeIntent && !wakeCommentId && !isExecutionCompletedNotification) {
+      if (!resumeIntent && !wakeCommentId && !isValidExecutionCompletedTarget) {
         return {
           stale: true,
           errorCode: "issue_terminal_status",
