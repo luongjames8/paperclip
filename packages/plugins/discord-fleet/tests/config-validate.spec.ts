@@ -55,6 +55,18 @@ describe("validateConfig — approvalKindChannels (fleet issue #687)", () => {
     expect(() => validateConfig(config)).toThrow(/not a lowercase snake_case identifier/);
   });
 
+  it("accepts a kind at exactly 64 characters and rejects one over (mirrors the engine's approvalKindSchema bound)", () => {
+    const exactly64 = "a".repeat(64);
+    const config64 = baseConfig();
+    config64.approvalKindChannels = { c1: { [exactly64]: SNOWFLAKE } };
+    expect(() => validateConfig(config64)).not.toThrow();
+
+    const over64 = "a".repeat(65);
+    const configOver = baseConfig();
+    configOver.approvalKindChannels = { c1: { [over64]: SNOWFLAKE } };
+    expect(() => validateConfig(configOver)).toThrow(/not a lowercase snake_case identifier/);
+  });
+
   it("rejects a channelId that is not a Discord snowflake", () => {
     const config = baseConfig();
     config.approvalKindChannels = { c1: { content_batch_approval: "not-a-channel-id" } };

@@ -5,7 +5,11 @@ const COMPANY_PREFIX_RE = new RegExp(COMPANY_PREFIX_PATTERN);
 // Mirrors packages/shared/src/constants.ts APPROVAL_KIND_PATTERN on the engine
 // side (the plugin does not depend on @paperclipai/shared — it is esbuilt
 // standalone — so this is a deliberate small duplication, not a shared import).
-const APPROVAL_KIND_RE = /^[a-z][a-z0-9_]*$/;
+// {0,63} bounds total length to 1-64 chars, mirroring the engine's
+// approvalKindSchema (.min(1).max(64), packages/shared/src/constants.ts
+// APPROVAL_KIND_PATTERN) — an unbounded local copy could accept a kind
+// string an engine-emitted approvalKind could never actually be (codex P3).
+const APPROVAL_KIND_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
 // Nested-quantifier heuristic: rejects the classic catastrophic-backtracking
 // shapes ((a+)+, (a*)+, (a|aa)+ style groups followed by a quantifier) at
