@@ -208,4 +208,41 @@ describeEmbeddedPostgres("issueApprovalService approvalKind consistency (fleet i
     const [issue] = await svc.listIssuesForApproval(approvalId);
     expect(issue).toMatchObject({ id: issueId, approvalKind: "content_batch_approval" });
   });
+
+  // codex P2 round 5 (adversarial pass, treadmill halt — closes the class by
+  // construction rather than patching one more edge): two concurrent link()
+  // calls linking DIFFERENTLY-kinded issues to the SAME approval must not
+  // both silently "succeed" with the last write winning. The row lock
+  // serializes them: whichever acquires it first commits its kind: the
+  // second then sees that committed value and correctly rejects as a
+  // conflict, rather than each reading the same pre-link null and racing.
+  it("link(): concurrent links of conflicting-kind issues to the same approval serialize — exactly one succeeds, none corrupt the stored kind", async () => {
+    const { companyId, approvalId } = await seed();
+    const issueA = randomUUID();
+    const issueB = randomUUID();
+    await db.insert(issues).values([
+      { id: issueA, companyId, title: "A", status: "todo", priority: "medium", approvalKind: "content_batch_approval" },
+      { id: issueB, companyId, title: "B", status: "todo", priority: "medium", approvalKind: "hire_review" },
+    ]);
+
+    const results = await Promise.allSettled([
+      svc.link(issueA, approvalId),
+      svc.link(issueB, approvalId),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ status: 422 });
+
+    // The stored kind matches whichever issue's link actually committed —
+    // never corrupted, never the loser's kind, never both/neither.
+    const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    expect(["content_batch_approval", "hire_review"]).toContain(row!.approvalKind);
+    const links = await db.select().from(issueApprovals).where(eq(issueApprovals.approvalId, approvalId));
+    expect(links).toHaveLength(1);
+    const linkedIssueKind = links[0]!.issueId === issueA ? "content_batch_approval" : "hire_review";
+    expect(row!.approvalKind).toBe(linkedIssueKind);
+  });
 });

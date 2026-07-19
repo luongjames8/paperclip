@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { approvals, issueApprovals, issues } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
@@ -10,27 +10,27 @@ interface LinkActor {
 }
 
 export function issueApprovalService(db: Db) {
-  async function getIssue(issueId: string) {
-    return db
+  async function getIssue(reader: Db, issueId: string) {
+    return reader
       .select()
       .from(issues)
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
   }
 
-  async function getApproval(approvalId: string) {
-    return db
+  async function getApproval(reader: Db, approvalId: string) {
+    return reader
       .select()
       .from(approvals)
       .where(eq(approvals.id, approvalId))
       .then((rows) => rows[0] ?? null);
   }
 
-  async function assertIssueAndApprovalSameCompany(issueId: string, approvalId: string) {
-    const issue = await getIssue(issueId);
+  async function assertIssueAndApprovalSameCompany(reader: Db, issueId: string, approvalId: string) {
+    const issue = await getIssue(reader, issueId);
     if (!issue) throw notFound("Issue not found");
 
-    const approval = await getApproval(approvalId);
+    const approval = await getApproval(reader, approvalId);
     if (!approval) throw notFound("Approval not found");
 
     if (issue.companyId !== approval.companyId) {
@@ -38,6 +38,25 @@ export function issueApprovalService(db: Db) {
     }
 
     return { issue, approval };
+  }
+
+  // Serializes every approvalKind read-check-write against concurrent
+  // mutators of the SAME approval (codex P2 round 5, adversarial pass: two
+  // requests linking different kind-bearing issues to the same approval
+  // concurrently could otherwise both read the same pre-link approval row,
+  // each see only its OWN issue's kind as "no conflict", and race to
+  // overwrite the other's update — link()/unlink()/linkManyForApproval() ALL
+  // wrap their read-check-write in a transaction that takes this lock FIRST,
+  // so the whole class of TOCTOU races on this row is closed by
+  // construction, not by re-checking harder. Once acquired, `approval.approvalKind`
+  // read fresh inside the same transaction is provably not stale: issue.approvalKind
+  // is immutable after creation (server/src/services/issues.ts), and every
+  // mutator that touches approvals.approvalKind holds this same lock, so the
+  // stored value is always an accurate summary of the currently-linked
+  // issues' kinds under it — no need to re-derive from a full join on every
+  // call once the race itself is closed.
+  async function lockApproval(tx: Db, approvalId: string): Promise<void> {
+    await tx.execute(sql`select id from ${approvals} where ${approvals.id} = ${approvalId} for update`);
   }
 
   // Keeps approvals.approvalKind consistent at every point an issue gets
@@ -83,7 +102,7 @@ export function issueApprovalService(db: Db) {
 
   return {
     listApprovalsForIssue: async (issueId: string) => {
-      const issue = await getIssue(issueId);
+      const issue = await getIssue(db, issueId);
       if (!issue) throw notFound("Issue not found");
 
       const result = await db
@@ -113,7 +132,7 @@ export function issueApprovalService(db: Db) {
     },
 
     listIssuesForApproval: async (approvalId: string) => {
-      const approval = await getApproval(approvalId);
+      const approval = await getApproval(db, approvalId);
       if (!approval) throw notFound("Approval not found");
 
       return db
@@ -148,52 +167,60 @@ export function issueApprovalService(db: Db) {
     },
 
     link: async (issueId: string, approvalId: string, actor?: LinkActor) => {
-      const { issue, approval } = await assertIssueAndApprovalSameCompany(issueId, approvalId);
+      return db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
+        await lockApproval(txDb, approvalId);
+        const { issue, approval } = await assertIssueAndApprovalSameCompany(txDb, issueId, approvalId);
 
-      const nextApprovalKind = pickConsistentApprovalKind(approval.approvalKind, [issue.approvalKind]);
-      if (nextApprovalKind !== approval.approvalKind) {
-        await db
-          .update(approvals)
-          .set({ approvalKind: nextApprovalKind, updatedAt: new Date() })
-          .where(eq(approvals.id, approvalId));
-      }
+        const nextApprovalKind = pickConsistentApprovalKind(approval.approvalKind, [issue.approvalKind]);
+        if (nextApprovalKind !== approval.approvalKind) {
+          await txDb
+            .update(approvals)
+            .set({ approvalKind: nextApprovalKind, updatedAt: new Date() })
+            .where(eq(approvals.id, approvalId));
+        }
 
-      await db
-        .insert(issueApprovals)
-        .values({
-          companyId: issue.companyId,
-          issueId,
-          approvalId,
-          linkedByAgentId: actor?.agentId ?? null,
-          linkedByUserId: actor?.userId ?? null,
-        })
-        .onConflictDoNothing();
+        await txDb
+          .insert(issueApprovals)
+          .values({
+            companyId: issue.companyId,
+            issueId,
+            approvalId,
+            linkedByAgentId: actor?.agentId ?? null,
+            linkedByUserId: actor?.userId ?? null,
+          })
+          .onConflictDoNothing();
 
-      return db
-        .select()
-        .from(issueApprovals)
-        .where(and(eq(issueApprovals.issueId, issueId), eq(issueApprovals.approvalId, approvalId)))
-        .then((rows) => rows[0] ?? null);
+        return txDb
+          .select()
+          .from(issueApprovals)
+          .where(and(eq(issueApprovals.issueId, issueId), eq(issueApprovals.approvalId, approvalId)))
+          .then((rows) => rows[0] ?? null);
+      });
     },
 
     unlink: async (issueId: string, approvalId: string) => {
-      const { approval } = await assertIssueAndApprovalSameCompany(issueId, approvalId);
-      await db
-        .delete(issueApprovals)
-        .where(and(eq(issueApprovals.issueId, issueId), eq(issueApprovals.approvalId, approvalId)));
+      await db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
+        await lockApproval(txDb, approvalId);
+        const { approval } = await assertIssueAndApprovalSameCompany(txDb, issueId, approvalId);
+        await txDb
+          .delete(issueApprovals)
+          .where(and(eq(issueApprovals.issueId, issueId), eq(issueApprovals.approvalId, approvalId)));
 
-      const remaining = await db
-        .select({ approvalKind: issues.approvalKind })
-        .from(issueApprovals)
-        .innerJoin(issues, eq(issueApprovals.issueId, issues.id))
-        .where(eq(issueApprovals.approvalId, approvalId));
-      const nextApprovalKind = deriveApprovalKindFromRemainingIssues(remaining.map((row) => row.approvalKind));
-      if (nextApprovalKind !== approval.approvalKind) {
-        await db
-          .update(approvals)
-          .set({ approvalKind: nextApprovalKind, updatedAt: new Date() })
-          .where(eq(approvals.id, approvalId));
-      }
+        const remaining = await txDb
+          .select({ approvalKind: issues.approvalKind })
+          .from(issueApprovals)
+          .innerJoin(issues, eq(issueApprovals.issueId, issues.id))
+          .where(eq(issueApprovals.approvalId, approvalId));
+        const nextApprovalKind = deriveApprovalKindFromRemainingIssues(remaining.map((row) => row.approvalKind));
+        if (nextApprovalKind !== approval.approvalKind) {
+          await txDb
+            .update(approvals)
+            .set({ approvalKind: nextApprovalKind, updatedAt: new Date() })
+            .where(eq(approvals.id, approvalId));
+        }
+      });
     },
 
     // Returns the approval's resolved approvalKind after linking (codex P2
@@ -208,55 +235,59 @@ export function issueApprovalService(db: Db) {
       issueIds: string[],
       actor?: LinkActor,
     ): Promise<{ approvalKind: string | null }> => {
-      const approval = await getApproval(approvalId);
-      if (!approval) throw notFound("Approval not found");
-      if (issueIds.length === 0) return { approvalKind: approval.approvalKind };
+      return db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
+        await lockApproval(txDb, approvalId);
+        const approval = await getApproval(txDb, approvalId);
+        if (!approval) throw notFound("Approval not found");
+        if (issueIds.length === 0) return { approvalKind: approval.approvalKind };
 
-      const uniqueIssueIds = Array.from(new Set(issueIds));
-      const rows = await db
-        .select({
-          id: issues.id,
-          companyId: issues.companyId,
-          approvalKind: issues.approvalKind,
-        })
-        .from(issues)
-        .where(inArray(issues.id, uniqueIssueIds));
+        const uniqueIssueIds = Array.from(new Set(issueIds));
+        const rows = await txDb
+          .select({
+            id: issues.id,
+            companyId: issues.companyId,
+            approvalKind: issues.approvalKind,
+          })
+          .from(issues)
+          .where(inArray(issues.id, uniqueIssueIds));
 
-      if (rows.length !== uniqueIssueIds.length) {
-        throw notFound("One or more issues not found");
-      }
-
-      for (const row of rows) {
-        if (row.companyId !== approval.companyId) {
-          throw unprocessable("Issue and approval must belong to the same company");
+        if (rows.length !== uniqueIssueIds.length) {
+          throw notFound("One or more issues not found");
         }
-      }
 
-      const nextApprovalKind = pickConsistentApprovalKind(
-        approval.approvalKind,
-        rows.map((row) => row.approvalKind),
-      );
-      if (nextApprovalKind !== approval.approvalKind) {
-        await db
-          .update(approvals)
-          .set({ approvalKind: nextApprovalKind, updatedAt: new Date() })
-          .where(eq(approvals.id, approvalId));
-      }
+        for (const row of rows) {
+          if (row.companyId !== approval.companyId) {
+            throw unprocessable("Issue and approval must belong to the same company");
+          }
+        }
 
-      await db
-        .insert(issueApprovals)
-        .values(
-          uniqueIssueIds.map((issueId) => ({
-            companyId: approval.companyId,
-            issueId,
-            approvalId,
-            linkedByAgentId: actor?.agentId ?? null,
-            linkedByUserId: actor?.userId ?? null,
-          })),
-        )
-        .onConflictDoNothing();
+        const nextApprovalKind = pickConsistentApprovalKind(
+          approval.approvalKind,
+          rows.map((row) => row.approvalKind),
+        );
+        if (nextApprovalKind !== approval.approvalKind) {
+          await txDb
+            .update(approvals)
+            .set({ approvalKind: nextApprovalKind, updatedAt: new Date() })
+            .where(eq(approvals.id, approvalId));
+        }
 
-      return { approvalKind: nextApprovalKind };
+        await txDb
+          .insert(issueApprovals)
+          .values(
+            uniqueIssueIds.map((issueId) => ({
+              companyId: approval.companyId,
+              issueId,
+              approvalId,
+              linkedByAgentId: actor?.agentId ?? null,
+              linkedByUserId: actor?.userId ?? null,
+            })),
+          )
+          .onConflictDoNothing();
+
+        return { approvalKind: nextApprovalKind };
+      });
     },
   };
 }
