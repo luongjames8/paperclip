@@ -228,6 +228,54 @@ async function resolveResponsibleUserIdForIssueCreate(
   return input.createdByUserId ?? null;
 }
 
+// Config-carried approval routing tag (fleet issue #687): declared once on the
+// routine template, stamped onto the routine-execution root issue, then
+// inherited one level at a time down the subissue chain — every descendant
+// already carries what IT was stamped with, so a single parentId lookup here
+// propagates the value the whole way down without a recursive walk. This is
+// the ONLY place issues.approvalKind is computed; every create-issue call
+// path (general create, createChild, accepted-plan decomposition — all of
+// which funnel through issueService(db).create) routes through it, so an
+// agent-supplied value can never take effect by construction — it is only
+// ever honored when trustExplicitApprovalKind is set (routine dispatch, or a
+// human-user actor at the route layer).
+async function resolveApprovalKindForIssueCreate(
+  reader: DbReader,
+  companyId: string,
+  input: {
+    // undefined = no explicit declaration was made (fall through to
+    // inheritance); null = explicitly declared "no kind"; string = explicitly
+    // declared this kind. Callers must NOT collapse undefined to null before
+    // passing this in (see the ?? null bug this fixed, codex-adversarial P0).
+    explicitApprovalKind?: string | null;
+    parentId?: string | null;
+    trustExplicitApprovalKind?: boolean;
+  },
+): Promise<string | null> {
+  if (input.trustExplicitApprovalKind === true && input.explicitApprovalKind !== undefined) {
+    // A trusted, EXPLICIT declaration is final — including "no kind"
+    // (explicitApprovalKind === null). It must short-circuit here rather than
+    // fall through to parentId inheritance: dispatchRoutineRun passes both a
+    // trusted approvalKind (possibly null, when the routine declares none)
+    // AND parentId = the routine's own optional epic parent (an unrelated
+    // issue tree). Without this short-circuit, a routine with no approvalKind
+    // would silently inherit whatever kind that unrelated epic happens to
+    // carry — the exact bug this comment used to describe as already fixed.
+    return readStringFromRecord(input, "explicitApprovalKind");
+  }
+
+  if (input.parentId) {
+    const parent = await reader
+      .select({ approvalKind: issues.approvalKind })
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.id, input.parentId)))
+      .then((rows) => rows[0] ?? null);
+    if (parent?.approvalKind) return parent.approvalKind;
+  }
+
+  return null;
+}
+
 function buildReusedExecutionWorkspaceConfigPatchFromIssueSettings(
   settings: ReturnType<typeof parseIssueExecutionWorkspaceSettings>,
 ) {
@@ -500,6 +548,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   actorRunId?: string | null;
   actorResponsibleUserId?: string | null;
   trustExplicitResponsibleUserId?: boolean;
+  trustExplicitApprovalKind?: boolean;
 };
 type IssueChildCreateInput = IssueCreateInput & {
   acceptanceCriteria?: string[];
@@ -2370,6 +2419,7 @@ const issueListSelect = {
   originFingerprint: issues.originFingerprint,
   requestDepth: issues.requestDepth,
   billingCode: issues.billingCode,
+  approvalKind: issues.approvalKind,
   assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
   executionPolicy: sql<null>`null`,
   executionState: sql<null>`null`,
@@ -5574,6 +5624,7 @@ export function issueService(db: Db) {
         goalId: issueData.goalId ?? parent.goalId,
         actorResponsibleUserId: issueData.actorResponsibleUserId ?? null,
         trustExplicitResponsibleUserId: issueData.trustExplicitResponsibleUserId === true,
+        trustExplicitApprovalKind: issueData.trustExplicitApprovalKind === true,
         requestDepth: clampIssueRequestDepth(
           Math.max(clampIssueRequestDepth(parent.requestDepth) + 1, issueData.requestDepth ?? 0),
         ),
@@ -5886,6 +5937,7 @@ export function issueService(db: Db) {
         actorRunId,
         actorResponsibleUserId,
         trustExplicitResponsibleUserId,
+        trustExplicitApprovalKind,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
@@ -6041,10 +6093,21 @@ export function issueService(db: Db) {
           actorResponsibleUserId: actorResponsibleUserId ?? null,
           trustExplicitResponsibleUserId: trustExplicitResponsibleUserId === true,
         });
+        const approvalKind = await resolveApprovalKindForIssueCreate(tx, companyId, {
+          // Deliberately NOT `?? null` — collapsing "field absent" (undefined,
+          // meaning "no declaration was made, inherit normally") into "field
+          // explicitly null" (meaning "trusted declaration: no kind") would
+          // reintroduce the P0 leak the trust short-circuit above exists to
+          // close (see resolveApprovalKindForIssueCreate's doc comment).
+          explicitApprovalKind: issueData.approvalKind,
+          parentId: issueData.parentId ?? null,
+          trustExplicitApprovalKind: trustExplicitApprovalKind === true,
+        });
 
         const values = {
           ...issueData,
           responsibleUserId,
+          approvalKind,
           requestDepth: clampIssueRequestDepth(issueData.requestDepth),
           originKind: issueData.originKind ?? "manual",
           goalId: resolveIssueGoalId({

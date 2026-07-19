@@ -52,6 +52,7 @@ export const issues = pgTable(
     billingCode: text("billing_code"),
     assigneeAdapterOverrides: jsonb("assignee_adapter_overrides").$type<Record<string, unknown>>(),
     executionPolicy: jsonb("execution_policy").$type<Record<string, unknown>>(),
+    approvalKind: text("approval_kind"),
     executionState: jsonb("execution_state").$type<Record<string, unknown>>(),
     monitorNextCheckAt: timestamp("monitor_next_check_at", { withTimezone: true }),
     monitorWakeRequestedAt: timestamp("monitor_wake_requested_at", { withTimezone: true }),

@@ -71,7 +71,21 @@ async function createApp(actorOverrides: Record<string, unknown> = {}) {
   return app;
 }
 
-function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "run-1", agentId = "agent-1") {
+// Matches routes/approvals.ts resolveApprovalKindFromLinkedIssues' `db.select({
+// id: issues.id, approvalKind: issues.approvalKind })` query (fleet issue #687).
+// Default stub ("found, no kind" for the one fixed issueId this file's
+// existing create-approval-with-issueIds fixture sends) keeps that older test
+// passing without opting in; pass approvalKindRows explicitly to unit-test
+// the route's own handling of the query result (conflicting kinds, missing
+// issueIds) — see createApprovalKindRouteDb below.
+const DEFAULT_ISSUE_APPROVAL_KIND_ROWS = [{ id: "00000000-0000-0000-0000-000000000001", approvalKind: null }];
+
+function createRouteDb(
+  contextSnapshot: Record<string, unknown> = {},
+  runId = "run-1",
+  agentId = "agent-1",
+  approvalKindRows: Array<{ id: string; approvalKind: string | null }> = DEFAULT_ISSUE_APPROVAL_KIND_ROWS,
+) {
   const runRows = [{
     id: runId,
     companyId: "company-1",
@@ -82,16 +96,26 @@ function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "r
     select: vi.fn((selection: Record<string, unknown> = {}) => ({
       from: vi.fn(() => ({
         where: vi.fn(() => ({
-          then: async (resolve: (rows: unknown[]) => unknown) => resolve(
-            Object.keys(selection).includes("contextSnapshot") ? runRows : [],
-          ),
+          then: async (resolve: (rows: unknown[]) => unknown) => {
+            const keys = Object.keys(selection);
+            if (keys.includes("contextSnapshot")) return resolve(runRows);
+            if (keys.includes("approvalKind")) return resolve(approvalKindRows);
+            return resolve([]);
+          },
         })),
       })),
     })),
   } as any;
 }
 
-async function createAgentApp(options: { runId?: string; contextSnapshot?: Record<string, unknown> } = {}) {
+// Thin alias for tests that only care about the approvalKind query shape
+// (conflicting kinds, missing issueIds) — same mock as createRouteDb, just
+// without needing to spell out the contextSnapshot/runId/agentId defaults.
+function createApprovalKindRouteDb(rows: Array<{ id: string; approvalKind: string | null }>) {
+  return createRouteDb(undefined, undefined, undefined, rows);
+}
+
+async function createAgentApp(options: { runId?: string; contextSnapshot?: Record<string, unknown>; db?: unknown } = {}) {
   const [{ errorHandler }, { approvalRoutes }] = await Promise.all([
     import("../middleware/index.js"),
     import("../routes/approvals.js"),
@@ -109,7 +133,7 @@ async function createAgentApp(options: { runId?: string; contextSnapshot?: Recor
     };
     next();
   });
-  app.use("/api", approvalRoutes(createRouteDb(options.contextSnapshot, options.runId ?? "run-1")));
+  app.use("/api", approvalRoutes((options.db ?? createRouteDb(options.contextSnapshot, options.runId ?? "run-1")) as any));
   app.use(errorHandler);
   return app;
 }
@@ -674,6 +698,132 @@ describe("approval routes idempotent retries", () => {
           approvalType: "content_batch_approval",
         }),
       }),
+    );
+  });
+
+  // ─── approvalKind derivation at approval creation (fleet issue #687) ───────
+
+  it("derives approvalKind from a single consistent linked issue and persists + forwards it", async () => {
+    mockApprovalService.create.mockResolvedValue({
+      id: "approval-1",
+      companyId: "company-1",
+      type: "request_board_approval",
+      requestedByAgentId: "agent-1",
+      requestedByUserId: null,
+      status: "pending",
+      approvalKind: "content_batch_approval",
+      payload: { title: "Weekly content batch" },
+      decisionNote: null,
+      decidedByUserId: null,
+      decidedAt: null,
+      createdAt: new Date("2026-04-06T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-06T00:00:00.000Z"),
+    });
+
+    const db = createApprovalKindRouteDb([
+      { id: "00000000-0000-0000-0000-000000000001", approvalKind: "content_batch_approval" },
+    ]);
+    const res = await request(await createAgentApp({ db }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        issueIds: ["00000000-0000-0000-0000-000000000001"],
+        payload: { title: "Weekly content batch" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ approvalKind: "content_batch_approval" }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        details: expect.objectContaining({ approvalKind: "content_batch_approval" }),
+      }),
+    );
+  });
+
+  it("rejects (422) creating an approval whose linked issues carry conflicting approvalKind values — zero approval created", async () => {
+    const db = createApprovalKindRouteDb([
+      { id: "11111111-1111-1111-1111-111111111111", approvalKind: "content_batch_approval" },
+      { id: "22222222-2222-2222-2222-222222222222", approvalKind: "hire_review" },
+    ]);
+    const res = await request(await createAgentApp({ db }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        issueIds: [
+          "11111111-1111-1111-1111-111111111111",
+          "22222222-2222-2222-2222-222222222222",
+        ],
+        payload: { title: "Conflicting chain" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toContain("conflicting approvalKind");
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects (422) creating an approval linked to a nonexistent/cross-company issueId — zero approval created", async () => {
+    // Only ONE of the two requested issueIds resolves — the query is scoped
+    // by companyId, so a foreign/nonexistent id is silently absent from the
+    // result set; the route must catch the count mismatch rather than
+    // silently resolving approvalKind from a subset of what was requested.
+    const db = createApprovalKindRouteDb([
+      { id: "11111111-1111-1111-1111-111111111111", approvalKind: null },
+    ]);
+    const res = await request(await createAgentApp({ db }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        issueIds: [
+          "11111111-1111-1111-1111-111111111111",
+          "99999999-9999-9999-9999-999999999999",
+        ],
+        payload: { title: "Bad issueId" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toContain("do not exist in this company");
+    expect(res.body.details?.missingIssueIds).toEqual(["99999999-9999-9999-9999-999999999999"]);
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  });
+
+  it("an agent-supplied payload.approvalKind is never read — the server-derived value always wins", async () => {
+    mockApprovalService.create.mockResolvedValue({
+      id: "approval-1",
+      companyId: "company-1",
+      type: "request_board_approval",
+      requestedByAgentId: "agent-1",
+      requestedByUserId: null,
+      status: "pending",
+      approvalKind: "content_batch_approval",
+      payload: { title: "Weekly content batch" },
+      decisionNote: null,
+      decidedByUserId: null,
+      decidedAt: null,
+      createdAt: new Date("2026-04-06T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-06T00:00:00.000Z"),
+    });
+
+    const db = createApprovalKindRouteDb([
+      { id: "00000000-0000-0000-0000-000000000001", approvalKind: "content_batch_approval" },
+    ]);
+    const res = await request(await createAgentApp({ db }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        issueIds: ["00000000-0000-0000-0000-000000000001"],
+        payload: { title: "Weekly content batch", approvalKind: "agent_made_this_up" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    // The server-derived kind (from the linked issue) wins — the agent's
+    // payload.approvalKind is never consulted for routing purposes.
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ approvalKind: "content_batch_approval" }),
     );
   });
 

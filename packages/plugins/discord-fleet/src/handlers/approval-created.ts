@@ -11,7 +11,7 @@ import { buildApprovalActionRow, buildApprovalEmbed } from "../render/embeds.js"
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
-import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
+import { matchChannelByExactKey, matchChannelByKind, matchChannelByType } from "../routing/route.js";
 import { renderIssueDocs, type IssueDocsBundle } from "../render/issue-docs.js";
 import {
   parsePostsBatchPayload,
@@ -32,6 +32,11 @@ interface ApprovalCreatedPayload {
   type?: unknown;
   // Legacy field name kept as fallback for older emitters / unit tests.
   approvalType?: unknown;
+  // Config-carried routing tag (fleet issue #687), forwarded the same way
+  // approvalType already is — server/src/routes/approvals.ts:
+  // `details: { approvalKind }`, derived server-side from the linked issues'
+  // inherited value. Never agent-composed; see routing/route.ts.
+  approvalKind?: unknown;
   // Paperclip's `POST /companies/:id/approvals` activity emit carries
   // `issueIds: string[]` (server/src/routes/approvals.ts:118). The singular
   // `issueId` is kept for legacy/test compatibility but should not be the
@@ -120,7 +125,7 @@ export function resolveApprovalContent(payload: {
   const KNOWN = new Set([
     "proposedComment", "details", "description", "summary", "recommendedAction",
     "risks", "title", "approvalId", "version", "nextActionOnApproval", "body",
-    "type", "approvalType", "issueIds", "issueId", "requestedByAgentId",
+    "type", "approvalType", "approvalKind", "issueIds", "issueId", "requestedByAgentId",
     "status", "companyId", "entityId", "kind", "id", "createdAt", "updatedAt",
     "identifier", "projectId",
   ]);
@@ -134,6 +139,36 @@ export function resolveApprovalContent(payload: {
     }
   }
   return [header, body, extras.join("\n")].filter(Boolean).join("\n\n");
+}
+
+// Loud unrouted fallback (fleet issue #687): silent fallback delivery is
+// abolished — the operator sees exactly why a card landed in the fallback
+// channel instead of guessing. Shared by handleApprovalCreated and
+// approvals-reminder.ts (mirrors the PENDING_APPROVALS_KEY-style cross-file
+// export precedent already used between these two files) so the original
+// card and every reminder carry the identical warning. Best-effort: a
+// failure here must never affect the header post already confirmed by the
+// caller, so it's logged, not thrown.
+export async function postUnroutedApprovalWarning(
+  ctx: PluginContext,
+  client: Client,
+  destinationChannelId: string,
+  approvalKind: string,
+  logContext: { source: string; approvalId: string },
+): Promise<void> {
+  try {
+    await postToChannel(
+      client,
+      destinationChannelId,
+      `⚠️ unrouted approvalKind: ${approvalKind || "absent"} — no approvalKindChannels/approvalsChannelsByType match and no co-locatable work-thread, delivered here as fallback.`,
+    );
+  } catch (err) {
+    ctx.logger.warn(`${logContext.source}: unrouted-warning post failed`, {
+      approvalId: logContext.approvalId,
+      destinationChannelId,
+      error: String(err),
+    });
+  }
 }
 
 function chunkBySection(text: string): string[] {
@@ -236,45 +271,70 @@ export async function handleApprovalCreated(
   const embed = buildApprovalEmbed({ identifier, approvalId, approvalType, title: approvalTitle, issueUrl: url });
   const actionRow = buildApprovalActionRow({ approvalId, issueUrl: url });
 
-  // Routing precedence:
-  //   1. approvalsChannelsByType regex match on approval title (operator's
-  //      explicit content-surface routing — highest priority).
-  //   2. Existing work-thread/destination from parent issue (co-locates
-  //      the approval with the work that produced it).
-  //   3. companyConfig.approvalFallbackChannelId (per-company system-dump
-  //      approvals channel — must be company-scoped to avoid cross-company
-  //      leakage in multi-company deployments).
-  //   4. companyConfig.channels.orphan (backward-compat default when
-  //      approvalFallbackChannelId is absent).
+  // Routing precedence (fleet issue #687 — replaces the LLM-string ladder):
+  //   1. approvalKindChannels exact lookup on the engine-typed, config-
+  //      inherited approvalKind (declared once on the routine, stamped down
+  //      the issue chain — never agent-composed, so there is nothing to
+  //      paraphrase-drift).
+  //   2. approvalsChannelsByType (DEPRECATED): the legacy
+  //      payload.approvalType exact-key pass, then the LLM-authored title
+  //      regex — tried only when (1) found no match, so companies that
+  //      haven't migrated their config to approvalKindChannels yet keep
+  //      routing exactly as before.
+  //   3. Existing work-thread/destination from parent issue (co-locates
+  //      the approval with the work that produced it — real machinery, kept
+  //      as-is).
+  //   4. Fallback: companyConfig.approvalFallbackChannelId, or
+  //      companyConfig.channels.orphan when absent. Reaching this rung with
+  //      an absent/unmapped approvalKind is now ALWAYS loud (see
+  //      `unrouted` below) — the 2026-07-18 incident (approval 8a86088d:
+  //      omitted approvalType AND title AND proposedComment) landed here
+  //      silently; it cannot again.
+  const approvalKind = str(payload.approvalKind);
+  const kindMatchedChannelId = matchChannelByKind(config.approvalKindChannels, companyId, approvalKind);
   // Stable, skill-authored routing discriminator (the 2026-05-15 plan's
-  // slot-8 design, wired here for the first time): payload.approvalType is a
-  // copy-paste constant the card-creating skill emits (e.g.
-  // "content_batch_approval") — never LLM prose, so it cannot
-  // paraphrase-drift the way the title did on 2026-07-07 (card fell to the
-  // fallback channel on a one-character case miss). Deliberately NOT
-  // payload.type: that is the closed server enum ("request_board_approval")
-  // shared by every content card — useless as a surface discriminator.
-  // Title stays as the second candidate for cards that predate the constant.
+  // slot-8 design): payload.approvalType is a copy-paste constant the
+  // card-creating skill emits (e.g. "content_batch_approval") — never LLM
+  // prose, so it cannot paraphrase-drift the way the title did on
+  // 2026-07-07 (card fell to the fallback channel on a one-character case
+  // miss). Deliberately NOT payload.type: that is the closed server enum
+  // ("request_board_approval") shared by every content card — useless as a
+  // surface discriminator. Title stays as the second candidate for cards
+  // that predate the constant.
   const routingKey = str(payload.approvalType);
   // Candidate-major, not route-major (codex P2): the discriminator is tried
   // against the WHOLE table before the title sees any route. Passing both
   // candidates in one call would let a broad legacy title row placed above a
   // literal ^…$ row steal the match — priority must not depend on config row
   // ordering, which is convention a future config edit can silently break.
-  const matchedChannelId =
+  const legacyMatchedChannelId =
     matchChannelByExactKey(config.approvalsChannelsByType?.[companyId], routingKey) ??
     matchChannelByType(config.approvalsChannelsByType?.[companyId], [approvalTitle]);
+  const matchedChannelId = kindMatchedChannelId ?? legacyMatchedChannelId;
   let destinationChannelId: string;
+  // True only when NEITHER the kind map, the legacy ladder, NOR co-location
+  // resolved a destination — i.e. delivery is about to land on the blind
+  // fallback channel. Co-location is deliberately excluded: it is a
+  // successful, intentional route (real machinery), not an unrouted card.
+  let unrouted = false;
   if (matchedChannelId) {
     destinationChannelId = matchedChannelId;
   } else {
     const existingThread = candidateIssueIds.length
       ? await getThreadForAncestors(ctx, companyId, candidateIssueIds)
       : null;
-    destinationChannelId =
-      existingThread?.threadId ??
-      companyConfig.approvalFallbackChannelId ??
-      companyConfig.channels.orphan;
+    if (existingThread?.threadId) {
+      destinationChannelId = existingThread.threadId;
+    } else {
+      unrouted = true;
+      destinationChannelId = companyConfig.approvalFallbackChannelId ?? companyConfig.channels.orphan;
+      ctx.logger.warn("approval-created: unrouted — no approvalKind/legacy match and no co-locatable thread, delivering to fallback channel", {
+        approvalId,
+        companyId,
+        approvalKind: approvalKind || null,
+        destinationChannelId,
+      });
+    }
   }
 
   let headerMessageId: string;
@@ -320,6 +380,13 @@ export async function handleApprovalCreated(
   // Success is logged explicitly so an absent card in Discord can always be
   // distinguished from a posted-then-buried card during incident triage.
   ctx.logger.info("approval-created: card posted", { approvalId, destinationChannelId, headerMessageId });
+
+  if (unrouted) {
+    await postUnroutedApprovalWarning(ctx, client, destinationChannelId, approvalKind, {
+      source: "approval-created",
+      approvalId,
+    });
+  }
 
   // Resolve API key + client once; reused for content fallback fetch and issue docs below.
   let paperclip: InstanceType<typeof PaperclipClient> | null = null;

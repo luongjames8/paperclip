@@ -30,6 +30,7 @@ import {
 } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
 import { lowTrustReviewPresetPolicySchema, trustAuthorizationPolicySchema } from "./trust-policy.js";
+import { approvalKindSchema } from "./approval.js";
 
 export const issueBlockedInboxStateSchema = z.enum([
   "needs_attention",
@@ -394,6 +395,12 @@ const createIssueBaseSchema = z.object({
   billingCode: z.string().optional().nullable(),
   assigneeAdapterOverrides: issueAssigneeAdapterOverridesSchema.optional().nullable(),
   executionPolicy: issueExecutionPolicySchema.optional().nullable(),
+  // Config-carried approval routing tag. Never agent-composed: the server only
+  // trusts this value when the actor is a human user (routes/issues.ts), and
+  // otherwise always derives it from parentId inheritance / the originating
+  // routine template (server/src/services/issues.ts resolveApprovalKindForIssueCreate).
+  // Immutable after creation — see updateIssueSchema's .omit() below.
+  approvalKind: approvalKindSchema.optional().nullable(),
   executionWorkspaceId: z.string().uuid().optional().nullable(),
   executionWorkspacePreference: z.enum(ISSUE_EXECUTION_WORKSPACE_PREFERENCES).optional().nullable(),
   executionWorkspaceSettings: issueExecutionWorkspaceSettingsSchema.optional().nullable(),
@@ -454,6 +461,9 @@ export const updateIssueSchema = createIssueBaseSchema.omit({
   createdByUserId: true,
   responsibleUserId: true,
   watchdog: true,
+  // Immutable after creation — stamped from the routine template / parentId
+  // inheritance, never a direct-PATCH field (see createIssueBaseSchema).
+  approvalKind: true,
 }).partial().extend({
   requestDepth: issueRequestDepthInputSchema.optional(),
   assigneeAgentId: z.string().trim().min(1).optional().nullable(),

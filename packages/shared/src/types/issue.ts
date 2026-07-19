@@ -731,6 +731,10 @@ export interface Issue {
   billingCode: string | null;
   assigneeAdapterOverrides: IssueAssigneeAdapterOverrides | null;
   executionPolicy?: IssueExecutionPolicy | null;
+  // Config-carried approval routing tag, stamped from the originating routine
+  // (or inherited from parentId) at creation — never accepted as direct agent
+  // input. See docs on approvalKindSchema / resolveApprovalKindForIssueCreate.
+  approvalKind?: string | null;
   executionState?: IssueExecutionState | null;
   monitorNextCheckAt?: Date | null;
   monitorLastTriggeredAt?: Date | null;

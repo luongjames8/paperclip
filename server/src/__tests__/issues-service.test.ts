@@ -3133,6 +3133,211 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
   });
 });
 
+describeEmbeddedPostgres("issueService.create approvalKind inheritance (fleet issue #687)", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-approval-kind-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+    await ensureIssueRelationsTable(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(issueRelations);
+    await db.delete(issueInboxArchives);
+    await db.delete(activityLog);
+    await db.delete(issues);
+    await db.delete(goals);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function makeCompany() {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    return companyId;
+  }
+
+  it("trusted explicit approvalKind (routine dispatch) is stamped onto a new root issue", async () => {
+    const companyId = await makeCompany();
+    const issue = await svc.create(companyId, {
+      title: "Weekly content batch",
+      status: "todo",
+      priority: "medium",
+      approvalKind: "content_batch_approval",
+      trustExplicitApprovalKind: true,
+    });
+    expect(issue.approvalKind).toBe("content_batch_approval");
+  });
+
+  it("an UNtrusted explicit approvalKind (agent-supplied, no trust flag) is ignored, not stamped", async () => {
+    const companyId = await makeCompany();
+    const issue = await svc.create(companyId, {
+      title: "Agent-authored issue",
+      status: "todo",
+      priority: "medium",
+      approvalKind: "sneaky_agent_kind",
+      // trustExplicitApprovalKind intentionally omitted — mirrors an agent
+      // actor's create-issue call (routes/issues.ts only sets the trust flag
+      // for actor.actorType === "user").
+    });
+    expect(issue.approvalKind).toBeNull();
+  });
+
+  it("a root issue created with neither an explicit kind nor a parent gets null", async () => {
+    const companyId = await makeCompany();
+    const issue = await svc.create(companyId, { title: "Untagged", status: "todo", priority: "medium" });
+    expect(issue.approvalKind).toBeNull();
+  });
+
+  it("a child issue inherits the parent's approvalKind when it doesn't declare its own", async () => {
+    const companyId = await makeCompany();
+    const parent = await svc.create(companyId, {
+      title: "Root execution issue",
+      status: "todo",
+      priority: "medium",
+      approvalKind: "content_batch_approval",
+      trustExplicitApprovalKind: true,
+    });
+
+    const { issue: child } = await svc.createChild(parent.id, { title: "Writer subtask", status: "todo" });
+    expect(child.approvalKind).toBe("content_batch_approval");
+  });
+
+  it("inheritance propagates transitively through a multi-level subissue chain", async () => {
+    const companyId = await makeCompany();
+    const root = await svc.create(companyId, {
+      title: "Root",
+      status: "todo",
+      priority: "medium",
+      approvalKind: "content_batch_approval",
+      trustExplicitApprovalKind: true,
+    });
+    const { issue: child } = await svc.createChild(root.id, { title: "Child", status: "todo" });
+    const { issue: grandchild } = await svc.createChild(child.id, { title: "Grandchild", status: "todo" });
+
+    expect(child.approvalKind).toBe("content_batch_approval");
+    expect(grandchild.approvalKind).toBe("content_batch_approval");
+  });
+
+  it("a parent with no approvalKind produces children with no approvalKind (not an error)", async () => {
+    const companyId = await makeCompany();
+    const parent = await svc.create(companyId, { title: "Untagged root", status: "todo", priority: "medium" });
+    const { issue: child } = await svc.createChild(parent.id, { title: "Child", status: "todo" });
+    expect(child.approvalKind).toBeNull();
+  });
+
+  it("a human-actor explicit override on a child WINS over parent inheritance", async () => {
+    const companyId = await makeCompany();
+    const parent = await svc.create(companyId, {
+      title: "Root",
+      status: "todo",
+      priority: "medium",
+      approvalKind: "content_batch_approval",
+      trustExplicitApprovalKind: true,
+    });
+    const { issue: child } = await svc.createChild(parent.id, {
+      title: "Child with an explicit override",
+      status: "todo",
+      approvalKind: "hire_review",
+      trustExplicitApprovalKind: true,
+    });
+    expect(child.approvalKind).toBe("hire_review");
+  });
+
+  it("an untrusted explicit kind on a child is ignored in favor of inheritance (never agent-composed)", async () => {
+    const companyId = await makeCompany();
+    const parent = await svc.create(companyId, {
+      title: "Root",
+      status: "todo",
+      priority: "medium",
+      approvalKind: "content_batch_approval",
+      trustExplicitApprovalKind: true,
+    });
+    const { issue: child } = await svc.createChild(parent.id, {
+      title: "Agent-authored child",
+      status: "todo",
+      approvalKind: "sneaky_agent_kind",
+      // trustExplicitApprovalKind omitted.
+    });
+    expect(child.approvalKind).toBe("content_batch_approval");
+  });
+
+  it("a parentId belonging to a DIFFERENT company can never leak that company's approvalKind — create() rejects it outright before approvalKind resolution runs", async () => {
+    const companyA = await makeCompany();
+    const companyB = await makeCompany();
+    const parentInA = await svc.create(companyA, {
+      title: "Company A root",
+      status: "todo",
+      priority: "medium",
+      approvalKind: "company_a_kind",
+      trustExplicitApprovalKind: true,
+    });
+
+    // A cross-company parentId is rejected earlier, by the PRE-EXISTING
+    // workspace-inheritance lookup (getWorkspaceInheritanceIssue, company-
+    // scoped) — every parentId create() sees is fed through it before
+    // resolveApprovalKindForIssueCreate ever runs, so the leak this test set
+    // out to check is unreachable by construction, not merely absent. Still
+    // worth pinning: resolveApprovalKindForIssueCreate's OWN parent lookup
+    // (server/src/services/issues.ts) is independently company-scoped too
+    // (defense in depth) even though this path can't exercise it directly.
+    await expect(svc.create(companyB, {
+      title: "Company B issue referencing A's parent",
+      status: "todo",
+      priority: "medium",
+      parentId: parentInA.id,
+    })).rejects.toThrow(/not found/i);
+  });
+
+  // Regression pin for a P0 found by adversarial review before this PR's
+  // first codex round: dispatchRoutineRun passes BOTH a trusted, possibly-null
+  // approvalKind (the routine's own declaration) AND parentId = the routine's
+  // own optional epic parent (routines.parentIssueId — an unrelated issue
+  // tree, NOT the execution chain). A routine that declares no approvalKind
+  // must produce an execution-root issue with approvalKind=null, never the
+  // epic's kind — the trust flag must short-circuit even when the trusted
+  // value is null, not just when it's a real string.
+  it("a routine's TRUSTED-but-null approvalKind wins over its own epic parentId's kind (no leak)", async () => {
+    const companyId = await makeCompany();
+    const epic = await svc.create(companyId, {
+      title: "Unrelated epic",
+      status: "todo",
+      priority: "medium",
+      approvalKind: "epic_kind",
+      trustExplicitApprovalKind: true,
+    });
+
+    // Mirrors dispatchRoutineRun's exact call shape: routine.approvalKind is
+    // null (routine declares no kind) but parentId = routine.parentIssueId
+    // (the unrelated epic above), both passed together with trust=true.
+    const executionIssue = await svc.create(companyId, {
+      title: "Routine execution issue",
+      status: "todo",
+      priority: "medium",
+      parentId: epic.id,
+      approvalKind: null,
+      trustExplicitApprovalKind: true,
+    });
+
+    expect(executionIssue.approvalKind).toBeNull();
+  });
+});
+
 describeEmbeddedPostgres("issueService blockers and dependency wake readiness", () => {
   let db!: ReturnType<typeof createDb>;
   let svc!: ReturnType<typeof issueService>;

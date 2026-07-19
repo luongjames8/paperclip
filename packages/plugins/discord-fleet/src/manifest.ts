@@ -54,8 +54,8 @@ const manifest: PaperclipPluginManifestV1 = {
       },
       approvalsChannelsByType: {
         type: "object",
-        title: "Approvals Channels By Type",
-        description: "Per-companyId map of [regex, channelId] pairs. Matches approval title; first match wins. Replaces channels.orphan fallback for approvals.",
+        title: "Approvals Channels By Type (deprecated)",
+        description: "DEPRECATED — superseded by approvalKindChannels. Per-companyId map of [regex, channelId] pairs matched against the legacy payload.approvalType/title. Tried only after approvalKindChannels finds no match; kept for backward compat until every company's routines carry approvalKind.",
         additionalProperties: {
           type: "array",
           items: {
@@ -64,6 +64,15 @@ const manifest: PaperclipPluginManifestV1 = {
             maxItems: 2,
             items: { type: "string" },
           },
+        },
+      },
+      approvalKindChannels: {
+        type: "object",
+        title: "Approval Kind Channels",
+        description: "Per-companyId exact map of approvalKind -> channelId. approvalKind is engine-typed and config-inherited (declared once on the routine, stamped down the issue chain) — this is a plain lookup, not a regex. Tried first, ahead of approvalsChannelsByType and work-thread co-location.",
+        additionalProperties: {
+          type: "object",
+          additionalProperties: { type: "string" },
         },
       },
       executionStageChannelsByType: {

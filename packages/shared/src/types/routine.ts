@@ -108,6 +108,7 @@ export interface Routine {
   variables: RoutineVariable[];
   env?: RoutineEnvConfig | null;
   executionPolicy?: RoutineExecutionPolicy | null;
+  approvalKind?: string | null;
   latestRevisionId: string | null;
   latestRevisionNumber: number;
   createdByAgentId: string | null;
@@ -152,6 +153,7 @@ export interface RoutineRevisionSnapshotRoutineV1 {
   variables: RoutineVariable[];
   env: RoutineEnvConfig | null;
   executionPolicy: RoutineExecutionPolicy | null;
+  approvalKind: string | null;
   responsibleUserId: string | null;
 }
 

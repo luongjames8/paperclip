@@ -497,6 +497,7 @@ function routineRevisionSnapshotRoutine(routine: RoutineRow): RoutineRevisionSna
     variables: routine.variables ?? [],
     env: routine.env ?? null,
     executionPolicy: routine.executionPolicy ?? null,
+    approvalKind: routine.approvalKind ?? null,
     responsibleUserId: routine.responsibleUserId ?? null,
   };
 }
@@ -527,6 +528,23 @@ function assertActorMayChangeExecutionPolicy(
   if (!actor.agentId) return;
   if (canonicalJson(previous ?? null) !== canonicalJson(next ?? null)) {
     throw forbidden("Agents cannot change a routine execution policy");
+  }
+}
+
+// Same governance boundary as executionPolicy, for the same reason: approvalKind
+// is config-carried and never agent-composed (fleet issue #687) — an agent
+// self-authoring its own routine could otherwise pick a kind that routes its
+// own approvals to a low-scrutiny channel. Every write path (create, update,
+// revision restore) flows through this backstop; routes/routines.ts carries the
+// friendlier 403 for the common case.
+function assertActorMayChangeApprovalKind(
+  actor: Actor,
+  previous: string | null | undefined,
+  next: string | null | undefined,
+) {
+  if (!actor.agentId) return;
+  if ((previous ?? null) !== (next ?? null)) {
+    throw forbidden("Agents cannot change a routine's approvalKind");
   }
 }
 
@@ -1736,6 +1754,11 @@ export function routineService(
             originFingerprint: dispatchFingerprint,
             billingCode: issueBillingCode,
             executionPolicy: (input.routine.executionPolicy as Record<string, unknown> | null) ?? null,
+            // The routine template is the root of the approvalKind chain (fleet
+            // issue #687): trusted explicitly so it wins over any parentIssueId
+            // inheritance (e.g. a routine nested under a project epic).
+            approvalKind: input.routine.approvalKind ?? null,
+            trustExplicitApprovalKind: true,
             executionWorkspaceId: input.executionWorkspaceId ?? null,
             executionWorkspacePreference: input.executionWorkspacePreference ?? null,
             executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
@@ -2054,6 +2077,8 @@ export function routineService(
       assertRoutineVariableDefinitions(variables);
       const executionPolicy = await normalizeRoutineExecutionPolicyForPersistence(db, companyId, input.executionPolicy);
       assertActorMayChangeExecutionPolicy(actor, null, executionPolicy);
+      const approvalKind = input.approvalKind ?? null;
+      assertActorMayChangeApprovalKind(actor, null, approvalKind);
       const status = normalizeDraftRoutineStatus(input.status, input.assigneeAgentId);
       const responsibleUserId = await resolveRoutineResponsibleUserId(db, companyId, actor.userId, input.parentIssueId ?? null);
       if (!responsibleUserId) {
@@ -2078,6 +2103,7 @@ export function routineService(
             variables,
             env,
             executionPolicy,
+            approvalKind,
             responsibleUserId,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,
@@ -2121,6 +2147,10 @@ export function routineService(
         : await normalizeRoutineExecutionPolicyForPersistence(db, existing.companyId, patch.executionPolicy);
       if (patch.executionPolicy !== undefined) {
         assertActorMayChangeExecutionPolicy(actor, existing.executionPolicy, nextExecutionPolicy);
+      }
+      const nextApprovalKind = patch.approvalKind === undefined ? existing.approvalKind ?? null : patch.approvalKind ?? null;
+      if (patch.approvalKind !== undefined) {
+        assertActorMayChangeApprovalKind(actor, existing.approvalKind, nextApprovalKind);
       }
       const requestedStatus = patch.status ?? existing.status;
       if (patch.status === "active") {
@@ -2195,6 +2225,7 @@ export function routineService(
           variables: nextVariables,
           env: nextEnv,
           executionPolicy: nextExecutionPolicy,
+          approvalKind: nextApprovalKind,
           responsibleUserId: locked.responsibleUserId ?? responsibleUserId,
           updatedByAgentId: actor.agentId ?? null,
           updatedByUserId: actor.userId ?? null,
@@ -2246,6 +2277,7 @@ export function routineService(
             variables: candidate.variables,
             env: candidate.env,
             executionPolicy: candidate.executionPolicy,
+            approvalKind: candidate.approvalKind,
             responsibleUserId: candidate.responsibleUserId,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
@@ -2537,6 +2569,8 @@ export function routineService(
         routineSnapshot.executionPolicy ?? null,
       );
       assertActorMayChangeExecutionPolicy(actor, existingRoutine.executionPolicy, restoredExecutionPolicy);
+      const restoredApprovalKind = routineSnapshot.approvalKind ?? null;
+      assertActorMayChangeApprovalKind(actor, existingRoutine.approvalKind, restoredApprovalKind);
 
       const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
@@ -2594,6 +2628,8 @@ export function routineService(
             // Validated above; null when the snapshot predates executionPolicy or
             // recorded none — a revision without a policy restores to no policy.
             executionPolicy: restoredExecutionPolicy,
+            // null when the snapshot predates approvalKind — same fallback shape.
+            approvalKind: restoredApprovalKind,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
             updatedAt: now,

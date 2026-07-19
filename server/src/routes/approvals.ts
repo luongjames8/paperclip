@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
-import { eq } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
+import { and, eq, inArray } from "drizzle-orm";
+import { heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
@@ -10,6 +10,7 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
+import { unprocessable } from "../errors.js";
 import {
   agentService,
   approvalService,
@@ -22,6 +23,52 @@ import {
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+
+// Config-carried approval routing tag (fleet issue #687): NEVER accepted as
+// approval-creation input (createApprovalSchema has no approvalKind field —
+// an agent-supplied payload.approvalKind, if any, is simply not read here).
+// Instead the server derives it authoritatively from the linked issues, each
+// of which already carries the value stamped/inherited at issue-create time
+// (server/src/services/issues.ts resolveApprovalKindForIssueCreate). Distinct
+// non-null kinds among the linked issues is a caller bug (approvals spanning
+// two different routine chains) — rejected loudly rather than silently
+// picking one, mirroring the rest of this feature's "loud, not silent" bar.
+//
+// Existence/company-membership is ALSO enforced here (codex-adversarial P2):
+// a nonexistent or cross-company issueId would otherwise be silently dropped
+// by the `eq(issues.companyId, companyId)` filter, letting the kind resolve
+// from a SUBSET of what the caller asked to link — before this check, that
+// could produce a wrong/absent approvalKind while issueApprovalService's own
+// (later, non-transactional) existence check still went on to fail the
+// request, leaving an orphaned approval row already inserted. Failing here,
+// before svc.create runs, means a bad issueId is a clean 422 with zero writes.
+async function resolveApprovalKindFromLinkedIssues(
+  db: Db,
+  companyId: string,
+  issueIds: string[],
+): Promise<string | null> {
+  if (issueIds.length === 0) return null;
+  const rows = await db
+    .select({ id: issues.id, approvalKind: issues.approvalKind })
+    .from(issues)
+    .where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds)));
+  if (rows.length !== issueIds.length) {
+    const foundIds = new Set(rows.map((row) => row.id));
+    const missingIssueIds = issueIds.filter((id) => !foundIds.has(id));
+    throw unprocessable("One or more linked issues do not exist in this company", {
+      missingIssueIds,
+    });
+  }
+  const kinds = new Set(
+    rows.map((row) => row.approvalKind).filter((kind): kind is string => Boolean(kind)),
+  );
+  if (kinds.size > 1) {
+    throw unprocessable("Linked issues carry conflicting approvalKind values", {
+      kinds: [...kinds],
+    });
+  }
+  return kinds.size === 1 ? [...kinds][0]! : null;
+}
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -175,14 +222,18 @@ export function approvalRoutes(
       : [];
     const uniqueIssueIds = Array.from(new Set(issueIds));
     const { issueIds: _issueIds, ...approvalInput } = req.body;
-    const normalizedPayload =
+    // Independent: kind derivation reads only the linked issues, payload
+    // normalization reads only approvalInput.payload — run concurrently.
+    const [approvalKind, normalizedPayload] = await Promise.all([
+      resolveApprovalKindFromLinkedIssues(db, companyId, uniqueIssueIds),
       approvalInput.type === "hire_agent"
-        ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
+        ? secretsSvc.normalizeHireApprovalPayloadForPersistence(
             companyId,
             approvalInput.payload,
             { strictMode: strictSecretsMode },
           )
-        : approvalInput.payload;
+        : Promise.resolve(approvalInput.payload),
+    ]);
 
     const actor = getActorInfo(req);
     const approval = await svc.create(companyId, {
@@ -191,6 +242,7 @@ export function approvalRoutes(
       requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
       requestedByAgentId:
         approvalInput.requestedByAgentId ?? (actor.actorType === "agent" ? actor.actorId : null),
+      approvalKind,
       status: "pending",
       decisionNote: null,
       decidedByUserId: null,
@@ -216,6 +268,12 @@ export function approvalRoutes(
       details: {
         type: approval.type,
         issueIds: uniqueIssueIds,
+        // Config-carried routing tag (fleet issue #687), derived above from the
+        // linked issues — forwarded the same way approvalType already is (the
+        // plugin handler reads event.payload, i.e. THESE details, not the DB
+        // row) so the new exact-map routing ladder rung never needs a
+        // follow-up GET.
+        approvalKind,
         // Surface approval.payload.title + proposedComment so downstream
         // consumers (e.g. discord-fleet plugin's approvalsChannelsByType
         // regex routing + chunked-comment posting) can act on the event

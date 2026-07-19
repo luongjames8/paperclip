@@ -594,6 +594,13 @@ export const APPROVAL_TYPES = [
 ] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number];
 
+// approvalKind is a business-defined routing tag (e.g. "content_batch_approval"),
+// not a closed engine enum — the engine only enforces SHAPE (lowercase
+// snake_case identifier). The actual set of known kinds lives in each fleet's
+// discord-fleet plugin config (kind -> channelId map); an unmapped-but-
+// well-formed kind is the plugin's "unrouted" case, not a rejection here.
+export const APPROVAL_KIND_PATTERN = "^[a-z][a-z0-9_]*$";
+
 export const APPROVAL_STATUSES = [
   "pending",
   "revision_requested",

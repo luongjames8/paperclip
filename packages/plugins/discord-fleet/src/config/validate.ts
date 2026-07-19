@@ -2,6 +2,10 @@ import type { DiscordFleetConfig } from "./schema.js";
 
 export const COMPANY_PREFIX_PATTERN = "^[A-Za-z0-9_-]+$";
 const COMPANY_PREFIX_RE = new RegExp(COMPANY_PREFIX_PATTERN);
+// Mirrors packages/shared/src/constants.ts APPROVAL_KIND_PATTERN on the engine
+// side (the plugin does not depend on @paperclipai/shared — it is esbuilt
+// standalone — so this is a deliberate small duplication, not a shared import).
+const APPROVAL_KIND_RE = /^[a-z][a-z0-9_]*$/;
 
 // Nested-quantifier heuristic: rejects the classic catastrophic-backtracking
 // shapes ((a+)+, (a*)+, (a|aa)+ style groups followed by a quantifier) at
@@ -39,6 +43,16 @@ export function validateConfig(config: DiscordFleetConfig): void {
       validateOperatorRegex(rule.titleRegex, `confirmationSweep[${companyId}]`);
       if (!SNOWFLAKE_RE.test(rule.channelId)) {
         throw new Error(`confirmationSweep[${companyId}]: channelId "${rule.channelId}" is not a Discord snowflake`);
+      }
+    }
+  }
+  for (const [companyId, kindMap] of Object.entries(config.approvalKindChannels ?? {})) {
+    for (const [kind, channelId] of Object.entries(kindMap)) {
+      if (!APPROVAL_KIND_RE.test(kind)) {
+        throw new Error(`approvalKindChannels[${companyId}]: kind "${kind}" is not a lowercase snake_case identifier — it can never match an engine-emitted approvalKind`);
+      }
+      if (!SNOWFLAKE_RE.test(channelId)) {
+        throw new Error(`approvalKindChannels[${companyId}]: channelId "${channelId}" for kind "${kind}" is not a Discord snowflake`);
       }
     }
   }

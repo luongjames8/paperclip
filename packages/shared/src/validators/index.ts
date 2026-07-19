@@ -452,6 +452,7 @@ export {
 } from "./goal.js";
 
 export {
+  approvalKindSchema,
   createApprovalSchema,
   resolveApprovalSchema,
   requestApprovalRevisionSchema,

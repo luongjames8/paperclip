@@ -1,6 +1,17 @@
 import { z } from "zod";
-import { APPROVAL_TYPES } from "../constants.js";
+import { APPROVAL_KIND_PATTERN, APPROVAL_TYPES } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
+
+// Shared by routine/issue authoring (config-carried, config/schema.ts
+// docs/agents/issue-tracker.md — never accepted as approval-creation input;
+// see createApprovalSchema below, which deliberately has no approvalKind
+// field: the server always derives it from the linked issue chain).
+export const approvalKindSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(new RegExp(APPROVAL_KIND_PATTERN), "approvalKind must be a lowercase snake_case identifier (e.g. content_batch_approval)");
 
 export const createApprovalSchema = z.object({
   type: z.enum(APPROVAL_TYPES),
