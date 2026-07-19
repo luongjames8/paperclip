@@ -247,6 +247,20 @@ function validPostsBatch() {
   };
 }
 
+// This block's fixtures (title: "Weekly posts batch") don't match
+// makeFleetConfig's default "content batch" route, so without an explicit
+// route they hit the loud-unrouted-fallback warning (fleet issue #687) and
+// its extra postToChannel call pollutes the content-focused assertions
+// below. Adds a route for this block's own title, alongside (not replacing)
+// the shared default.
+function routedFleetConfig(company: CompanyConfig): DiscordFleetConfig {
+  const config = makeFleetConfig(company);
+  config.approvalsChannelsByType = {
+    "company-1": [...(config.approvalsChannelsByType?.["company-1"] ?? []), ["Weekly posts batch", "channel-batch"]],
+  };
+  return config;
+}
+
 describe("runApprovalsReminder — postsBatch structured render (GH #501)", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -267,7 +281,7 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     await runApprovalsReminder(
-      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
       makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "prose fallback, should NOT post", postsBatch: validPostsBatch() } })]),
       NOW,
     );
@@ -283,7 +297,7 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     await runApprovalsReminder(
-      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
       makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "## plaintext body", postsBatch: { version: 2 } } })]),
       NOW,
     );
@@ -299,7 +313,7 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     await runApprovalsReminder(
-      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
       makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "legacy prose artifact" } })]),
       NOW,
     );
@@ -319,7 +333,7 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     await runApprovalsReminder(
-      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
       makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "plaintext fallback content", postsBatch: validPostsBatch() } })]),
       NOW,
     );
@@ -357,7 +371,7 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     await runApprovalsReminder(
-      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
       makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "plaintext fallback content, should NOT post — this is a PARTIAL failure", postsBatch: threeItemPostsBatch() } })]),
       NOW,
     );
@@ -380,7 +394,7 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     await runApprovalsReminder(
-      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
       makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "plaintext fallback content — SHOULD post since postsBatch.items is empty", postsBatch: { version: 1, items: [] } } })]),
       NOW,
     );
@@ -400,7 +414,7 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     await runApprovalsReminder(
-      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
       makePaperclip([approval({
         payload: {
           title: "Weekly posts batch",
@@ -428,7 +442,7 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     await runApprovalsReminder(
-      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
       makePaperclip([approval({ payload: { title: "Weekly posts batch", postsBatch: validPostsBatch() } })]),
       NOW,
     );
@@ -455,7 +469,7 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     await runApprovalsReminder(
-      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
       makePaperclip([approval({ payload: { title: "Weekly posts batch", postsBatch: batchWithLongCopy } })]),
       NOW,
     );
@@ -466,5 +480,72 @@ describe("runApprovalsReminder — postsBatch structured render (GH #501)", () =
     expect(overflowCall).toContain("tokyo-trifecta");
     expect(overflowCall).toContain("Facebook");
     expect(overflowCall).toContain(longCopy);
+  });
+});
+
+// ─── approvalKind routing (fleet issue #687) ─────────────────────────────────
+//
+// Mirrors handleApprovalCreated's routing tiers so a reminder never lands
+// somewhere different from the original card — and gets the same loud
+// unrouted-fallback warning, since a reminder IS the backstop for a card the
+// operator missed.
+
+describe("runApprovalsReminder — approvalKind routing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("routes via approvalKindChannels when approval.approvalKind is set, ahead of the legacy ladder", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const fleetConfig = makeFleetConfig(company); // has approvalsChannelsByType: content batch -> channel-batch
+    fleetConfig.approvalKindChannels = { "company-1": { content_batch_approval: "kind-channel" } };
+
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, fleetConfig,
+      makePaperclip([approval({ approvalKind: "content_batch_approval", payload: { title: "Review weekly content batch" } })]),
+      NOW,
+    );
+
+    const [, channelId] = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("kind-channel");
+  });
+
+  it("posts the unrouted warning when the approval's kind has no map entry and nothing else matches", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const fleetConfig = makeFleetConfig(company);
+    fleetConfig.approvalsChannelsByType = { "company-1": [] }; // no legacy match either
+
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, fleetConfig,
+      makePaperclip([approval({ approvalKind: "totally_unmapped_kind", payload: { title: "Some unrelated approval" } })]),
+      NOW,
+    );
+
+    expect(postToChannel).toHaveBeenCalledWith(
+      {},
+      "channel-orphan",
+      expect.stringContaining("unrouted approvalKind: totally_unmapped_kind"),
+    );
+  });
+
+  it("a reminder routed via the legacy ladder (no approvalKind) does NOT get the unrouted warning", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company), makePaperclip([approval({})]), NOW,
+    );
+
+    expect(postToChannel).not.toHaveBeenCalled();
   });
 });

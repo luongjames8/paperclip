@@ -14,6 +14,7 @@ import {
   issueExecutionStageSchema,
   issueExecutionWorkspaceSettingsSchema,
 } from "./issue.js";
+import { approvalKindSchema } from "./approval.js";
 import { envConfigSchema } from "./secret.js";
 import { isValidRoutineDateString } from "../routine-variables.js";
 
@@ -100,6 +101,11 @@ export const createRoutineSchema = z.object({
   variables: z.array(routineVariableSchema).optional().default([]),
   env: envConfigSchema.optional().nullable(),
   executionPolicy: routineExecutionPolicySchema.optional().nullable(),
+  // Config-carried approval routing tag, stamped onto every execution issue the
+  // routine spawns (and inherited down that issue's subissue chain) — see
+  // approvalKindSchema. Board-governed the same way executionPolicy is: an
+  // agent actor may never set/change this (routes/routines.ts, services/routines.ts).
+  approvalKind: approvalKindSchema.optional().nullable(),
 });
 
 export type CreateRoutine = z.infer<typeof createRoutineSchema>;
@@ -125,6 +131,7 @@ export const routineRevisionSnapshotRoutineV1Schema = z.object({
   variables: z.array(routineVariableSchema),
   env: envConfigSchema.nullable().default(null),
   executionPolicy: routineExecutionPolicySchema.nullable().default(null),
+  approvalKind: approvalKindSchema.nullable().default(null),
   responsibleUserId: z.string().nullable().default(null),
 }).strict();
 

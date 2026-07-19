@@ -2310,10 +2310,16 @@ export function agentRoutes(
       });
 
       if (sourceIssueIds.length > 0) {
-        await issueApprovalsSvc.linkManyForApproval(approval.id, sourceIssueIds, {
+        // Capture the resolved approvalKind (fleet issue #687, codex P2 round
+        // 3): this hire flow creates the approval directly (no approvalKind of
+        // its own) then links sourceIssueIds — without this, the local
+        // `approval` object below stays stale and the approval.created
+        // activity emitted further down would never carry the derived kind.
+        const { approvalKind } = await issueApprovalsSvc.linkManyForApproval(approval.id, sourceIssueIds, {
           agentId: actor.actorType === "agent" ? actor.actorId : null,
           userId: actor.actorType === "user" ? actor.actorId : null,
         });
+        approval = { ...approval, approvalKind };
       }
     }
 
@@ -2356,7 +2362,10 @@ export function agentRoutes(
         action: "approval.created",
         entityType: "approval",
         entityId: approval.id,
-        details: { type: approval.type, linkedAgentId: agent.id },
+        // approvalKind forwarded the same way routes/approvals.ts's create
+        // route already does (fleet issue #687) — the discord-fleet plugin
+        // routes on THESE details, not a follow-up GET.
+        details: { type: approval.type, linkedAgentId: agent.id, approvalKind: approval.approvalKind ?? null },
       });
     }
 

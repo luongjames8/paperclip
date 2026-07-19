@@ -617,7 +617,12 @@ describe("handleApprovalCreated — rich renderer integration", () => {
     ]);
 
     const harness = createTestHarness({ manifest });
-    await handleApprovalCreated(harness.ctx, makeApprovalCreatedEvent(), makeMockClient(), makeConfig());
+    // Explicit legacy route (fleet issue #687): this fixture carries no
+    // approvalKind/co-location thread, so without a route it would hit the
+    // loud-unrouted-fallback warning and add an unrelated postToChannel call.
+    const config = makeConfig();
+    config.approvalsChannelsByType = { c1: [["^budget$", "o1"]] };
+    await handleApprovalCreated(harness.ctx, makeApprovalCreatedEvent(), makeMockClient(), config);
 
     expect(postEmbedToChannel).toHaveBeenCalledTimes(1);      // header
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(2);     // two body groups
@@ -887,6 +892,10 @@ describe("handleApprovalCreated — full-approval fetch fallback", () => {
 
     const harness = createTestHarness({ manifest });
     const config = makeConfig();
+    // Explicit legacy route (fleet issue #687): without it this fixture is
+    // unrouted and the loud-fallback warning adds an unrelated postToChannel
+    // call that this test's "no content posted" assertion doesn't expect.
+    config.approvalsChannelsByType = { c1: [["^budget$", "o1"]] };
     const client = makeMockClient();
 
     // Event has no content → triggers fallback fetch which then fails.
@@ -937,6 +946,20 @@ function validPostsBatch() {
   };
 }
 
+// This block's fixtures are about postsBatch CONTENT rendering, not routing —
+// they carry no approvalKind/co-location thread, so without an explicit
+// legacy route they'd all hit the new loud-unrouted-fallback warning post
+// (fleet issue #687) and its extra postToChannel call would pollute every
+// call-count assertion below. routedConfig() gives them a deterministic
+// legacy-ladder match (payload.approvalType: "budget", the default fixture
+// value) to the SAME "o1" channel makeConfig() already falls back to —
+// same destination, zero routing ambiguity, tests stay focused on content.
+function routedConfig(): DiscordFleetConfig {
+  const config = makeConfig();
+  config.approvalsChannelsByType = { c1: [["^budget$", "o1"]] };
+  return config;
+}
+
 describe("handleApprovalCreated — postsBatch structured render (GH #501)", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -972,7 +995,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
       proposedComment: "## raw markdown fallback text, should NOT be posted when postsBatch parses",
       postsBatch: validPostsBatch(),
     });
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     expect(postEmbedToChannel).toHaveBeenCalledTimes(1); // header
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(1); // one group of postsBatch embeds
@@ -999,7 +1022,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
     // Event payload has NO postsBatch (matches the real server: approval.created
     // activity only carries title + proposedComment) — only the fetched approval has it.
     const event = makeApprovalCreatedEvent({ proposedComment: "event-payload prose" });
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
     expect(postToChannel).not.toHaveBeenCalled();
@@ -1016,7 +1039,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
       proposedComment: "## plaintext fallback body",
       postsBatch: { version: 2, items: [] },
     });
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     expect(postEmbedsToChannel).not.toHaveBeenCalled();
     expect(postToChannel).toHaveBeenCalled();
@@ -1030,7 +1053,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
 
     const harness = createTestHarness({ manifest });
     const event = makeApprovalCreatedEvent({ proposedComment: "legacy prose artifact, 28887 chars in production" });
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     expect(postEmbedsToChannel).not.toHaveBeenCalled();
     expect(postToChannel).toHaveBeenCalled();
@@ -1045,7 +1068,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
 
     const harness = createTestHarness({ manifest });
     const event = makeApprovalCreatedEvent({ postsBatch: validPostsBatch() });
-    await expect(handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig())).resolves.not.toThrow();
+    await expect(handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig())).resolves.not.toThrow();
   });
 
   // codex P2: when postsBatch parses but EVERY postEmbedsToChannel call fails,
@@ -1064,7 +1087,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
       proposedComment: "plaintext fallback content, should post since postsBatch totally failed to deliver",
       postsBatch: validPostsBatch(),
     });
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     expect(postEmbedsToChannel).toHaveBeenCalled(); // structured attempt was made
     expect(postToChannel).toHaveBeenCalled(); // fell back to plaintext since nothing delivered
@@ -1104,7 +1127,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
       proposedComment: "plaintext fallback content, should NOT post — everything delivered after retry",
       postsBatch: threeItemBatch,
     });
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     // 2 groups + 1 retry of the failed group = 3 calls.
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(3);
@@ -1128,7 +1151,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
       proposedComment: "plaintext fallback content, should NOT post — this is a PARTIAL failure, not total",
       postsBatch: threeItemBatch,
     });
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(3);
     // Residual failure after retry → the loud, unsuppressable warning fires...
@@ -1155,7 +1178,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
       proposedComment: "plaintext fallback content — SHOULD post since postsBatch.items is empty",
       postsBatch: { version: 1 as const, items: [] },
     });
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     // No groups, no overflow → no embed calls, no warning, straight to plaintext.
     expect(postEmbedsToChannel).not.toHaveBeenCalled();
@@ -1189,7 +1212,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
 
     const harness = createTestHarness({ manifest });
     const event = makeApprovalCreatedEvent({});
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     expect(postToChannel).toHaveBeenCalledTimes(1);
     const guidanceCall = (postToChannel as any).mock.calls[0][2] as string;
@@ -1227,7 +1250,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
 
     const harness = createTestHarness({ manifest });
     const event = makeApprovalCreatedEvent({});
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     // Embeds still post successfully (independent of the guidance failure).
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
@@ -1247,7 +1270,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
 
     const harness = createTestHarness({ manifest });
     const event = makeApprovalCreatedEvent({ postsBatch: validPostsBatch() });
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     expect(postToChannel).not.toHaveBeenCalled();
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
@@ -1274,7 +1297,7 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
     };
     const harness = createTestHarness({ manifest });
     const event = makeApprovalCreatedEvent({ postsBatch: batchWithLongCopy });
-    await handleApprovalCreated(harness.ctx, event, makeMockClient(), makeConfig());
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), routedConfig());
 
     expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
     expect(postToChannel).toHaveBeenCalledTimes(1);
@@ -1282,5 +1305,201 @@ describe("handleApprovalCreated — postsBatch structured render (GH #501)", () 
     expect(overflowCall).toContain("tokyo-trifecta");
     expect(overflowCall).toContain("Facebook");
     expect(overflowCall).toContain(longCopy);
+  });
+});
+
+// ─── approvalKind routing (fleet issue #687) ─────────────────────────────────
+//
+// New rung-1 exact map (config.approvalKindChannels), the deprecated legacy
+// ladder kept as rung 2, work-thread co-location kept as rung 3, and a loud
+// (never-silent) warning whenever delivery lands on rung 4 (fallback).
+
+describe("handleApprovalCreated — approvalKind routing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("approvalKindChannels exact match wins over the legacy approvalsChannelsByType ladder", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    config.approvalKindChannels = { c1: { content_batch_approval: "kind-channel" } };
+    // Legacy ladder ALSO matches this event (approvalType: "budget" from the
+    // default fixture) — kind must win regardless of legacy-table content.
+    config.approvalsChannelsByType = { c1: [["^budget$", "legacy-channel"]] };
+
+    const event = makeApprovalCreatedEvent({ approvalKind: "content_batch_approval" });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), config);
+
+    expect(postEmbedToChannel).toHaveBeenCalledWith(makeMockClient(), "kind-channel", expect.anything(), expect.anything());
+  });
+
+  it("a kind absent from approvalKindChannels falls through to the legacy ladder (not treated as unrouted)", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    // Map has entries, just not for THIS event's kind.
+    config.approvalKindChannels = { c1: { some_other_kind: "kind-channel" } };
+    config.approvalsChannelsByType = { c1: [["^budget$", "legacy-channel"]] };
+
+    const event = makeApprovalCreatedEvent({ approvalKind: "content_batch_approval" });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), config);
+
+    expect(postEmbedToChannel).toHaveBeenCalledWith(makeMockClient(), "legacy-channel", expect.anything(), expect.anything());
+    // Routed via the legacy ladder, not the fallback — no unrouted warning.
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  it("a company with ONLY the legacy approvalsChannelsByType configured (today's real fleet state) routes exactly as before — zero behavior change", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    // approvalKindChannels entirely absent from config — pre-migration state.
+    config.approvalsChannelsByType = { c1: [["^budget$", "legacy-channel"]] };
+
+    const event = makeApprovalCreatedEvent(); // no approvalKind field at all
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), config);
+
+    expect(postEmbedToChannel).toHaveBeenCalledWith(makeMockClient(), "legacy-channel", expect.anything(), expect.anything());
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  it("unrouted (no kind/legacy match, no co-location) posts a visible warning naming the kind", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    config.companies[0].approvalFallbackChannelId = "fallback-channel";
+
+    const event = makeApprovalCreatedEvent({ approvalKind: "totally_unmapped_kind", approvalType: undefined });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), config);
+
+    expect(postToChannel).toHaveBeenCalledWith(
+      makeMockClient(),
+      "fallback-channel",
+      expect.stringContaining("unrouted approvalKind: totally_unmapped_kind"),
+    );
+  });
+
+  it("unrouted with a wholly absent approvalKind renders 'absent', not an empty string", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    config.companies[0].approvalFallbackChannelId = "fallback-channel";
+
+    const event = makeApprovalCreatedEvent({ approvalType: undefined });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), config);
+
+    expect(postToChannel).toHaveBeenCalledWith(
+      makeMockClient(),
+      "fallback-channel",
+      expect.stringContaining("unrouted approvalKind: absent"),
+    );
+  });
+
+  it("co-location (existing work thread) is a successful route, NOT unrouted — no warning posted", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { setThreadForIssue } = await import("../src/routing/thread-state.js");
+    const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    await setThreadForIssue(harness.ctx, "c1", "iss-1", {
+      threadId: "thread-1",
+      channelId: "thread-1",
+      createdAt: new Date().toISOString(),
+    });
+    const config = makeConfig();
+
+    const event = makeApprovalCreatedEvent({ approvalKind: "totally_unmapped_kind", approvalType: undefined });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), config);
+
+    expect(postEmbedToChannel).toHaveBeenCalledWith(makeMockClient(), "thread-1", expect.anything(), expect.anything());
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  it("a failed warning-post does not un-post the header or leave the approval retryable", async () => {
+    const { handleApprovalCreated, POSTED_MARKER_PREFIX } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel, postToChannel } = await import("../src/discord/rest.js");
+    (postToChannel as any).mockRejectedValueOnce(new Error("discord 500"));
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    config.companies[0].approvalFallbackChannelId = "fallback-channel";
+
+    const event = makeApprovalCreatedEvent({ approvalKind: "totally_unmapped_kind", approvalType: undefined });
+    await handleApprovalCreated(harness.ctx, event, makeMockClient(), config);
+
+    // Header posted exactly once — the warning-post failure is best-effort
+    // and must not trigger a retry/duplicate of the header.
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+    const posted = await harness.ctx.state.get({
+      scopeKind: "company",
+      scopeId: "c1",
+      stateKey: `${POSTED_MARKER_PREFIX}appr-001`,
+    });
+    expect(posted).toBeTruthy();
+  });
+
+  it("multi-company: identical kind string routes each company to ITS OWN mapped channel — no cross-company leak", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config: DiscordFleetConfig = {
+      botTokenSecretRef: "bot-ref",
+      companies: [
+        {
+          companyId: "c1",
+          guildId: "g1",
+          channels: { digest: "d1", errors: "e1", orphan: "orphan-c1" },
+          projectRouting: {},
+          digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
+          stuckIssueThresholdHours: 6,
+          paperclipApiKeySecretRef: "ref1",
+          paperclipApiUrl: "http://localhost:3000",
+          companyPrefix: "tc1",
+        },
+        {
+          companyId: "c2",
+          guildId: "g2",
+          channels: { digest: "d2", errors: "e2", orphan: "orphan-c2" },
+          projectRouting: {},
+          digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
+          stuckIssueThresholdHours: 6,
+          paperclipApiKeySecretRef: "ref2",
+          paperclipApiUrl: "http://localhost:3000",
+          companyPrefix: "tc2",
+        },
+      ],
+      approvalKindChannels: {
+        c1: { content_batch_approval: "c1-kind-channel" },
+        c2: { content_batch_approval: "c2-kind-channel" },
+      },
+    };
+
+    await handleApprovalCreated(
+      harness.ctx,
+      makeApprovalCreatedEvent({ approvalId: "appr-c1", approvalKind: "content_batch_approval" }, { companyId: "c1" }),
+      makeMockClient(),
+      config,
+    );
+    await handleApprovalCreated(
+      harness.ctx,
+      makeApprovalCreatedEvent({ approvalId: "appr-c2", approvalKind: "content_batch_approval" }, { companyId: "c2" }),
+      makeMockClient(),
+      config,
+    );
+
+    expect(postEmbedToChannel).toHaveBeenCalledWith(makeMockClient(), "c1-kind-channel", expect.anything(), expect.anything());
+    expect(postEmbedToChannel).toHaveBeenCalledWith(makeMockClient(), "c2-kind-channel", expect.anything(), expect.anything());
   });
 });

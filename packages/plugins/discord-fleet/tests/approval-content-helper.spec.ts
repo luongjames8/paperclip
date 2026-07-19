@@ -264,7 +264,12 @@ describe("handleApprovalCreated — CHANGE 1: always post content", () => {
 
     const harness = createTestHarness({ manifest });
     const event = makeEvent({});  // no proposedComment / details / description
-    await handleApprovalCreated(harness.ctx, event, {} as Client, makeConfig());
+    // Explicit legacy route (fleet issue #687): this fixture carries no
+    // approvalKind/co-location thread, so without a route it would hit the
+    // loud-unrouted-fallback warning and add an unrelated postToChannel call.
+    const config = makeConfig();
+    config.approvalsChannelsByType = { c1: [["Test approval", "o1"]] };
+    await handleApprovalCreated(harness.ctx, event, {} as Client, config);
 
     expect(postToChannel).not.toHaveBeenCalled();
   });

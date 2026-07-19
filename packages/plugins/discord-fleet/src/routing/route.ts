@@ -72,3 +72,17 @@ export function matchChannelByExactKey(
   }
   return null;
 }
+
+// approvalKind routing (fleet issue #687): a plain per-company exact map, not
+// a regex table — approvalKind is engine-typed and config-inherited (never
+// LLM-composed), so there is nothing to pattern-match against, only a key to
+// look up. Shared by handleApprovalCreated and approvals-reminder.ts so the
+// lookup can't drift between the two call sites.
+export function matchChannelByKind(
+  kindChannels: Record<string, Record<string, string>> | undefined,
+  companyId: string,
+  kind: string,
+): string | null {
+  if (!kind) return null;
+  return kindChannels?.[companyId]?.[kind] ?? null;
+}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MAX_ISSUE_REQUEST_DEPTH } from "../index.js";
 import {
   addIssueCommentSchema,
+  createChildIssueSchema,
   createIssueSchema,
   createIssueThreadInteractionSchema,
   issueBlockedInboxAttentionSchema,
@@ -438,5 +439,34 @@ describe("issue validators", () => {
     });
 
     expect(parsed.success).toBe(false);
+  });
+
+  describe("approvalKind (fleet issue #687)", () => {
+    it("accepts a lowercase snake_case kind on create", () => {
+      expect(createIssueSchema.parse({
+        title: "Weekly content batch",
+        approvalKind: "content_batch_approval",
+      }).approvalKind).toBe("content_batch_approval");
+    });
+
+    it("accepts a kind on createChildIssueSchema (human-actor override path)", () => {
+      expect(createChildIssueSchema.parse({
+        title: "Sub-item",
+        approvalKind: "content_batch_approval",
+      }).approvalKind).toBe("content_batch_approval");
+    });
+
+    it("rejects a malformed kind", () => {
+      expect(createIssueSchema.safeParse({ title: "x", approvalKind: "Not Valid!" }).success).toBe(false);
+    });
+
+    // Immutable after creation (server/src/services/issues.ts
+    // resolveApprovalKindForIssueCreate is the only writer) — updateIssueSchema
+    // must not even carry the key, so a stray approvalKind in a PATCH body is
+    // silently dropped by zod rather than reaching the service layer at all.
+    it("updateIssueSchema has no approvalKind key — PATCH input silently drops it", () => {
+      const parsed = updateIssueSchema.parse({ title: "renamed", approvalKind: "sneaky_kind" } as never);
+      expect(parsed).not.toHaveProperty("approvalKind");
+    });
   });
 });

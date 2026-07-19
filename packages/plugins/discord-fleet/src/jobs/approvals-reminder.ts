@@ -6,9 +6,14 @@ import { postEmbedToChannel, postEmbedsToChannel, postToChannel } from "../disco
 import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
 import { stripSecrets } from "../render/secrets.js";
-import { matchChannelByExactKey, matchChannelByType } from "../routing/route.js";
+import { matchChannelByExactKey, matchChannelByKind, matchChannelByType } from "../routing/route.js";
 import { getThreadForAncestors } from "../routing/thread-state.js";
-import { resolveApprovalContent, resolveApprovalGuidance, PENDING_APPROVALS_KEY } from "../handlers/approval-created.js";
+import {
+  resolveApprovalContent,
+  resolveApprovalGuidance,
+  postUnroutedApprovalWarning,
+  PENDING_APPROVALS_KEY,
+} from "../handlers/approval-created.js";
 import {
   parsePostsBatchPayload,
   chunkPostsBatchForDiscord,
@@ -197,9 +202,14 @@ export async function runApprovalsReminder(
     if (lastReminded !== null && nowMs - lastReminded < REMIND_EVERY_MS) continue;
 
     const url = `${config.paperclipApiUrl}/${config.companyPrefix}/approvals/${approval.id}`;
-    // Mirror handleApprovalCreated's routing tiers: explicit type route, then
-    // the linked issue's work thread (so reminders land where the original
-    // card did), then the per-company fallback/orphan channel.
+    // Mirror handleApprovalCreated's routing tiers exactly (fleet issue #687)
+    // so a reminder never lands somewhere different from the original card:
+    // approvalKind exact map, then the legacy approvalsChannelsByType ladder
+    // (deprecated but still tried for companies that haven't migrated), then
+    // the linked issue's work thread, then the per-company fallback/orphan
+    // channel. This job reads the FULL approval record, so approval.approvalKind
+    // is directly available (no event-payload round trip needed).
+    const kindDestinationChannelId = matchChannelByKind(fleetConfig.approvalKindChannels, companyId, approval.approvalKind ?? "");
     // Candidates mirror the handler too (codex P2, PR #26): the stable
     // payload.approvalType discriminator first — this job reads the FULL
     // approval record, so the field is directly available — then the
@@ -213,8 +223,16 @@ export async function runApprovalsReminder(
     // the whole table first, title only as a separate second pass — so config
     // row ordering can never let a broad title rule steal a keyed card.
     let destinationChannelId =
+      kindDestinationChannelId ??
       matchChannelByExactKey(fleetConfig.approvalsChannelsByType?.[companyId], reminderRoutingKey) ??
       matchChannelByType(fleetConfig.approvalsChannelsByType?.[companyId], [title]);
+    // True only when neither the kind map, the legacy ladder, nor co-location
+    // resolves a destination below — mirrors handleApprovalCreated's
+    // `unrouted` (fleet issue #687). Reminders are the backstop for a card the
+    // operator missed, so a silent reminder-time fallback defeats the whole
+    // "silent fallback abolished" guarantee just as badly as a silent
+    // original card would.
+    let unrouted = false;
     if (!destinationChannelId) {
       try {
         const issues = await paperclip.getApprovalIssues(approval.id);
@@ -228,8 +246,17 @@ export async function runApprovalsReminder(
           error: String(err),
         });
       }
+      if (!destinationChannelId) unrouted = true;
     }
     destinationChannelId ??= config.approvalFallbackChannelId ?? config.channels.orphan;
+    if (unrouted) {
+      ctx.logger.warn("approvals-reminder: unrouted — no approvalKind/legacy match and no co-locatable thread, delivering reminder to fallback channel", {
+        approvalId: approval.id,
+        companyId,
+        approvalKind: approval.approvalKind ?? null,
+        destinationChannelId,
+      });
+    }
 
     const embed = buildApprovalReminderEmbed({
       approvalId: approval.id,
@@ -254,6 +281,12 @@ export async function runApprovalsReminder(
         messageId,
         ageHours,
       });
+      if (unrouted) {
+        await postUnroutedApprovalWarning(ctx, client, destinationChannelId, approval.approvalKind ?? "", {
+          source: "approvals-reminder",
+          approvalId: approval.id,
+        });
+      }
     } catch (err) {
       // Not marked reminded — the next run retries, which is the whole point.
       ctx.logger.warn("approvals-reminder: failed to post reminder", {

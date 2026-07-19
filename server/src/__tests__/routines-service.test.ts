@@ -2139,4 +2139,145 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       expect(nextState.currentParticipant?.agentId).toBe(editorAgentId);
     });
   });
+
+  describe("routine approvalKind (fleet issue #687)", () => {
+    function routineInput(overrides: Record<string, unknown>) {
+      return {
+        projectId: null,
+        goalId: null,
+        parentIssueId: null,
+        title: "weekly content batch",
+        description: null,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        ...overrides,
+      };
+    }
+
+    // Service-level backstop (assertActorMayChangeApprovalKind) — every write
+    // path flows through this, independent of the route-level 403 guard
+    // (server/src/__tests__/routines-routes.test.ts covers that layer with a
+    // mocked service; these exercise the REAL function body).
+
+    it("service backstop rejects an agent actor setting a non-null approvalKind on create", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      await expect(svc.create(
+        companyId,
+        routineInput({ assigneeAgentId: agentId, approvalKind: "content_batch_approval" }) as never,
+        { agentId },
+      )).rejects.toMatchObject({ status: 403 });
+    });
+
+    it("service backstop allows a board actor to set approvalKind on create", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const routine = await svc.create(
+        companyId,
+        routineInput({ assigneeAgentId: agentId, approvalKind: "content_batch_approval" }) as never,
+        {},
+      );
+      expect(routine.approvalKind).toBe("content_batch_approval");
+    });
+
+    it("service backstop rejects an agent actor changing an existing routine's approvalKind via update", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const routine = await svc.create(
+        companyId,
+        routineInput({ assigneeAgentId: agentId, approvalKind: "content_batch_approval" }) as never,
+        {},
+      );
+      await expect(svc.update(
+        routine.id,
+        { approvalKind: "hire_review" } as never,
+        { agentId },
+      )).rejects.toMatchObject({ status: 403 });
+    });
+
+    it("service backstop allows an agent actor to update OTHER fields when approvalKind is unchanged", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const routine = await svc.create(
+        companyId,
+        routineInput({ assigneeAgentId: agentId, approvalKind: "content_batch_approval" }) as never,
+        {},
+      );
+      const updated = await svc.update(
+        routine.id,
+        { title: "renamed" } as never,
+        { agentId },
+      );
+      expect(updated?.title).toBe("renamed");
+      expect(updated?.approvalKind).toBe("content_batch_approval");
+    });
+
+    it("restores the revision's approvalKind when restoring an older revision, and blocks an agent from restoring a DIFFERENT one", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const routine = await svc.create(
+        companyId,
+        routineInput({ assigneeAgentId: agentId, approvalKind: "content_batch_approval" }) as never,
+        {},
+      );
+      const firstRevisionId = routine.latestRevisionId!;
+
+      await svc.update(routine.id, { approvalKind: "hire_review" } as never, {});
+
+      // Board actor: restore succeeds and approvalKind reverts to the older revision's value.
+      const restored = await svc.restoreRevision(routine.id, firstRevisionId, {});
+      expect(restored.routine.approvalKind).toBe("content_batch_approval");
+
+      // Agent actor: restoring to a revision whose approvalKind differs from
+      // the routine's CURRENT value is blocked — same boundary as executionPolicy.
+      const laterRevisionId = restored.routine.latestRevisionId!;
+      await svc.update(routine.id, { approvalKind: "hire_review" } as never, {});
+      await expect(svc.restoreRevision(routine.id, laterRevisionId, { agentId }))
+        .rejects.toMatchObject({ status: 403 });
+    });
+
+    it("dispatchRoutineRun stamps the routine's approvalKind onto the created execution issue", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      const routine = await svc.create(
+        companyId,
+        routineInput({ assigneeAgentId: agentId, approvalKind: "content_batch_approval" }) as never,
+        {},
+      );
+
+      const run = await svc.runRoutine(routine.id, { source: "manual" });
+      expect(run.status).toBe("issue_created");
+      const issueRow = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, run.linkedIssueId!))
+        .then((rows) => rows[0]!);
+      expect(issueRow.approvalKind).toBe("content_batch_approval");
+    });
+
+    it("dispatchRoutineRun stamps null (not the routine's own parentIssueId's kind) when the routine declares no approvalKind — P0 regression pin", async () => {
+      const { companyId, agentId, svc } = await seedFixture();
+      // An unrelated epic in the SAME company/project tree, given its own
+      // approvalKind — mirrors routine.parentIssueId, which is orthogonal to
+      // the execution chain a dispatch creates.
+      const epicIssue = await issueService(db).create(companyId, {
+        title: "Unrelated epic",
+        status: "todo",
+        priority: "medium",
+        approvalKind: "epic_kind",
+        trustExplicitApprovalKind: true,
+      } as never);
+
+      const routine = await svc.create(
+        companyId,
+        routineInput({ assigneeAgentId: agentId, parentIssueId: epicIssue.id }) as never, // approvalKind omitted (null)
+        {},
+      );
+      expect(routine.approvalKind).toBeNull();
+
+      const run = await svc.runRoutine(routine.id, { source: "manual" });
+      const issueRow = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, run.linkedIssueId!))
+        .then((rows) => rows[0]!);
+      expect(issueRow.approvalKind).toBeNull();
+    });
+  });
 });

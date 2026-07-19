@@ -42,6 +42,10 @@ export interface PaperclipApproval {
   id: string;
   type: string;
   status: string;
+  // Config-carried routing tag, derived server-side from the linked issues'
+  // inherited value (fleet issue #687) — a row-level field, not part of
+  // payload. Same forwarding precedent as payload.approvalType below.
+  approvalKind?: string | null;
   createdAt: string;
   // Refreshed by the server on resubmit (request-changes cycle reuses the row).
   updatedAt?: string;

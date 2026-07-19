@@ -161,6 +161,11 @@ export function routineRoutes(
     if (req.body.executionPolicy !== undefined && req.body.executionPolicy !== null && req.actor.type === "agent") {
       throw forbidden("Agents cannot set a routine execution policy");
     }
+    // approvalKind is config-carried, never agent-composed (fleet issue #687) —
+    // same boundary as executionPolicy above, for the same self-authoring risk.
+    if (req.body.approvalKind !== undefined && req.body.approvalKind !== null && req.actor.type === "agent") {
+      throw forbidden("Agents cannot set a routine approvalKind");
+    }
     const created = await svc.create(companyId, req.body, {
       agentId: req.actor.type === "agent" ? req.actor.agentId : null,
       userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,
@@ -391,6 +396,14 @@ export function routineRoutes(
     if (req.body.executionPolicy !== undefined) {
       if (req.actor.type === "agent") {
         throw forbidden("Agents cannot set a routine execution policy");
+      }
+      await assertBoardCanAssignTasks(req, routine.companyId);
+    }
+    // approvalKind is config-carried, never agent-composed (fleet issue #687) —
+    // same governance boundary as executionPolicy above.
+    if (req.body.approvalKind !== undefined) {
+      if (req.actor.type === "agent") {
+        throw forbidden("Agents cannot set a routine approvalKind");
       }
       await assertBoardCanAssignTasks(req, routine.companyId);
     }

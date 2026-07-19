@@ -87,7 +87,21 @@ export interface DiscordFleetConfig {
   // On no match, falls back to the company's approvalFallbackChannelId
   // (or channels.orphan if absent — see backward-compat note on
   // CompanyConfig.approvalFallbackChannelId).
+  // DEPRECATED (fleet issue #687): superseded by approvalKindChannels below,
+  // which routes on the engine-typed, config-inherited approvalKind instead
+  // of an LLM-composed/regex-matched string. Kept live — tried AFTER
+  // approvalKindChannels — so companies that haven't migrated their config
+  // yet keep routing exactly as before; not a breaking change.
   approvalsChannelsByType?: Record<string, ChannelTypeRoute[]>;
+  // Exact kind -> channelId map per company (fleet issue #687). approvalKind
+  // is engine-typed and config-inherited (declared once on the routine,
+  // stamped down the issue chain) — never LLM-composed — so this is a plain
+  // property lookup, not a regex match. Tried FIRST, ahead of
+  // approvalsChannelsByType and co-location; an approval whose kind has no
+  // entry here (or carries no kind at all) falls through the rest of the
+  // ladder and, if nothing else matches, is delivered to the fallback
+  // channel with a visible "unrouted" warning instead of silently.
+  approvalKindChannels?: Record<string, Record<string, string>>;
   // Per-content-surface routing for executionPolicy review/approval stage
   // cards (fleet issue #631 / PR-0), keyed by companyId. Same semantics as
   // issuesChannelsByType; match candidates in order are the issue's
