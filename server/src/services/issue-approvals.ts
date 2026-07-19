@@ -40,6 +40,34 @@ export function issueApprovalService(db: Db) {
     return { issue, approval };
   }
 
+  // Keeps approvals.approvalKind consistent at every point an issue gets
+  // linked to an approval, not just at creation (codex P2 on fleet issue
+  // #687): routes/approvals.ts's create-time resolveApprovalKindFromLinkedIssues
+  // only covers issueIds passed at creation — POST /issues/:id/approvals
+  // (link, below) and the hire_agent flow (routes/agents.ts) both link
+  // issues to an approval through THIS service without ever going through
+  // that check, which could otherwise leave a stale/null approvalKind on an
+  // approval that's since been linked to a kind-bearing issue (silently
+  // misrouting reminders and any future re-render). One rule, computed once
+  // here so link() and linkManyForApproval() can't diverge: the approval's
+  // current kind plus every linked issue's kind must reduce to at most one
+  // distinct non-null value — conflicting kinds reject the link loudly
+  // rather than silently keeping a stale value.
+  function pickConsistentApprovalKind(
+    currentApprovalKind: string | null,
+    issueApprovalKinds: Array<string | null>,
+  ): string | null {
+    const kinds = new Set(
+      [currentApprovalKind, ...issueApprovalKinds].filter((kind): kind is string => Boolean(kind)),
+    );
+    if (kinds.size > 1) {
+      throw unprocessable("Linking this issue would make the approval's approvalKind inconsistent", {
+        kinds: [...kinds],
+      });
+    }
+    return kinds.size === 1 ? [...kinds][0]! : null;
+  }
+
   return {
     listApprovalsForIssue: async (issueId: string) => {
       const issue = await getIssue(issueId);
@@ -105,7 +133,15 @@ export function issueApprovalService(db: Db) {
     },
 
     link: async (issueId: string, approvalId: string, actor?: LinkActor) => {
-      const { issue } = await assertIssueAndApprovalSameCompany(issueId, approvalId);
+      const { issue, approval } = await assertIssueAndApprovalSameCompany(issueId, approvalId);
+
+      const nextApprovalKind = pickConsistentApprovalKind(approval.approvalKind, [issue.approvalKind]);
+      if (nextApprovalKind !== approval.approvalKind) {
+        await db
+          .update(approvals)
+          .set({ approvalKind: nextApprovalKind, updatedAt: new Date() })
+          .where(eq(approvals.id, approvalId));
+      }
 
       await db
         .insert(issueApprovals)
@@ -143,6 +179,7 @@ export function issueApprovalService(db: Db) {
         .select({
           id: issues.id,
           companyId: issues.companyId,
+          approvalKind: issues.approvalKind,
         })
         .from(issues)
         .where(inArray(issues.id, uniqueIssueIds));
@@ -155,6 +192,17 @@ export function issueApprovalService(db: Db) {
         if (row.companyId !== approval.companyId) {
           throw unprocessable("Issue and approval must belong to the same company");
         }
+      }
+
+      const nextApprovalKind = pickConsistentApprovalKind(
+        approval.approvalKind,
+        rows.map((row) => row.approvalKind),
+      );
+      if (nextApprovalKind !== approval.approvalKind) {
+        await db
+          .update(approvals)
+          .set({ approvalKind: nextApprovalKind, updatedAt: new Date() })
+          .where(eq(approvals.id, approvalId));
       }
 
       await db
