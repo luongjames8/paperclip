@@ -252,6 +252,10 @@ describe.sequential("agent skill routes", () => {
     mockAdapter.syncSkills.mockReset();
     mockSyncInstructionsBundleConfigFromFilePath.mockImplementation((_agent, config) => config);
     mockGetTelemetryClient.mockReturnValue({ track: vi.fn() });
+    // linkManyForApproval now returns { approvalKind } (fleet issue #687) —
+    // the route destructures it, so an unconfigured vi.fn() (undefined)
+    // would throw on any hire-with-sourceIssueIds test.
+    mockIssueApprovalService.linkManyForApproval.mockResolvedValue({ approvalKind: null });
     let persistedAgent: Record<string, unknown> | null = null;
     mockAgentService.resolveByReference.mockResolvedValue({
       ambiguous: false,

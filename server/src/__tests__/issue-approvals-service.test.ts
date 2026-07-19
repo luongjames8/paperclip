@@ -172,4 +172,40 @@ describeEmbeddedPostgres("issueApprovalService approvalKind consistency (fleet i
     const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
     expect(row!.approvalKind).toBe("hire_review");
   });
+
+  // codex P2 round 3 (both findings pin one comprehensive pass, not two
+  // more reactive patches): linkManyForApproval must hand its resolved kind
+  // back to callers that already captured their own approval object before
+  // calling it (routes/agents.ts's hire flow), and every approval/issue
+  // listing this service exposes must actually project approvalKind.
+
+  it("linkManyForApproval(): returns the resolved approvalKind so a caller holding a stale local approval object can refresh it", async () => {
+    const { companyId, approvalId } = await seed();
+    const issueA = randomUUID();
+    await db.insert(issues).values({
+      id: issueA, companyId, title: "A", status: "todo", priority: "medium", approvalKind: "content_batch_approval",
+    });
+    const result = await svc.linkManyForApproval(approvalId, [issueA]);
+    expect(result).toEqual({ approvalKind: "content_batch_approval" });
+  });
+
+  it("linkManyForApproval(): with zero issueIds returns the approval's CURRENT approvalKind, not null", async () => {
+    const { approvalId } = await seed({ approvalApprovalKind: "content_batch_approval" });
+    const result = await svc.linkManyForApproval(approvalId, []);
+    expect(result).toEqual({ approvalKind: "content_batch_approval" });
+  });
+
+  it("listApprovalsForIssue(): includes approvalKind in each returned approval", async () => {
+    const { issueId, approvalId } = await seed({ issueApprovalKind: "content_batch_approval" });
+    await svc.link(issueId, approvalId);
+    const [approval] = await svc.listApprovalsForIssue(issueId);
+    expect(approval).toMatchObject({ id: approvalId, approvalKind: "content_batch_approval" });
+  });
+
+  it("listIssuesForApproval(): includes approvalKind in each returned issue", async () => {
+    const { issueId, approvalId } = await seed({ issueApprovalKind: "content_batch_approval" });
+    await svc.link(issueId, approvalId);
+    const [issue] = await svc.listIssuesForApproval(approvalId);
+    expect(issue).toMatchObject({ id: issueId, approvalKind: "content_batch_approval" });
+  });
 });

@@ -94,6 +94,7 @@ export function issueApprovalService(db: Db) {
           requestedByAgentId: approvals.requestedByAgentId,
           requestedByUserId: approvals.requestedByUserId,
           status: approvals.status,
+          approvalKind: approvals.approvalKind,
           payload: approvals.payload,
           decisionNote: approvals.decisionNote,
           decidedByUserId: approvals.decidedByUserId,
@@ -133,6 +134,7 @@ export function issueApprovalService(db: Db) {
           identifier: issues.identifier,
           requestDepth: issues.requestDepth,
           billingCode: issues.billingCode,
+          approvalKind: issues.approvalKind,
           startedAt: issues.startedAt,
           completedAt: issues.completedAt,
           cancelledAt: issues.cancelledAt,
@@ -194,11 +196,21 @@ export function issueApprovalService(db: Db) {
       }
     },
 
-    linkManyForApproval: async (approvalId: string, issueIds: string[], actor?: LinkActor) => {
-      if (issueIds.length === 0) return;
-
+    // Returns the approval's resolved approvalKind after linking (codex P2
+    // round 3): a caller that already captured its OWN `approval` object
+    // before calling this (routes/agents.ts's hire_agent flow creates the
+    // approval directly via approvalsSvc.create, with no approvalKind of its
+    // own, THEN links sourceIssueIds here) would otherwise log/respond with
+    // the stale pre-link value — this ships the derived one back so the
+    // caller can update what it already holds instead of re-querying.
+    linkManyForApproval: async (
+      approvalId: string,
+      issueIds: string[],
+      actor?: LinkActor,
+    ): Promise<{ approvalKind: string | null }> => {
       const approval = await getApproval(approvalId);
       if (!approval) throw notFound("Approval not found");
+      if (issueIds.length === 0) return { approvalKind: approval.approvalKind };
 
       const uniqueIssueIds = Array.from(new Set(issueIds));
       const rows = await db
@@ -243,6 +255,8 @@ export function issueApprovalService(db: Db) {
           })),
         )
         .onConflictDoNothing();
+
+      return { approvalKind: nextApprovalKind };
     },
   };
 }
