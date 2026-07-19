@@ -68,6 +68,19 @@ export function issueApprovalService(db: Db) {
     return kinds.size === 1 ? [...kinds][0]! : null;
   }
 
+  // unlink's counterpart (codex P2 round 2): a link can never fail — it's a
+  // cleanup operation, not an authoring act — so this NEVER throws, unlike
+  // pickConsistentApprovalKind above. Recomputes purely from what remains
+  // linked after the removal: exactly one distinct non-null kind wins;
+  // zero (nothing left) or more than one (a preexisting anomaly, which
+  // should be unreachable since every link() only ever leaves consistent
+  // state, but unlink must not get stuck on it) both collapse to null
+  // rather than leaving the just-removed issue's kind stranded on the row.
+  function deriveApprovalKindFromRemainingIssues(issueApprovalKinds: Array<string | null>): string | null {
+    const kinds = new Set(issueApprovalKinds.filter((kind): kind is string => Boolean(kind)));
+    return kinds.size === 1 ? [...kinds][0]! : null;
+  }
+
   return {
     listApprovalsForIssue: async (issueId: string) => {
       const issue = await getIssue(issueId);
@@ -162,10 +175,23 @@ export function issueApprovalService(db: Db) {
     },
 
     unlink: async (issueId: string, approvalId: string) => {
-      await assertIssueAndApprovalSameCompany(issueId, approvalId);
+      const { approval } = await assertIssueAndApprovalSameCompany(issueId, approvalId);
       await db
         .delete(issueApprovals)
         .where(and(eq(issueApprovals.issueId, issueId), eq(issueApprovals.approvalId, approvalId)));
+
+      const remaining = await db
+        .select({ approvalKind: issues.approvalKind })
+        .from(issueApprovals)
+        .innerJoin(issues, eq(issueApprovals.issueId, issues.id))
+        .where(eq(issueApprovals.approvalId, approvalId));
+      const nextApprovalKind = deriveApprovalKindFromRemainingIssues(remaining.map((row) => row.approvalKind));
+      if (nextApprovalKind !== approval.approvalKind) {
+        await db
+          .update(approvals)
+          .set({ approvalKind: nextApprovalKind, updatedAt: new Date() })
+          .where(eq(approvals.id, approvalId));
+      }
     },
 
     linkManyForApproval: async (approvalId: string, issueIds: string[], actor?: LinkActor) => {

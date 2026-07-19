@@ -137,4 +137,39 @@ describeEmbeddedPostgres("issueApprovalService approvalKind consistency (fleet i
     const links = await db.select().from(issueApprovals).where(eq(issueApprovals.approvalId, approvalId));
     expect(links).toHaveLength(0);
   });
+
+  it("unlink(): clears approvalKind when the last kind-bearing issue is unlinked", async () => {
+    const { issueId, approvalId } = await seed({ issueApprovalKind: "content_batch_approval" });
+    await svc.link(issueId, approvalId);
+    await svc.unlink(issueId, approvalId);
+    const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    expect(row!.approvalKind).toBeNull();
+  });
+
+  it("unlink(): recomputes to the remaining issue's kind, not left stale", async () => {
+    const { companyId, issueId: issueA, approvalId } = await seed({ issueApprovalKind: "content_batch_approval" });
+    const issueB = randomUUID();
+    await db.insert(issues).values({
+      id: issueB, companyId, title: "B", status: "todo", priority: "medium", approvalKind: "content_batch_approval",
+    });
+    await svc.linkManyForApproval(approvalId, [issueA, issueB]);
+    await svc.unlink(issueA, approvalId);
+    // issueB is still linked and carries the same kind — approvalKind survives.
+    const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    expect(row!.approvalKind).toBe("content_batch_approval");
+  });
+
+  it("unlink(): a previously-cleared approval can now link to a DIFFERENT kind — no stale-value 422", async () => {
+    const { companyId, issueId, approvalId } = await seed({ issueApprovalKind: "content_batch_approval" });
+    await svc.link(issueId, approvalId);
+    await svc.unlink(issueId, approvalId);
+
+    const otherIssue = randomUUID();
+    await db.insert(issues).values({
+      id: otherIssue, companyId, title: "Other", status: "todo", priority: "medium", approvalKind: "hire_review",
+    });
+    await expect(svc.link(otherIssue, approvalId)).resolves.toBeTruthy();
+    const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    expect(row!.approvalKind).toBe("hire_review");
+  });
 });
