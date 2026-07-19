@@ -3336,6 +3336,30 @@ describeEmbeddedPostgres("issueService.create approvalKind inheritance (fleet is
 
     expect(executionIssue.approvalKind).toBeNull();
   });
+
+  // codex P2 round 6: updateIssueSchema omits approvalKind at the HTTP layer,
+  // but issueService.update is also reachable directly — the plugin-host
+  // issues.update SDK surface spreads an untyped patch object with no schema
+  // in front of it. Pin the choke-point fix: update() must silently discard
+  // approvalKind regardless of caller, not just the HTTP route.
+  it("update(): approvalKind is immutable — a direct service-layer patch is silently ignored", async () => {
+    const companyId = await makeCompany();
+    const issue = await svc.create(companyId, {
+      title: "Weekly content batch",
+      status: "todo",
+      priority: "medium",
+      approvalKind: "content_batch_approval",
+      trustExplicitApprovalKind: true,
+    });
+
+    const updated = await svc.update(issue.id, {
+      title: "renamed",
+      approvalKind: "sneaky_replacement_kind",
+    } as never);
+
+    expect(updated?.title).toBe("renamed");
+    expect(updated?.approvalKind).toBe("content_batch_approval");
+  });
 });
 
 describeEmbeddedPostgres("issueService blockers and dependency wake readiness", () => {

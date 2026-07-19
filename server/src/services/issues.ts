@@ -6198,6 +6198,14 @@ export function issueService(db: Db) {
         blockedByIssueIds,
         actorAgentId,
         actorUserId,
+        // Immutable after creation (fleet issue #687, codex P2 round 6):
+        // updateIssueSchema already omits this at the HTTP layer, but
+        // issueService.update is also reachable directly (plugin-host-services.ts's
+        // issues.update SDK surface spreads an untyped patch object with no
+        // schema in front of it) — stripped here, the ONE choke point every
+        // update call routes through, so it can never be mutated post-creation
+        // regardless of caller.
+        approvalKind: _discardedApprovalKind,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
