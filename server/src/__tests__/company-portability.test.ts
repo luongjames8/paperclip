@@ -143,6 +143,7 @@ describe("company portability", () => {
       secretKeys: new Set<string>(),
     }));
     issueSvc.listComments.mockResolvedValue([]);
+    accessSvc.listActiveUserMemberships.mockResolvedValue([]);
     issueSvc.addComment.mockResolvedValue({
       id: "comment-imported",
       body: "Imported comment",
@@ -2133,6 +2134,708 @@ describe("company portability", () => {
     expect(issueSvc.create).not.toHaveBeenCalled();
   });
 
+  it("exports routine execution policies with slug-mapped participants", async () => {
+    const portability = companyPortabilityService({} as any);
+    const defaultAgents = await agentSvc.list();
+    agentSvc.list.mockResolvedValue([
+      ...defaultAgents,
+      { ...defaultAgents[0], id: "agent-2", name: "EditorBot", role: "editor" },
+    ]);
+    routineSvc.list.mockResolvedValue([
+      {
+        id: "routine-1",
+        companyId: "company-1",
+        projectId: null,
+        goalId: null,
+        parentIssueId: null,
+        title: "Weekly Article",
+        description: "Draft then editor QC",
+        assigneeAgentId: "agent-1",
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        executionPolicy: {
+          mode: "normal",
+          stages: [{
+            id: "11111111-1111-4111-8111-111111111111",
+            type: "review",
+            approvalsNeeded: 1,
+            participants: [{ id: "22222222-2222-4222-8222-222222222222", type: "agent", agentId: "agent-2", userId: null }],
+          }],
+        },
+        createdByAgentId: null,
+        createdByUserId: null,
+        updatedByAgentId: null,
+        updatedByUserId: null,
+        lastTriggeredAt: null,
+        lastEnqueuedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        triggers: [],
+        lastRun: null,
+        activeIssue: null,
+      },
+    ]);
+
+    const exported = await portability.exportBundle("company-1", {
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+    });
+
+    const extension = asTextFile(exported.files[".paperclip.yaml"]);
+    expect(extension).toContain("executionPolicy:");
+    expect(extension).toContain('agentSlug: "editorbot"');
+    expect(extension).not.toContain("agent-2");
+    expect(exported.manifest.issues).toEqual([
+      expect.objectContaining({
+        slug: "weekly-article",
+        recurring: true,
+        routine: expect.objectContaining({
+          executionPolicy: {
+            stages: [{
+              type: "review",
+              participants: [{ type: "agent", agentSlug: "editorbot" }],
+            }],
+          },
+        }),
+      }),
+    ]);
+  });
+
+  it("imports routine execution policies by remapping participant slugs to created agents", async () => {
+    const portability = companyPortabilityService({} as any);
+    companySvc.create.mockResolvedValue({ id: "company-imported", name: "Imported Paperclip" });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+    let createdAgentSeq = 0;
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: `agent-imported-${++createdAgentSeq}-${String(input.name).toLowerCase()}`,
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/writerbot/AGENTS.md": ["---", 'name: "WriterBot"', "---", "", "You write.", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      "agents/editorbot/AGENTS.md": ["---", 'name: "EditorBot"', "---", "", "You edit.", ""].join("\n"),
+      "tasks/weekly-article/TASK.md": [
+        "---",
+        'name: "Weekly Article"',
+        'project: "launch"',
+        'assignee: "writerbot"',
+        "recurring: true",
+        "---",
+        "",
+        "Draft then editor QC.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  weekly-article:",
+        "    executionPolicy:",
+        "      stages:",
+        "        - type: review",
+        "          participants:",
+        '            - type: agent',
+        '              agentSlug: "editorbot"',
+        "",
+      ].join("\n"),
+    };
+
+    await portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1");
+
+    const createCall = routineSvc.create.mock.calls.find(
+      (call: unknown[]) => (call[1] as { title?: string }).title === "Weekly Article",
+    );
+    expect(createCall).toBeTruthy();
+    const policy = (createCall![1] as { executionPolicy?: { mode: string; stages: Array<{ type: string; participants: Array<{ type: string; agentId?: string }> }> } }).executionPolicy;
+    expect(policy?.mode).toBe("normal");
+    expect(policy?.stages).toHaveLength(1);
+    expect(policy?.stages[0]?.type).toBe("review");
+    expect(policy?.stages[0]?.participants[0]?.type).toBe("agent");
+    expect(policy?.stages[0]?.participants[0]?.agentId).toMatch(/^agent-imported-\d+-editorbot$/);
+  });
+
+  // The full non-valid input space for a portable executionPolicy must reach the
+  // resolve-time strict gate and fail loudly. Empty shapes are the treacherous ones:
+  // the routine-entry presence heuristic (stripEmptyValues) would otherwise collapse
+  // an entry whose only content is an empty policy, vanishing the gate silently.
+  for (const [label, policyYaml] of [
+    ["an empty object", ["    executionPolicy: {}"]],
+    ["an empty array", ["    executionPolicy: []"]],
+    ["an object with empty stages", ["    executionPolicy:", "      stages: []"]],
+    ["a non-empty array", ["    executionPolicy:", "      - type: review"]],
+  ] as const) {
+    it(`fails the import loudly when a portable policy is ${label}`, async () => {
+      const portability = companyPortabilityService({} as any);
+      companySvc.create.mockResolvedValue({ id: "company-imported", name: "Imported Paperclip" });
+      accessSvc.ensureMembership.mockResolvedValue(undefined);
+      agentSvc.list.mockResolvedValue([]);
+      projectSvc.list.mockResolvedValue([]);
+      projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+      agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+        id: "agent-imported",
+        name: input.name,
+        adapterType: input.adapterType,
+        adapterConfig: input.adapterConfig,
+        status: input.status,
+      }));
+
+      const files = {
+        "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+        "agents/writerbot/AGENTS.md": ["---", 'name: "WriterBot"', "---", "", "You write.", ""].join("\n"),
+        "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+        "tasks/weekly-article/TASK.md": [
+          "---",
+          'name: "Weekly Article"',
+          'project: "launch"',
+          'assignee: "writerbot"',
+          "recurring: true",
+          "---",
+          "",
+          "Draft.",
+          "",
+        ].join("\n"),
+        ".paperclip.yaml": [
+          'schema: "paperclip/v1"',
+          "routines:",
+          "  weekly-article:",
+          ...policyYaml,
+          "",
+        ].join("\n"),
+      };
+
+      await expect(portability.importBundle({
+        source: { type: "inline", rootPath: "paperclip-demo", files },
+        include: { company: true, agents: true, projects: true, issues: true, skills: false },
+        target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+        agents: "all",
+        collisionStrategy: "rename",
+      }, "user-1")).rejects.toThrow(/invalid executionPolicy/);
+    });
+  }
+
+  it("fails the import loudly when a portable policy is not an object", async () => {
+    const portability = companyPortabilityService({} as any);
+    companySvc.create.mockResolvedValue({ id: "company-imported", name: "Imported Paperclip" });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/writerbot/AGENTS.md": ["---", 'name: "WriterBot"', "---", "", "You write.", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      "tasks/weekly-article/TASK.md": [
+        "---",
+        'name: "Weekly Article"',
+        'project: "launch"',
+        'assignee: "writerbot"',
+        "recurring: true",
+        "---",
+        "",
+        "Draft.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  weekly-article:",
+        '    executionPolicy: "please review"',
+        "",
+      ].join("\n"),
+    };
+
+    await expect(portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1")).rejects.toThrow(/invalid executionPolicy/);
+  });
+
+  it("fails the import loudly when a portable policy carries unsupported keys", async () => {
+    const portability = companyPortabilityService({} as any);
+    companySvc.create.mockResolvedValue({ id: "company-imported", name: "Imported Paperclip" });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/writerbot/AGENTS.md": ["---", 'name: "WriterBot"', "---", "", "You write.", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      "tasks/weekly-article/TASK.md": [
+        "---",
+        'name: "Weekly Article"',
+        'project: "launch"',
+        'assignee: "writerbot"',
+        "recurring: true",
+        "---",
+        "",
+        "Draft.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  weekly-article:",
+        "    executionPolicy:",
+        "      monitor:",
+        '        nextCheckAt: "2027-01-01T00:00:00.000Z"',
+        "      stages:",
+        "        - type: review",
+        "          participants:",
+        '            - type: agent',
+        '              agentSlug: "writerbot"',
+        "",
+      ].join("\n"),
+    };
+
+    await expect(portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1")).rejects.toThrow(/invalid executionPolicy/);
+  });
+
+  it("fails the import loudly when a policy participant slug is not part of the package", async () => {
+    const portability = companyPortabilityService({} as any);
+    companySvc.create.mockResolvedValue({ id: "company-imported", name: "Imported Paperclip" });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/writerbot/AGENTS.md": ["---", 'name: "WriterBot"', "---", "", "You write.", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      "tasks/weekly-article/TASK.md": [
+        "---",
+        'name: "Weekly Article"',
+        'project: "launch"',
+        'assignee: "writerbot"',
+        "recurring: true",
+        "---",
+        "",
+        "Draft.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  weekly-article:",
+        "    executionPolicy:",
+        "      stages:",
+        "        - type: review",
+        "          participants:",
+        '            - type: agent',
+        '              agentSlug: "ghost"',
+        "",
+      ].join("\n"),
+    };
+
+    await expect(portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1")).rejects.toThrow(/referencing agent "ghost"/);
+
+    // The rejection must come from the PREVIEW gate, before any mutation — a
+    // half-imported company is the failure mode this guards against.
+    expect(companySvc.create).not.toHaveBeenCalled();
+    expect(agentSvc.create).not.toHaveBeenCalled();
+    expect(routineSvc.create).not.toHaveBeenCalled();
+  });
+
+  it("fails the import loudly when a policy participant is a user and the target is a new company (codex P2: preview could not verify membership before the company exists)", async () => {
+    const portability = companyPortabilityService({} as any);
+    companySvc.create.mockResolvedValue({ id: "company-imported", name: "Imported Paperclip" });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/writerbot/AGENTS.md": ["---", 'name: "WriterBot"', "---", "", "You write.", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      "tasks/weekly-article/TASK.md": [
+        "---",
+        'name: "Weekly Article"',
+        'project: "launch"',
+        'assignee: "writerbot"',
+        "recurring: true",
+        "---",
+        "",
+        "Draft.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  weekly-article:",
+        "    executionPolicy:",
+        "      stages:",
+        "        - type: review",
+        "          participants:",
+        '            - type: user',
+        '              userId: "user-42"',
+        "",
+      ].join("\n"),
+    };
+
+    await expect(portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1")).rejects.toThrow(/cannot verify company membership before the company exists/);
+
+    expect(companySvc.create).not.toHaveBeenCalled();
+    expect(agentSvc.create).not.toHaveBeenCalled();
+    expect(routineSvc.create).not.toHaveBeenCalled();
+  });
+
+  it("fails the import loudly when a policy participant is a user who is not an active member of the target company (codex P2: non-member userIds died at routine-create, mid-import)", async () => {
+    const portability = companyPortabilityService({} as any);
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+    // Global beforeEach default: accessSvc.listActiveUserMemberships resolves to [] —
+    // no members, so "user-42" is not active.
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/writerbot/AGENTS.md": ["---", 'name: "WriterBot"', "---", "", "You write.", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      "tasks/weekly-article/TASK.md": [
+        "---",
+        'name: "Weekly Article"',
+        'project: "launch"',
+        'assignee: "writerbot"',
+        "recurring: true",
+        "---",
+        "",
+        "Draft.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  weekly-article:",
+        "    executionPolicy:",
+        "      stages:",
+        "        - type: review",
+        "          participants:",
+        '            - type: user',
+        '              userId: "user-42"',
+        "",
+      ].join("\n"),
+    };
+
+    await expect(portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "existing_company", companyId: "company-1" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1")).rejects.toThrow(/referencing user "user-42" that is not an active member/);
+
+    expect(agentSvc.create).not.toHaveBeenCalled();
+    expect(routineSvc.create).not.toHaveBeenCalled();
+  });
+
+  it("imports routine execution policies with a user participant who is an active target-company member", async () => {
+    const portability = companyPortabilityService({} as any);
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+    accessSvc.listActiveUserMemberships.mockResolvedValue([
+      { id: "membership-1", companyId: "company-1", principalType: "user", principalId: "user-42", status: "active" },
+    ]);
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/writerbot/AGENTS.md": ["---", 'name: "WriterBot"', "---", "", "You write.", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      "tasks/weekly-article/TASK.md": [
+        "---",
+        'name: "Weekly Article"',
+        'project: "launch"',
+        'assignee: "writerbot"',
+        "recurring: true",
+        "---",
+        "",
+        "Draft.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  weekly-article:",
+        "    executionPolicy:",
+        "      stages:",
+        "        - type: review",
+        "          participants:",
+        '            - type: user',
+        '              userId: "user-42"',
+        "",
+      ].join("\n"),
+    };
+
+    await portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "existing_company", companyId: "company-1" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1");
+
+    const createCall = routineSvc.create.mock.calls.find(
+      (call: unknown[]) => (call[1] as { title?: string }).title === "Weekly Article",
+    );
+    expect(createCall).toBeTruthy();
+    const policy = (createCall![1] as { executionPolicy?: { stages: Array<{ participants: Array<{ type: string; userId?: string }> }> } }).executionPolicy;
+    expect(policy?.stages[0]?.participants[0]).toEqual({ type: "user", userId: "user-42" });
+  });
+
+  it("fails the import loudly when a policy participant's existing agent is not assignable (codex P2: pending_approval/terminated agents pass preview, fail create)", async () => {
+    const portability = companyPortabilityService({} as any);
+    agentSvc.list.mockResolvedValue([
+      {
+        id: "agent-writerbot", name: "WriterBot", status: "pending_approval", role: "engineer",
+        adapterType: "claude_local", adapterConfig: {}, runtimeConfig: {}, budgetMonthlyCents: 0, permissions: {}, metadata: null,
+      },
+    ]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/assignerbot/AGENTS.md": ["---", 'name: "AssignerBot"', "---", "", "You assign.", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      "tasks/weekly-article/TASK.md": [
+        "---",
+        'name: "Weekly Article"',
+        'project: "launch"',
+        'assignee: "assignerbot"',
+        "recurring: true",
+        "---",
+        "",
+        "Draft.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  weekly-article:",
+        "    executionPolicy:",
+        "      stages:",
+        "        - type: review",
+        "          participants:",
+        '            - type: agent',
+        '              agentSlug: "writerbot"',
+        "",
+      ].join("\n"),
+    };
+
+    await expect(portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "existing_company", companyId: "company-1" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1")).rejects.toThrow(/referencing agent "writerbot" that is not part of this import or the target company/);
+
+    expect(agentSvc.create).not.toHaveBeenCalled();
+    expect(routineSvc.create).not.toHaveBeenCalled();
+  });
+
+  it("imports routine execution policies with an existing assignable agent participant not part of the import package", async () => {
+    const portability = companyPortabilityService({} as any);
+    agentSvc.list.mockResolvedValue([
+      {
+        id: "agent-writerbot", name: "WriterBot", status: "idle", role: "engineer",
+        adapterType: "claude_local", adapterConfig: {}, runtimeConfig: {}, budgetMonthlyCents: 0, permissions: {}, metadata: null,
+      },
+    ]);
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.create.mockResolvedValue({ id: "project-created", name: "Launch", urlKey: "launch" });
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-imported",
+      name: input.name,
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    const files = {
+      "COMPANY.md": ["---", 'schema: "agentcompanies/v1"', 'name: "Imported Paperclip"', "---", ""].join("\n"),
+      "agents/assignerbot/AGENTS.md": ["---", 'name: "AssignerBot"', "---", "", "You assign.", ""].join("\n"),
+      "projects/launch/PROJECT.md": ["---", 'name: "Launch"', "---", ""].join("\n"),
+      "tasks/weekly-article/TASK.md": [
+        "---",
+        'name: "Weekly Article"',
+        'project: "launch"',
+        'assignee: "assignerbot"',
+        "recurring: true",
+        "---",
+        "",
+        "Draft.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  weekly-article:",
+        "    executionPolicy:",
+        "      stages:",
+        "        - type: review",
+        "          participants:",
+        '            - type: agent',
+        '              agentSlug: "writerbot"',
+        "",
+      ].join("\n"),
+    };
+
+    await portability.importBundle({
+      source: { type: "inline", rootPath: "paperclip-demo", files },
+      include: { company: true, agents: true, projects: true, issues: true, skills: false },
+      target: { mode: "existing_company", companyId: "company-1" },
+      agents: "all",
+      collisionStrategy: "rename",
+    }, "user-1");
+
+    const createCall = routineSvc.create.mock.calls.find(
+      (call: unknown[]) => (call[1] as { title?: string }).title === "Weekly Article",
+    );
+    expect(createCall).toBeTruthy();
+    const policy = (createCall![1] as { executionPolicy?: { stages: Array<{ participants: Array<{ type: string; agentId?: string }> }> } }).executionPolicy;
+    expect(policy?.stages[0]?.participants[0]).toEqual({ type: "agent", agentId: "agent-writerbot" });
+  });
+
+  it("fails the export loudly when a policy participant's agent is not included", async () => {
+    const portability = companyPortabilityService({} as any);
+    const defaultAgents = await agentSvc.list();
+    agentSvc.list.mockResolvedValue([
+      ...defaultAgents,
+      { ...defaultAgents[0], id: "agent-2", name: "EditorBot", role: "editor" },
+    ]);
+    routineSvc.list.mockResolvedValue([
+      {
+        id: "routine-1",
+        companyId: "company-1",
+        projectId: null,
+        goalId: null,
+        parentIssueId: null,
+        title: "Weekly Article",
+        description: "Draft then editor QC",
+        assigneeAgentId: "agent-1",
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        executionPolicy: {
+          mode: "normal",
+          stages: [{
+            id: "11111111-1111-4111-8111-111111111111",
+            type: "review",
+            approvalsNeeded: 1,
+            participants: [{ id: "22222222-2222-4222-8222-222222222222", type: "agent", agentId: "agent-2", userId: null }],
+          }],
+        },
+        createdByAgentId: null,
+        createdByUserId: null,
+        updatedByAgentId: null,
+        updatedByUserId: null,
+        lastTriggeredAt: null,
+        lastEnqueuedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        triggers: [],
+        lastRun: null,
+        activeIssue: null,
+      },
+    ]);
+
+    // agents excluded from the export -> the policy participant cannot be slug-mapped
+    // -> the export must fail instead of emitting a bundle its own importer rejects.
+    await expect(portability.exportBundle("company-1", {
+      include: { company: true, agents: false, projects: true, issues: true, skills: false },
+    })).rejects.toThrow(/not included in this export/);
+  });
+
   it("migrates legacy schedule.recurrence imports into routine triggers", async () => {
     const portability = companyPortabilityService({} as any);
 
@@ -3485,6 +4188,51 @@ describe("company portability", () => {
 
     expect(issueSvc.create).not.toHaveBeenCalled();
     expect(routineSvc.createTrigger).not.toHaveBeenCalled();
+  });
+
+  it("rejects a custom executionPolicy on agent-safe import (agent_safe imports create routines with agentId: null, bypassing the board-only executionPolicy actor guard otherwise)", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    await expect(portability.importBundle({
+      source: {
+        type: "inline",
+        files: {
+          "COMPANY.md": "---\nname: Import\nincludes:\n  - agents/ceo/AGENTS.md\n  - projects/app/PROJECT.md\n  - tasks/review/TASK.md\n---\n",
+          "agents/ceo/AGENTS.md": "---\nname: CEO\nslug: ceo\nrole: ceo\n---\n\nLead.",
+          "projects/app/PROJECT.md": "---\nname: App\nslug: app\n---\n\n# App\n",
+          "tasks/review/TASK.md": "---\nname: Review\nslug: review\nproject: app\nassignee: ceo\nrecurring: true\n---\n\nReview.",
+          ".paperclip.yaml": [
+            "schema: paperclip/v1",
+            "routines:",
+            "  review:",
+            "    executionPolicy:",
+            "      stages:",
+            "        - type: review",
+            "          participants:",
+            "            - type: agent",
+            "              agentSlug: ceo",
+            "",
+          ].join("\n"),
+        },
+      },
+      include: {
+        company: false,
+        agents: true,
+        projects: true,
+        issues: true,
+      },
+      target: {
+        mode: "existing_company",
+        companyId: "company-1",
+      },
+      collisionStrategy: "rename",
+    }, "user-1", {
+      mode: "agent_safe",
+      sourceCompanyId: "company-1",
+    })).rejects.toThrow("Safe import does not allow routine task review a custom executionPolicy.");
+
+    expect(agentSvc.create).not.toHaveBeenCalled();
+    expect(routineSvc.create).not.toHaveBeenCalled();
   });
 
   it("imports new agents as active while preserving future hire approval settings", async () => {
