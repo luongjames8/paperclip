@@ -65,7 +65,7 @@ describe("GH #706: productive-continuation chain cap", () => {
     // each requeue hands the incremented counter to the next link. This is the
     // regression test for the outage — without the cap it never leaves the loop.
     let chainLength = readProductiveContinuationChainLength({});
-    let wakes = 1;
+    let wakes = 0;
     let decision = decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength });
     while (decision === "requeue" && wakes < 10_000) {
       wakes += 1;
@@ -76,6 +76,28 @@ describe("GH #706: productive-continuation chain cap", () => {
     expect(wakes).toBe(CAP);
   });
 
+  it("a transient failure mid-chain does not reset the count", () => {
+    // scheduleBoundedRetryForRun copies the context forward but rewrites
+    // retryReason to "transient_failure", so the retried link is NOT an
+    // isRepeatedProductiveContinuationRecovery. The counter still rides along,
+    // and it is the counter the cap reads — otherwise one transient failure
+    // every CAP-1 wakes would slip the ceiling forever (codex P1 on PR #40).
+    const midChainContext = { productiveContinuationChain: CAP };
+    const transientRetryContext = {
+      ...midChainContext,
+      retryReason: "transient_failure",
+      wakeReason: "transient_failure_retry",
+    };
+    expect(readProductiveContinuationChainLength(transientRetryContext)).toBe(CAP);
+    expect(
+      decideProductiveContinuationRecovery({
+        repeated: false,
+        exempted: false,
+        chainLength: readProductiveContinuationChainLength(transientRetryContext),
+      }),
+    ).toBe("escalate_chain_exhausted");
+  });
+
   it("the shipped default cap is bounded and at least the sibling path's 2", () => {
     expect(CAP).toBeGreaterThanOrEqual(2);
     expect(Number.isFinite(CAP)).toBe(true);
@@ -83,12 +105,12 @@ describe("GH #706: productive-continuation chain cap", () => {
 });
 
 describe("GH #706: chain length carried on the wake context", () => {
-  it("treats a run with no counter as the start of a chain", () => {
+  it("treats a run with no counter as not yet in a chain", () => {
     // Also the state of every chain already in flight when this deploys: they
     // simply restart their count once rather than being escalated on sight.
-    expect(readProductiveContinuationChainLength({})).toBe(1);
-    expect(readProductiveContinuationChainLength(null)).toBe(1);
-    expect(readProductiveContinuationChainLength({ productiveContinuationChain: 0 })).toBe(1);
+    expect(readProductiveContinuationChainLength({})).toBe(0);
+    expect(readProductiveContinuationChainLength(null)).toBe(0);
+    expect(readProductiveContinuationChainLength({ productiveContinuationChain: 0 })).toBe(0);
   });
 
   it("reads the counter the previous link handed forward", () => {
@@ -97,7 +119,7 @@ describe("GH #706: chain length carried on the wake context", () => {
 
   it("ignores a junk counter rather than trusting it", () => {
     for (const junk of ["nonsense", -3, Number.NaN, Number.POSITIVE_INFINITY, { nested: 1 }]) {
-      expect(readProductiveContinuationChainLength({ productiveContinuationChain: junk })).toBe(1);
+      expect(readProductiveContinuationChainLength({ productiveContinuationChain: junk })).toBe(0);
     }
   });
 });

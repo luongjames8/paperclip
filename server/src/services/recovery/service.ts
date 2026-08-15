@@ -132,13 +132,21 @@ export const STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN = Math.max(
 // on the run_liveness_continuation path.
 const PRODUCTIVE_CONTINUATION_CHAIN_KEY = "productiveContinuationChain";
 
-// How long the chain the given run belongs to already is, counting that run.
-// A run that carries no counter is the start of a chain (length 1) — which is
-// also what every in-flight chain looks like on the deploy that adds this, so
-// those simply restart their count once.
+// How many productive continuation recoveries the chain this run belongs to has
+// already spent. Zero means "not in a chain yet" — a genuinely first
+// continuation, and also every chain in flight on the deploy that adds this, so
+// those restart their count once rather than being escalated on sight.
+//
+// The COUNTER, not the run's retryReason, is what identifies chain membership.
+// scheduleBoundedRetryForRun copies a run's context forward but overwrites
+// retryReason with "transient_failure", so a chain link that failed transiently
+// and then succeeded is not an `isRepeatedProductiveContinuationRecovery` — and
+// reading the length only for those runs let one transient failure per fewer
+// than STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN wakes reset the chain and slip
+// the cap indefinitely (codex P1 on PR #40).
 export function readProductiveContinuationChainLength(contextSnapshot: unknown) {
   const chain = asNumber(parseObject(contextSnapshot)[PRODUCTIVE_CONTINUATION_CHAIN_KEY], 0);
-  return Number.isFinite(chain) && chain > 0 ? Math.floor(chain) : 1;
+  return Number.isFinite(chain) && chain > 0 ? Math.floor(chain) : 0;
 }
 
 export type ProductiveContinuationDecision = "requeue" | "escalate_no_progress" | "escalate_chain_exhausted";
@@ -3244,9 +3252,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         // requeue below carry batch workflows through. GH #706: the chain is
         // counted and capped regardless, because the assignee's own comment is
         // circular evidence and refreshes that window forever.
-        const chainLength = repeatedContinuation
-          ? readProductiveContinuationChainLength(successfulRun.contextSnapshot)
-          : 0;
+        // Read unconditionally: a link that failed transiently and then
+        // succeeded still carries the counter but no longer looks like a
+        // repeated recovery, and gating on that let the chain reset.
+        const chainLength = readProductiveContinuationChainLength(successfulRun.contextSnapshot);
         // Not asked when the chain is already spent: the cap decides on its own,
         // so the exemption lookup would be two queries thrown away.
         const exempted = repeatedContinuation && chainLength < STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN
