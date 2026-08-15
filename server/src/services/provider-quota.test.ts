@@ -115,6 +115,20 @@ describe("GH #706: provider quota/billing is not transient", () => {
     expect(classifyProviderQuotaFailure(mislabelled, NOW)).not.toBeNull();
   });
 
+  it("classifies the Claude allowance phrases the claude-local adapter already parses", () => {
+    // parse.ts persists these as claude_transient_upstream, so if this classifier
+    // misses them the ladder is exhausted and then handed a fresh one forever.
+    for (const text of [
+      "You're out of extra usage. Your limit resets soon.",
+      "Claude usage limit reached",
+      "5-hour limit reached",
+      "weekly limit reached",
+      "usage cap reached",
+    ]) {
+      expect(classifyProviderQuotaFailure(run(text), NOW)).not.toBeNull();
+    }
+  });
+
   it("does not treat an EVM gas-fee failure as a provider billing failure", () => {
     expect(classifyProviderQuotaFailure(run("Error: insufficient funds for gas * price + value"), NOW)).toBeNull();
   });

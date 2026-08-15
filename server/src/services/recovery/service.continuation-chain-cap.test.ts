@@ -140,6 +140,7 @@ describe("GH #706: the provider-quota re-drive guard", () => {
       errorCode: "openclaw_gateway_wait_error",
       contextSnapshot: { issueId: "issue-1", retryReason: "transient_failure" },
       livenessState: null,
+      resultJson: { boundedRetryLadderExhausted: true },
       ...overrides,
     } as unknown as LatestIssueRunForGuard);
 
@@ -158,6 +159,19 @@ describe("GH #706: the provider-quota re-drive guard", () => {
     expect(isProviderQuotaExhaustedRunFor(quotaRun({ error: "Error: socket hang up" }), "agent-a")).toBe(false);
     expect(isProviderQuotaExhaustedRunFor(quotaRun({ status: "running" }), "agent-a")).toBe(false);
     expect(isProviderQuotaExhaustedRunFor(quotaRun({ status: "succeeded" }), "agent-a")).toBe(false);
+  });
+
+  it("ignores a quota failure whose ladder has not stamped exhaustion", () => {
+    // heartbeat.ts persists the failed status BEFORE it schedules the retry, so
+    // a reconciliation tick landing in that window sees a terminal quota run
+    // with no active execution path. Blocking there would both be wrong and let
+    // the finalizer queue a retry for already-blocked work. Runs from before
+    // this change carry no marker either, and get a ladder rather than a block.
+    expect(isProviderQuotaExhaustedRunFor(quotaRun({ resultJson: {} }), "agent-a")).toBe(false);
+    expect(isProviderQuotaExhaustedRunFor(quotaRun({ resultJson: null }), "agent-a")).toBe(false);
+    expect(
+      isProviderQuotaExhaustedRunFor(quotaRun({ resultJson: { boundedRetryLadderExhausted: "yes" } }), "agent-a"),
+    ).toBe(false);
   });
 
   it("ignores a missing run or a missing agent rather than escalating on nothing", () => {

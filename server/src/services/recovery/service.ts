@@ -155,17 +155,32 @@ export const PROVIDER_QUOTA_ESCALATION_COMMENT =
   "until the allowance resets or the account is topped up, so the issue is moving to `blocked` " +
   "rather than retrying.";
 
-// True when `run` is a spent provider-quota failure belonging to `agentId`.
-// The agent match matters: reassignment clears execution locks but keeps run
-// history, so an issue's latest run can belong to a previous assignee on a
-// different provider or account, and that must not block the new one (codex P1
-// on PR #40).
+// Marker heartbeat.ts stamps on a run when its bounded retry ladder is spent.
+export const BOUNDED_RETRY_LADDER_EXHAUSTED_KEY = "boundedRetryLadderExhausted";
+
+// True when `run` is a provider-quota failure belonging to `agentId` whose retry
+// ladder is PROVEN spent. Three conditions, each closing a way this guard could
+// block work that was still recoverable (codex P1s on PR #40):
+//
+//  - the agent must match. Reassignment clears execution locks but keeps run
+//    history, so an issue's latest run can belong to a previous assignee on a
+//    different provider or account; blocking on that would strand the
+//    reassignment that was the operator's way out.
+//  - the ladder must have STAMPED its exhaustion. A terminal quota run does not
+//    prove the retries are over: heartbeat.ts persists the failed status before
+//    it schedules the retry, so a reconciliation tick in that window would
+//    otherwise block the issue on its first quota failure — and the finalizer
+//    would then queue a retry for already-blocked work. Runs that predate this
+//    change carry no marker either, and correctly get a ladder rather than an
+//    immediate block.
+//  - and the failure must actually be a quota/billing one.
 export function isProviderQuotaExhaustedRunFor(
   run: LatestIssueRun,
   agentId: string | null | undefined,
 ) {
   if (!run || !agentId || run.agentId !== agentId) return false;
   if (!isUnsuccessfulTerminalIssueRun(run)) return false;
+  if (parseObject(run.resultJson)[BOUNDED_RETRY_LADDER_EXHAUSTED_KEY] !== true) return false;
   return Boolean(classifyProviderQuotaFailure(run));
 }
 

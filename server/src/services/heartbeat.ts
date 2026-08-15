@@ -8263,6 +8263,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           maxAttempts,
         },
       });
+      // GH #706: persist the exhaustion, not just a log line. The recovery
+      // service must tell a SPENT ladder from a failure that has not entered one
+      // yet — it cannot infer that from the run's terminal status, because
+      // setRunStatusIfRunning persists `failed` before this function is even
+      // called, so a reconciliation tick landing in that window would see a
+      // terminal run with no active execution path and act as if the retries
+      // were over. Whoever decides the ladder is finished is the only one who
+      // can say so; jsonb-merged so a concurrent finalizer write is not clobbered.
+      await db
+        .update(heartbeatRuns)
+        .set({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || jsonb_build_object('boundedRetryLadderExhausted', true)`,
+          updatedAt: new Date(),
+        })
+        .where(eq(heartbeatRuns.id, run.id));
       return {
         outcome: "retry_exhausted" as const,
         attempt: nextAttempt,

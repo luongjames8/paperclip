@@ -33,8 +33,13 @@ function readNonEmptyString(value: unknown) {
 // billing half, which upstream has no case for. Deliberately NOT included:
 // "insufficient funds", which is the EVM gas-fee phrase — a fleet agent working
 // on a wallet would otherwise park its own run for an hour.
+// The `out of extra usage` / `N-hour limit reached` / `weekly limit reached`
+// family is taken from packages/adapters/claude-local/src/server/parse.ts, which
+// already recognises those phrases — but persists them as
+// `claude_transient_upstream`, so without them here a Claude-side allowance
+// exhaustion would exhaust its ladder and then be handed a fresh one forever.
 const PROVIDER_QUOTA_ERROR_RE =
-  /(?:you(?:'|’)ve hit your usage limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|allocated quota|model (?:is )?at capacity|insufficient balance|insufficient credits?|billing error|payment required)/i;
+  /(?:you(?:'|’)(?:ve|re) (?:hit your usage limit|out of extra usage)|out of extra usage|usage (?:limit|cap) (?:reached|exceeded)|usage limit|\d+[-\s]?hour limit reached|weekly limit reached|provider quota|quota (?:limit )?exceeded|allocated quota|servicequotaexceededexception|model (?:is )?at capacity|insufficient balance|insufficient credits?|billing error|payment required)/i;
 
 // The run fields that hold the ADAPTER's own failure text. Deliberately not the
 // whole resultJson: that also carries the agent's summary/stdout/stderr, so
