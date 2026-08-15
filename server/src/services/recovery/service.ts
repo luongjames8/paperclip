@@ -3058,8 +3058,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       // assignee whose provider has nothing to do with the new one's — blocking
       // on that would strand the reassignment that was the operator's way out.
       // Placed after the recovery-issue branch so recovery issues keep their own
-      // in-place escalation.
-      if (isProviderQuotaExhaustedRunFor(latestRun, agentId)) {
+      // in-place escalation, and skipped for in_review so the participant guard
+      // below owns that case — it is the one that passes the review recovery
+      // cause and the participant as recovery owner, which this generic
+      // escalation would lose (it would be recorded as a stranded assignment and
+      // could wake the assignee's manager instead of preserving the review path).
+      if (issue.status !== "in_review" && isProviderQuotaExhaustedRunFor(latestRun, agentId)) {
         const updated = await escalateStrandedAssignedIssue({
           issue,
           previousStatus: issue.status as StrandedPreviousStatus,
