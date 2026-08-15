@@ -3,7 +3,7 @@ import {
   PROVIDER_QUOTA_RETRY_DEFAULT_BACKOFF_MS,
   classifyProviderQuotaFailure,
   parseProviderQuotaClockReset,
-} from "./heartbeat.js";
+} from "./provider-quota.js";
 
 // GH #706. Provider quota/billing exhaustion was classified `transient_upstream`
 // (because the gateway stamps errorCode `openclaw_gateway_wait_error`, which is
@@ -128,6 +128,35 @@ describe("GH #706: provider quota/billing is not transient", () => {
     ]) {
       expect(classifyProviderQuotaFailure(run(text), NOW)!.retryAt.getTime()).toBeGreaterThan(NOW.getTime());
     }
+  });
+});
+
+describe("GH #706: the recovery service's re-drive guard sees the same failures", () => {
+  // reconcileStrandedAssignedIssues escalates instead of requeuing when this
+  // classifier fires on the latest terminal run. Codex P1 on PR #40: without it
+  // the exhausted heartbeat ladder is restarted from attempt 1 forever, because
+  // an exhausted ladder leaves retryReason "transient_failure", which
+  // didAutomaticRecoveryFail does not recognise as a failed recovery.
+  // recovery's LatestIssueRun is a narrower shape than a heartbeatRuns row, so
+  // this pins that the classifier accepts it.
+  const latestIssueRunShape = {
+    id: "run-1",
+    agentId: "agent-1",
+    status: "failed",
+    error: "FailoverError: ⚠️ month allocated quota exceeded.",
+    errorCode: "openclaw_gateway_wait_error",
+    contextSnapshot: { issueId: "issue-1", retryReason: "transient_failure" },
+    livenessState: null,
+  };
+
+  it("classifies a run in recovery's LatestIssueRun shape, with no resultJson at all", () => {
+    expect(classifyProviderQuotaFailure(latestIssueRunShape, NOW)).not.toBeNull();
+  });
+
+  it("does not fire on an exhausted ladder that failed for a non-quota reason", () => {
+    expect(
+      classifyProviderQuotaFailure({ ...latestIssueRunShape, error: "Error: socket hang up" }, NOW),
+    ).toBeNull();
   });
 });
 

@@ -34,6 +34,7 @@ import { redactSensitiveText } from "../../redaction.js";
 import { logActivity } from "../activity-log.js";
 import { budgetService } from "../budgets.js";
 import { instanceSettingsService } from "../instance-settings.js";
+import { classifyProviderQuotaFailure } from "../provider-quota.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
 import { TERMINAL_HEARTBEAT_RUN_STATUSES, issueService } from "../issues.js";
@@ -2933,6 +2934,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       waitingOnReviewResolved: 0,
       recentProgressExempted: 0,
       continuationChainExhausted: 0,
+      providerQuotaEscalated: 0,
       skipped: 0,
       issueIds: [] as string[],
     };
@@ -2983,6 +2985,38 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       }
 
       const latestRun = await getLatestIssueRun(issue.companyId, issue.id);
+
+      // GH #706: a provider quota/billing failure cannot be fixed by re-running,
+      // and every branch below ends in a requeue. The heartbeat ladder parks each
+      // of its attempts at the allowance reset, and while one is parked the
+      // hasActiveExecutionPath check above already skips this issue — so reaching
+      // here with a quota failure means that bounded ladder is SPENT. Without
+      // this guard the requeue starts a fresh ladder (didAutomaticRecoveryFail
+      // does not recognise the exhausted ladder's "transient_failure"
+      // retryReason), and a persistent outage keeps looping, just more slowly.
+      // Placed on the shared latestRun rather than inside one branch so the
+      // todo-dispatch, continuation and review-participant paths are all covered.
+      if (isUnsuccessfulTerminalIssueRun(latestRun) && classifyProviderQuotaFailure(latestRun)) {
+        const updated = await escalateStrandedAssignedIssue({
+          issue,
+          previousStatus: issue.status as StrandedPreviousStatus,
+          latestRun,
+          comment:
+            "Paperclip stopped automatic recovery for this issue: its last run failed on a model provider " +
+            "quota or billing limit, and the bounded retry ladder is exhausted. Re-running cannot succeed " +
+            "until the allowance resets or the account is topped up, so the issue is moving to `blocked` " +
+            `rather than retrying.${summarizeRunFailureForIssueComment(latestRun) ?? ""}`,
+        });
+        if (updated) {
+          result.providerQuotaEscalated += 1;
+          result.escalated += 1;
+          result.issueIds.push(issue.id);
+        } else {
+          result.skipped += 1;
+        }
+        continue;
+      }
+
       if (isStrandedIssueRecoveryIssue(issue) && isUnsuccessfulTerminalIssueRun(latestRun)) {
         const updated = await escalateStrandedRecoveryIssueInPlace({
           issue,
