@@ -415,11 +415,29 @@ const GATEWAY_ONLY_TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set([
 //   "FallbackSummaryError: All models failed (2): bailian/glm-5: 429 month
 //    allocated quota exceeded. (rate_limit) | deepseek/deepseek-v4-pro:
 //    402 Insufficient Balance (billing) <- ..."
-// The first four alternatives are ported verbatim from upstream/master's
-// PROVIDER_QUOTA_ERROR_RE; the rest cover the billing half, which upstream has no
-// case for.
+// The first alternatives are ported verbatim from upstream/master's
+// PROVIDER_QUOTA_ERROR_RE; `allocated quota`, `insufficient balance`,
+// `insufficient credits`, `billing error` and `payment required` cover the
+// billing half, which upstream has no case for. Deliberately NOT included:
+// "insufficient funds", which is the EVM gas-fee phrase — a fleet agent working
+// on a wallet would otherwise park its own run for an hour.
 const PROVIDER_QUOTA_ERROR_RE =
-  /(?:you(?:'|’)ve hit your usage limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|allocated quota|model (?:is )?at capacity|insufficient balance|insufficient (?:credits?|funds)|billing error|payment required)/i;
+  /(?:you(?:'|’)ve hit your usage limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|allocated quota|model (?:is )?at capacity|insufficient balance|insufficient credits?|billing error|payment required)/i;
+
+// The run fields that hold the ADAPTER's own failure text. Deliberately not the
+// whole resultJson: that also carries the agent's summary/stdout/stderr, so
+// scanning it would classify any run whose transcript merely discusses quotas or
+// billing — a fleet agent writing payment code parking itself for an hour is the
+// same defect as GH #706 pointed the other way.
+function readRunFailureText(run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">) {
+  const resultJson = parseObject(run.resultJson);
+  return [
+    run.errorCode ?? "",
+    run.error ?? "",
+    readNonEmptyString(resultJson.error) ?? "",
+    readNonEmptyString(resultJson.errorMessage) ?? "",
+  ].join("\n");
+}
 
 // Fallback park window when the provider does not state a reset time. Ported
 // from upstream/master's PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS.
@@ -503,7 +521,7 @@ export function classifyProviderQuotaFailure(
   now = new Date(),
 ): { retryAt: Date; parsedResetTime: boolean } | null {
   const resultJson = parseObject(run.resultJson);
-  const text = [run.errorCode ?? "", run.error ?? "", JSON.stringify(resultJson)].join("\n");
+  const text = readRunFailureText(run);
   if (run.errorCode !== "provider_quota" && !PROVIDER_QUOTA_ERROR_RE.test(text)) return null;
 
   const persistedRetryAt = readNonEmptyString(resultJson.providerQuotaRetryNotBefore) ??
@@ -574,18 +592,16 @@ function readTransientRecoveryContractFromRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
   adapterType?: string | null,
 ) {
-  const family = readHeartbeatRunErrorFamily(run, adapterType);
   // provider_quota rides the same bounded retry ladder as transient_upstream —
   // but with retryNotBefore pinned to the allowance reset, so the ladder's
   // 2m/10m/30m/2h delays cannot fire against a provider that is still dead.
   // Same shape as upstream/master's readTransientRecoveryContractFromRun.
-  if (family === "provider_quota") {
-    const quota = classifyProviderQuotaFailure(run);
-    return quota
-      ? { errorFamily: "provider_quota" as const, retryNotBefore: quota.retryAt }
-      : null;
-  }
-  return family === "transient_upstream"
+  // Classified here rather than via readHeartbeatRunErrorFamily's string so the
+  // retryAt comes from the same evaluation that decided the family.
+  const quota = classifyProviderQuotaFailure(run);
+  if (quota) return { errorFamily: "provider_quota" as const, retryNotBefore: quota.retryAt };
+
+  return readHeartbeatRunErrorFamily(run, adapterType) === "transient_upstream"
     ? {
         errorFamily: "transient_upstream" as const,
         retryNotBefore: readTransientRetryNotBeforeFromRun(run),

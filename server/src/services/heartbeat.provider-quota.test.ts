@@ -85,6 +85,40 @@ describe("GH #706: provider quota/billing is not transient", () => {
     expect(classifyProviderQuotaFailure(run("connect ECONNREFUSED 127.0.0.1:3100"), NOW)).toBeNull();
   });
 
+  it("ignores quota wording that is only in the agent's own transcript", () => {
+    // resultJson also carries the agent's summary/stdout. A fleet agent writing
+    // billing code must not park its own run for an hour, so only the adapter's
+    // failure fields are scanned.
+    const transcriptRun = {
+      error: "Error: socket hang up",
+      errorCode: "openclaw_gateway_wait_error",
+      resultJson: {
+        error: "Error: socket hang up",
+        errorFamily: "transient_upstream",
+        summary: "Reviewed the checkout flow's handling of quota exceeded and insufficient balance responses.",
+        stdout: "402 payment required\ninsufficient credits",
+      },
+    } as unknown as Parameters<typeof classifyProviderQuotaFailure>[0];
+    expect(classifyProviderQuotaFailure(transcriptRun, NOW)).toBeNull();
+  });
+
+  it("beats a persisted errorFamily that mislabels a real quota failure as transient", () => {
+    // The GH #706 misclassification itself: text is the stronger evidence.
+    const mislabelled = {
+      error: "FailoverError: ⚠️ month allocated quota exceeded.",
+      errorCode: "openclaw_gateway_wait_error",
+      resultJson: {
+        error: "FailoverError: ⚠️ month allocated quota exceeded.",
+        errorFamily: "transient_upstream",
+      },
+    } as unknown as Parameters<typeof classifyProviderQuotaFailure>[0];
+    expect(classifyProviderQuotaFailure(mislabelled, NOW)).not.toBeNull();
+  });
+
+  it("does not treat an EVM gas-fee failure as a provider billing failure", () => {
+    expect(classifyProviderQuotaFailure(run("Error: insufficient funds for gas * price + value"), NOW)).toBeNull();
+  });
+
   it("every park is strictly in the future, so a retry can never fire immediately", () => {
     for (const text of [
       "FailoverError: ⚠️ month allocated quota exceeded.",
@@ -110,5 +144,36 @@ describe("GH #706: provider quota clock-reset parsing", () => {
 
   it("returns null for an out-of-range clock", () => {
     expect(parseProviderQuotaClockReset("try again at 99:99", NOW)).toBeNull();
+  });
+
+  it("resolves the US zone abbreviations providers actually send", () => {
+    // Node's Intl accepts these as zone aliases, so the DST-correcting branch
+    // does resolve them. Pinned because it is the branch most likely to rot on a
+    // runtime upgrade — and if it ever does throw, the catch returns null and
+    // classifyProviderQuotaFailure falls back to the default park window, which
+    // is safe rather than wrong.
+    expect(parseProviderQuotaClockReset("try again at 3pm (PST)", NOW)!.toISOString()).toBe(
+      "2026-08-14T22:00:00.000Z",
+    );
+    // "EST" resolves as a fixed UTC-5 zone (no summer-time shift), unlike "PST"
+    // above which Node aliases to America/Los_Angeles and so does shift. The
+    // abbreviations are ambiguous by nature; both land in the future, which is
+    // what the park actually depends on.
+    expect(parseProviderQuotaClockReset("try again at 3pm EST", NOW)!.toISOString()).toBe(
+      "2026-08-14T20:00:00.000Z",
+    );
+  });
+
+  it("falls back to the default park window when no reset time is stated", () => {
+    const classified = classifyProviderQuotaFailure(
+      {
+        error: "You've hit your usage limit.",
+        errorCode: "openclaw_gateway_wait_error",
+        resultJson: {},
+      } as unknown as Parameters<typeof classifyProviderQuotaFailure>[0],
+      NOW,
+    );
+    expect(classified!.parsedResetTime).toBe(false);
+    expect(classified!.retryAt.getTime()).toBe(NOW.getTime() + PROVIDER_QUOTA_RETRY_DEFAULT_BACKOFF_MS);
   });
 });
