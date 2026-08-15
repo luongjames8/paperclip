@@ -3,6 +3,7 @@ import {
   PROVIDER_QUOTA_RETRY_DEFAULT_BACKOFF_MS,
   classifyProviderQuotaFailure,
   parseProviderQuotaClockReset,
+  parseProviderQuotaRelativeReset,
 } from "./provider-quota.js";
 
 // GH #706. Provider quota/billing exhaustion was classified `transient_upstream`
@@ -129,6 +130,44 @@ describe("GH #706: provider quota/billing is not transient", () => {
     }
   });
 
+  it("classifies every provider-quota string this repo's own adapters carry", () => {
+    // Swept from the adapters and their fixtures in one pass rather than adding
+    // one provider per review round. Each string is verbatim from the source
+    // named beside it.
+    for (const text of [
+      // gemini-local-adapter-environment.test.ts
+      "429 RESOURCE_EXHAUSTED: You exceeded your current quota and billing details.",
+      "Cloud Code Assist API error (429): RESOURCE_EXHAUSTED",
+      "The configured Gemini account or API key is over quota.",
+      "Gemini CLI is retrying after quota exhaustion.",
+      // codex
+      "You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now, or try again at 11:31 PM.",
+      "Usage limit reached. Resets at 3:15 AM (UTC).",
+      // claude-local parse.ts / parse.test.ts
+      "Claude usage limit reached. Please try again later.",
+      "Claude usage limit reached — weekly limit reached. Try again in 2 days.",
+    ]) {
+      expect(classifyProviderQuotaFailure(run(text), NOW), text).not.toBeNull();
+    }
+  });
+
+  it("parks until a RELATIVE reset the provider states", () => {
+    // claude-local's own fixture. Parking this for the default hour would
+    // exhaust the ladder and block the issue two days early.
+    const classified = classifyProviderQuotaFailure(
+      run("Claude usage limit reached — weekly limit reached. Try again in 2 days."),
+      NOW,
+    );
+    expect(classified!.parsedResetTime).toBe(true);
+    expect(classified!.retryAt.toISOString()).toBe("2026-08-16T12:00:00.000Z");
+  });
+
+  it("parks until a 'Resets at' clock time, not only 'try again at'", () => {
+    const classified = classifyProviderQuotaFailure(run("Usage limit reached. Resets at 3:15 PM (UTC)."), NOW);
+    expect(classified!.parsedResetTime).toBe(true);
+    expect(classified!.retryAt.toISOString()).toBe("2026-08-14T15:15:00.000Z");
+  });
+
   it("does not treat an EVM gas-fee failure as a provider billing failure", () => {
     expect(classifyProviderQuotaFailure(run("Error: insufficient funds for gas * price + value"), NOW)).toBeNull();
   });
@@ -183,6 +222,21 @@ describe("GH #706: provider quota clock-reset parsing", () => {
 
   it("returns null when the message states no reset time", () => {
     expect(parseProviderQuotaClockReset("month allocated quota exceeded", NOW)).toBeNull();
+  });
+
+  it("reads relative intervals in every unit, and rejects junk", () => {
+    expect(parseProviderQuotaRelativeReset("try again in 45 minutes", NOW)!.toISOString())
+      .toBe("2026-08-14T12:45:00.000Z");
+    expect(parseProviderQuotaRelativeReset("resets in 3 hours", NOW)!.toISOString())
+      .toBe("2026-08-14T15:00:00.000Z");
+    expect(parseProviderQuotaRelativeReset("available again in 1 week", NOW)!.toISOString())
+      .toBe("2026-08-21T12:00:00.000Z");
+    expect(parseProviderQuotaRelativeReset("try again in about 2 days", NOW)!.toISOString())
+      .toBe("2026-08-16T12:00:00.000Z");
+    expect(parseProviderQuotaRelativeReset("try again in 0 minutes", NOW)).toBeNull();
+    expect(parseProviderQuotaRelativeReset("try again in a bit", NOW)).toBeNull();
+    expect(parseProviderQuotaRelativeReset("try again in 5 fortnights", NOW)).toBeNull();
+    expect(parseProviderQuotaRelativeReset("month allocated quota exceeded", NOW)).toBeNull();
   });
 
   it("returns null for an out-of-range clock", () => {

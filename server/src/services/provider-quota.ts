@@ -33,13 +33,20 @@ function readNonEmptyString(value: unknown) {
 // billing half, which upstream has no case for. Deliberately NOT included:
 // "insufficient funds", which is the EVM gas-fee phrase — a fleet agent working
 // on a wallet would otherwise park its own run for an hour.
-// The `out of extra usage` / `N-hour limit reached` / `weekly limit reached`
-// family is taken from packages/adapters/claude-local/src/server/parse.ts, which
-// already recognises those phrases — but persists them as
-// `claude_transient_upstream`, so without them here a Claude-side allowance
-// exhaustion would exhaust its ladder and then be handed a fresh one forever.
+// The remaining alternatives are not guesses at provider wording — each is a
+// string this repository's own adapters or their fixtures already carry, swept
+// in one pass so this list does not have to grow one provider per review round:
+//   claude-local  packages/adapters/claude-local/src/server/parse.ts
+//                 "out of extra usage", "N-hour limit reached",
+//                 "weekly limit reached", "usage cap reached"
+//   gemini        server/src/__tests__/gemini-local-adapter-environment.test.ts
+//                 "429 RESOURCE_EXHAUSTED: You exceeded your current quota and
+//                  billing details.", "is over quota", "quota exhaustion"
+//   codex         "You've hit your usage limit for <model> … try again at …"
+// Those adapters persist these as *transient* error codes, so without them here
+// each family would exhaust its ladder and then be handed a fresh one forever.
 const PROVIDER_QUOTA_ERROR_RE =
-  /(?:you(?:'|’)(?:ve|re) (?:hit your usage limit|out of extra usage)|out of extra usage|usage (?:limit|cap) (?:reached|exceeded)|usage limit|\d+[-\s]?hour limit reached|weekly limit reached|provider quota|quota (?:limit )?exceeded|allocated quota|servicequotaexceededexception|model (?:is )?at capacity|insufficient balance|insufficient credits?|billing error|payment required)/i;
+  /(?:you(?:'|’)(?:ve|re) (?:hit your usage limit|out of extra usage)|out of extra usage|usage (?:limit|cap) (?:reached|exceeded)|usage limit|\d+[-\s]?hour limit reached|weekly limit reached|provider quota|quota (?:limit )?exceeded|exceeded your current quota|over quota|quota exhaust(?:ed|ion)|resource_exhausted|allocated quota|servicequotaexceededexception|model (?:is )?at capacity|insufficient balance|insufficient credits?|billing error|payment required)/i;
 
 // The run fields that hold the ADAPTER's own failure text. Deliberately not the
 // whole resultJson: that also carries the agent's summary/stdout/stderr, so
@@ -65,9 +72,38 @@ export const PROVIDER_QUOTA_RETRY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 // Ported from upstream/master's parseProviderQuotaClockReset: pull "try again at
 // 3pm (PST)" out of the provider's message so the retry is scheduled at the real
 // reset instead of a blind hour.
+// Providers state a reset as a relative interval at least as often as a clock
+// time — claude-local's own fixture is "weekly limit reached. Try again in 2
+// days." Parking such a failure for the default hour would exhaust the ladder
+// and block the issue hours before the stated reset, for no gain.
+const PROVIDER_QUOTA_RELATIVE_RESET_RE =
+  /(?:try again|reset(?:s|ting)?|available again|retry)\s+in\s+(?:about\s+|~\s*)?(\d{1,4})\s*(second|sec|minute|min|hour|hr|day|week)s?\b/i;
+
+const RELATIVE_RESET_UNIT_MS: Record<string, number> = {
+  second: 1000,
+  sec: 1000,
+  minute: 60_000,
+  min: 60_000,
+  hour: 3_600_000,
+  hr: 3_600_000,
+  day: 86_400_000,
+  week: 604_800_000,
+};
+
+export function parseProviderQuotaRelativeReset(error: string, now: Date) {
+  const match = error.match(PROVIDER_QUOTA_RELATIVE_RESET_RE);
+  if (!match) return null;
+  const amount = Number.parseInt(match[1] ?? "", 10);
+  const unitMs = RELATIVE_RESET_UNIT_MS[(match[2] ?? "").toLowerCase()];
+  if (!Number.isInteger(amount) || amount <= 0 || !unitMs) return null;
+  return new Date(now.getTime() + amount * unitMs);
+}
+
 export function parseProviderQuotaClockReset(error: string, now: Date) {
+  // "Resets at 3:15 AM (UTC)" is codex's own wording and was missed while this
+  // only matched "try again at".
   const match = error.match(
-    /try again at\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
+    /(?:try again at|reset(?:s|ting)? at|available again at)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
   );
   if (!match) return null;
 
@@ -151,6 +187,11 @@ export function classifyProviderQuotaFailure(
   if (parsedPersistedRetryAt && !Number.isNaN(parsedPersistedRetryAt.getTime()) && parsedPersistedRetryAt > now) {
     return { retryAt: parsedPersistedRetryAt, parsedResetTime: true };
   }
+
+  // Relative first: "weekly limit reached. Try again in 2 days" carries both a
+  // relative interval and, for some providers, an unrelated clock time.
+  const parsedRelativeReset = parseProviderQuotaRelativeReset(text, now);
+  if (parsedRelativeReset) return { retryAt: parsedRelativeReset, parsedResetTime: true };
 
   const parsedClockReset = parseProviderQuotaClockReset(text, now);
   if (parsedClockReset) return { retryAt: parsedClockReset, parsedResetTime: true };
