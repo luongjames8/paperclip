@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN,
   decideProductiveContinuationRecovery,
+  isProviderQuotaExhaustedRunFor,
   isRepeatedProductiveContinuationRecovery,
   readProductiveContinuationChainLength,
 } from "./service.js";
+
+type LatestIssueRunForGuard = Parameters<typeof isProviderQuotaExhaustedRunFor>[0];
 
 // GH #706. The `in_progress` productive-continuation branch of
 // reconcileStrandedAssignedIssues had no attempt cap: the GGU-809
@@ -121,6 +124,46 @@ describe("GH #706: chain length carried on the wake context", () => {
     for (const junk of ["nonsense", -3, Number.NaN, Number.POSITIVE_INFINITY, { nested: 1 }]) {
       expect(readProductiveContinuationChainLength({ productiveContinuationChain: junk })).toBe(0);
     }
+  });
+});
+
+describe("GH #706: the provider-quota re-drive guard", () => {
+  // reconcileStrandedAssignedIssues escalates to `blocked` instead of requeuing
+  // when this fires. Reaching it means the heartbeat ladder is spent, because a
+  // parked scheduled_retry is an active execution path and the loop skips those.
+  const quotaRun = (overrides: Record<string, unknown> = {}) =>
+    ({
+      id: "run-1",
+      agentId: "agent-a",
+      status: "failed",
+      error: "FailoverError: ⚠️ month allocated quota exceeded.",
+      errorCode: "openclaw_gateway_wait_error",
+      contextSnapshot: { issueId: "issue-1", retryReason: "transient_failure" },
+      livenessState: null,
+      ...overrides,
+    } as unknown as LatestIssueRunForGuard);
+
+  it("fires for the current agent's exhausted quota failure", () => {
+    expect(isProviderQuotaExhaustedRunFor(quotaRun(), "agent-a")).toBe(true);
+  });
+
+  it("ignores a quota failure left behind by a previous assignee", () => {
+    // Reassignment clears execution locks but keeps run history, so the issue's
+    // latest run can be agent A's while agent B is now assigned — possibly on a
+    // different provider. Blocking on A's failure would strand the reassignment.
+    expect(isProviderQuotaExhaustedRunFor(quotaRun(), "agent-b")).toBe(false);
+  });
+
+  it("ignores a non-quota failure and a still-running run", () => {
+    expect(isProviderQuotaExhaustedRunFor(quotaRun({ error: "Error: socket hang up" }), "agent-a")).toBe(false);
+    expect(isProviderQuotaExhaustedRunFor(quotaRun({ status: "running" }), "agent-a")).toBe(false);
+    expect(isProviderQuotaExhaustedRunFor(quotaRun({ status: "succeeded" }), "agent-a")).toBe(false);
+  });
+
+  it("ignores a missing run or a missing agent rather than escalating on nothing", () => {
+    expect(isProviderQuotaExhaustedRunFor(null, "agent-a")).toBe(false);
+    expect(isProviderQuotaExhaustedRunFor(quotaRun(), null)).toBe(false);
+    expect(isProviderQuotaExhaustedRunFor(quotaRun(), undefined)).toBe(false);
   });
 });
 

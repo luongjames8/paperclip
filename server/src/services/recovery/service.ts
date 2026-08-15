@@ -149,6 +149,26 @@ export function readProductiveContinuationChainLength(contextSnapshot: unknown) 
   return Number.isFinite(chain) && chain > 0 ? Math.floor(chain) : 0;
 }
 
+export const PROVIDER_QUOTA_ESCALATION_COMMENT =
+  "Paperclip stopped automatic recovery for this issue: its last run failed on a model provider " +
+  "quota or billing limit, and the bounded retry ladder is exhausted. Re-running cannot succeed " +
+  "until the allowance resets or the account is topped up, so the issue is moving to `blocked` " +
+  "rather than retrying.";
+
+// True when `run` is a spent provider-quota failure belonging to `agentId`.
+// The agent match matters: reassignment clears execution locks but keeps run
+// history, so an issue's latest run can belong to a previous assignee on a
+// different provider or account, and that must not block the new one (codex P1
+// on PR #40).
+export function isProviderQuotaExhaustedRunFor(
+  run: LatestIssueRun,
+  agentId: string | null | undefined,
+) {
+  if (!run || !agentId || run.agentId !== agentId) return false;
+  if (!isUnsuccessfulTerminalIssueRun(run)) return false;
+  return Boolean(classifyProviderQuotaFailure(run));
+}
+
 export type ProductiveContinuationDecision = "requeue" | "escalate_no_progress" | "escalate_chain_exhausted";
 
 // Pure decision for the `in_progress` productive-continuation branch of
@@ -2994,29 +3014,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
       const latestRun = await getLatestIssueRun(issue.companyId, issue.id);
 
-      // GH #706: a provider quota/billing failure cannot be fixed by re-running,
-      // and every branch below ends in a requeue. The heartbeat ladder parks each
-      // of its attempts at the allowance reset, and while one is parked the
-      // hasActiveExecutionPath check above already skips this issue — so reaching
-      // here with a quota failure means that bounded ladder is SPENT. Without
-      // this guard the requeue starts a fresh ladder (didAutomaticRecoveryFail
-      // does not recognise the exhausted ladder's "transient_failure"
-      // retryReason), and a persistent outage keeps looping, just more slowly.
-      // Placed on the shared latestRun rather than inside one branch so the
-      // todo-dispatch, continuation and review-participant paths are all covered.
-      if (isUnsuccessfulTerminalIssueRun(latestRun) && classifyProviderQuotaFailure(latestRun)) {
-        const updated = await escalateStrandedAssignedIssue({
+      if (isStrandedIssueRecoveryIssue(issue) && isUnsuccessfulTerminalIssueRun(latestRun)) {
+        const updated = await escalateStrandedRecoveryIssueInPlace({
           issue,
           previousStatus: issue.status as StrandedPreviousStatus,
           latestRun,
-          comment:
-            "Paperclip stopped automatic recovery for this issue: its last run failed on a model provider " +
-            "quota or billing limit, and the bounded retry ladder is exhausted. Re-running cannot succeed " +
-            "until the allowance resets or the account is topped up, so the issue is moving to `blocked` " +
-            `rather than retrying.${summarizeRunFailureForIssueComment(latestRun) ?? ""}`,
         });
         if (updated) {
-          result.providerQuotaEscalated += 1;
           result.escalated += 1;
           result.issueIds.push(issue.id);
         } else {
@@ -3025,13 +3029,30 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         continue;
       }
 
-      if (isStrandedIssueRecoveryIssue(issue) && isUnsuccessfulTerminalIssueRun(latestRun)) {
-        const updated = await escalateStrandedRecoveryIssueInPlace({
+      // GH #706: a provider quota/billing failure cannot be fixed by re-running,
+      // and every branch below ends in a requeue. The heartbeat ladder parks each
+      // of its attempts at the allowance reset, and while one is parked the
+      // hasActiveExecutionPath check above already skips this issue — so reaching
+      // here with a quota failure means that bounded ladder is SPENT. Without
+      // this the requeue starts a fresh ladder (didAutomaticRecoveryFail does not
+      // recognise the exhausted ladder's "transient_failure" retryReason), and a
+      // persistent outage keeps looping, just more slowly.
+      //
+      // Scoped to the run's own agent: reassignment clears execution locks but
+      // keeps run history, so the issue's latest run can belong to a PREVIOUS
+      // assignee whose provider has nothing to do with the new one's — blocking
+      // on that would strand the reassignment that was the operator's way out.
+      // Placed after the recovery-issue branch so recovery issues keep their own
+      // in-place escalation.
+      if (isProviderQuotaExhaustedRunFor(latestRun, agentId)) {
+        const updated = await escalateStrandedAssignedIssue({
           issue,
           previousStatus: issue.status as StrandedPreviousStatus,
           latestRun,
+          comment: PROVIDER_QUOTA_ESCALATION_COMMENT + (summarizeRunFailureForIssueComment(latestRun) ?? ""),
         });
         if (updated) {
+          result.providerQuotaEscalated += 1;
           result.escalated += 1;
           result.issueIds.push(issue.id);
         } else {
@@ -3050,6 +3071,30 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           issue.id,
           participantAgentId,
         );
+
+        // GH #706: same guard as above, on the participant's own latest run.
+        // The shared `latestRun` can be the assignee's rather than the
+        // participant's, so a quota-exhausted reviewer would otherwise be
+        // requeued past it.
+        if (isProviderQuotaExhaustedRunFor(participantLatestRun, participantAgentId)) {
+          const updated = await escalateStrandedAssignedIssue({
+            issue,
+            previousStatus: "in_review",
+            latestRun: participantLatestRun,
+            comment: PROVIDER_QUOTA_ESCALATION_COMMENT +
+              (summarizeRunFailureForIssueComment(participantLatestRun) ?? ""),
+            recoveryCause: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
+            recoveryOwnerAgentId: participantAgentId,
+          });
+          if (updated) {
+            result.providerQuotaEscalated += 1;
+            result.escalated += 1;
+            result.issueIds.push(issue.id);
+          } else {
+            result.skipped += 1;
+          }
+          continue;
+        }
 
         if (!participantLatestRun || !isTerminalIssueRun(participantLatestRun)) {
           if (!agentInvokable) {
