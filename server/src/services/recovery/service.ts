@@ -102,6 +102,51 @@ export const STRANDED_RECENT_PROGRESS_EXEMPTION_MS = Math.max(
   Number(process.env.STRANDED_RECENT_PROGRESS_EXEMPTION_MS) || 30 * 60 * 1000,
 );
 
+// GH #706: hard ceiling on the productive-continuation recovery chain, which had
+// none. The GGU-809 exemption above accepts "the assignee commented recently" as
+// progress evidence — but the comment is usually written BY the wake being
+// evaluated, so an agent that is merely waiting and says "still pending" each
+// wake refreshes its own exemption window and guarantees its own next wake.
+// HIN-2846 rode that loop for 9,183 wakes / 9,110 comments in 4 days (~40s
+// period) and exhausted the monthly model allocation, taking all five companies
+// down for nine days. heartbeat-protocol.md is explicit that comments are not a
+// liveness path by themselves.
+//
+// The exemption stays (genuine batch workflows still need it) but is now bounded:
+// once the chain reaches this many consecutive productive continuation
+// recoveries, the issue escalates to `blocked` with an audit comment regardless
+// of the exemption. Sized to clear real multi-frame batches while still being
+// ~460x below the incident. Floored at 2 to match
+// DEFAULT_MAX_LIVENESS_CONTINUATION_ATTEMPTS on the sibling path.
+// ponytail: one flat ceiling, no per-workflow budget — add that only if a real
+// batch is measured hitting it.
+export const STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN = Math.max(
+  2,
+  Number(process.env.STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN) || 20,
+);
+
+// How far back the chain counter looks. One more than the cap so an exhausted
+// chain is always distinguishable from a chain sitting exactly at the cap.
+const PRODUCTIVE_CONTINUATION_CHAIN_SCAN_LIMIT = STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN + 1;
+
+export type ProductiveContinuationDecision = "requeue" | "escalate_no_progress" | "escalate_chain_exhausted";
+
+// Pure decision for the `in_progress` productive-continuation branch of
+// reconcileStrandedAssignedIssues. `chainLength` counts the consecutive
+// productive continuation-recovery runs already spent on this issue, including
+// the run being evaluated.
+export function decideProductiveContinuationRecovery(input: {
+  repeated: boolean;
+  exempted: boolean;
+  chainLength: number;
+  maxChain?: number;
+}): ProductiveContinuationDecision {
+  const maxChain = input.maxChain ?? STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN;
+  if (input.chainLength >= maxChain) return "escalate_chain_exhausted";
+  if (!input.repeated) return "requeue";
+  return input.exempted ? "requeue" : "escalate_no_progress";
+}
+
 type RecoveryWakeupOptions = {
   source?: "timer" | "assignment" | "on_demand" | "automation";
   triggerDetail?: "manual" | "ping" | "callback" | "system";
@@ -413,7 +458,14 @@ function isSuccessfulInProgressContinuationRun(latestRun: LatestIssueRun): lates
   return latestRun?.status === "succeeded";
 }
 
-function isProductiveContinuationRun(latestRun: LatestIssueRun) {
+// The only fields these two predicates read. Narrowed so the chain counter can
+// feed them rows selected without the rest of the run (GH #706).
+type ProductiveContinuationRunFields = Pick<
+  typeof heartbeatRuns.$inferSelect,
+  "status" | "livenessState" | "contextSnapshot"
+>;
+
+function isProductiveContinuationRun(latestRun: ProductiveContinuationRunFields | null) {
   return latestRun?.status === "succeeded" &&
     (latestRun.livenessState === "advanced" ||
       latestRun.livenessState === "completed" ||
@@ -421,7 +473,7 @@ function isProductiveContinuationRun(latestRun: LatestIssueRun) {
       latestRun.livenessState === "needs_followup");
 }
 
-function isRepeatedProductiveContinuationRecovery(latestRun: SuccessfulLatestIssueRun) {
+export function isRepeatedProductiveContinuationRecovery(latestRun: ProductiveContinuationRunFields) {
   const latestContext = parseObject(latestRun.contextSnapshot);
   return readNonEmptyString(latestContext.retryReason) === "issue_continuation_needed" &&
     readNonEmptyString(latestContext.source) === "issue.productive_terminal_continuation_recovery" &&
@@ -587,6 +639,38 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
       .limit(1)
       .then((rows) => rows[0] ?? null);
+  }
+
+  // GH #706: length of the unbroken run of productive continuation recoveries
+  // this issue is currently riding. Counts back from the newest run and stops at
+  // the first run that is not one, so any other kind of work on the issue resets
+  // the chain naturally.
+  async function countConsecutiveProductiveContinuationRecoveries(
+    companyId: string,
+    issueId: string,
+  ) {
+    const rows = await db
+      .select({
+        status: heartbeatRuns.status,
+        livenessState: heartbeatRuns.livenessState,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+      })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
+        ),
+      )
+      .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
+      .limit(PRODUCTIVE_CONTINUATION_CHAIN_SCAN_LIMIT);
+
+    let chainLength = 0;
+    for (const row of rows) {
+      if (!isRepeatedProductiveContinuationRecovery(row)) break;
+      chainLength += 1;
+    }
+    return chainLength;
   }
 
   async function summarizeRecentContinuationRetries(
@@ -2871,6 +2955,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       escalated: 0,
       waitingOnReviewResolved: 0,
       recentProgressExempted: 0,
+      continuationChainExhausted: 0,
       skipped: 0,
       issueIds: [] as string[],
     };
@@ -3142,36 +3227,52 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           continue;
         }
 
-        if (isRepeatedProductiveContinuationRecovery(successfulRun)) {
-          // GGU-809: skip escalation if the assignee has shown visible progress
-          // (comment or attachment) within the exemption window. Falling
-          // through here lets the normal continuation-retry path enqueue the
-          // next wake, which is the correct behaviour for batch workflows.
-          const exempted = await hasRecentVisibleProgress(
+        const repeatedContinuation = isRepeatedProductiveContinuationRecovery(successfulRun);
+        // GGU-809: skip escalation if the assignee has shown visible progress
+        // (comment or attachment) within the exemption window, which lets the
+        // requeue below carry batch workflows through. GH #706: the chain is
+        // counted and capped regardless, because the assignee's own comment is
+        // circular evidence and refreshes that window forever.
+        const chainLength = repeatedContinuation
+          ? await countConsecutiveProductiveContinuationRecoveries(issue.companyId, issue.id)
+          : 0;
+        const exempted = repeatedContinuation
+          ? await hasRecentVisibleProgress(
             issue.companyId,
             issue.id,
             agentId,
             STRANDED_RECENT_PROGRESS_EXEMPTION_MS,
-          );
-          if (!exempted) {
-            const updated = await escalateStrandedAssignedIssue({
-              issue,
-              previousStatus: "in_progress",
-              latestRun: successfulRun,
-              comment:
-                "Paperclip automatically retried continuation for this assigned `in_progress` issue and the retry " +
+          )
+          : false;
+        const decision = decideProductiveContinuationRecovery({
+          repeated: repeatedContinuation,
+          exempted,
+          chainLength,
+        });
+
+        if (decision !== "requeue") {
+          const updated = await escalateStrandedAssignedIssue({
+            issue,
+            previousStatus: "in_progress",
+            latestRun: successfulRun,
+            comment: decision === "escalate_chain_exhausted"
+              ? "Paperclip has retried continuation for this assigned `in_progress` issue " +
+                `${chainLength}× in a row and it still has no live execution path. The recent-progress ` +
+                "exemption kept the chain alive, but an assignee comment is not by itself evidence of " +
+                "progress, so the chain is capped here. Moving it to `blocked` so it is visible for intervention."
+              : "Paperclip automatically retried continuation for this assigned `in_progress` issue and the retry " +
                 "made progress, but it still has no live execution path. Moving it to `blocked` so it is visible for intervention.",
-            });
-            if (updated) {
-              result.escalated += 1;
-              result.issueIds.push(issue.id);
-            } else {
-              result.skipped += 1;
-            }
-            continue;
+          });
+          if (updated) {
+            if (decision === "escalate_chain_exhausted") result.continuationChainExhausted += 1;
+            result.escalated += 1;
+            result.issueIds.push(issue.id);
+          } else {
+            result.skipped += 1;
           }
-          result.recentProgressExempted += 1;
+          continue;
         }
+        if (repeatedContinuation && exempted) result.recentProgressExempted += 1;
 
         if (await isInvocationBudgetBlocked(issue, agentId)) {
           result.skipped += 1;

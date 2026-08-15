@@ -1,0 +1,114 @@
+import { describe, expect, it } from "vitest";
+import {
+  PROVIDER_QUOTA_RETRY_DEFAULT_BACKOFF_MS,
+  classifyProviderQuotaFailure,
+  parseProviderQuotaClockReset,
+} from "./heartbeat.js";
+
+// GH #706. Provider quota/billing exhaustion was classified `transient_upstream`
+// (because the gateway stamps errorCode `openclaw_gateway_wait_error`, which is
+// in TRANSIENT_UPSTREAM_ERROR_CODES) and so rode the 2m/10m/30m/2h retry ladder
+// against a provider that could not possibly answer. 27,080 of 34,064 failed runs
+// over 12 days were `transient_failure_retry` wakes.
+
+const run = (error: string, overrides: Record<string, unknown> = {}) =>
+  ({
+    error,
+    errorCode: "openclaw_gateway_wait_error",
+    resultJson: { error },
+    ...overrides,
+  } as unknown as Parameters<typeof classifyProviderQuotaFailure>[0]);
+
+const NOW = new Date("2026-08-14T12:00:00.000Z");
+
+describe("GH #706: provider quota/billing is not transient", () => {
+  // Both strings below are verbatim from heartbeat_runs on the live fsn
+  // database during the 2026-08-07 outage.
+  it("classifies the bailian monthly-allocation failure", () => {
+    const classified = classifyProviderQuotaFailure(
+      run("FailoverError: ⚠️ month allocated quota exceeded."),
+      NOW,
+    );
+    expect(classified).not.toBeNull();
+    expect(classified!.retryAt.getTime()).toBe(NOW.getTime() + PROVIDER_QUOTA_RETRY_DEFAULT_BACKOFF_MS);
+    expect(classified!.parsedResetTime).toBe(false);
+  });
+
+  it("classifies the mixed quota + deepseek billing failover summary", () => {
+    const classified = classifyProviderQuotaFailure(
+      run(
+        "FallbackSummaryError: All models failed (2): bailian/glm-5: 429 month allocated quota exceeded. " +
+          "(rate_limit) | deepseek/deepseek-v4-pro: 402 Insufficient Balance (billing) <- FailoverError: " +
+          "⚠️ deepseek (deepseek-v4-pro) returned a billing error",
+      ),
+      NOW,
+    );
+    expect(classified).not.toBeNull();
+  });
+
+  it("classifies a billing-only failure with no quota wording", () => {
+    // The deepseek half on its own — upstream/master's regex has no case for it.
+    expect(classifyProviderQuotaFailure(run("402 Insufficient Balance (billing)"), NOW)).not.toBeNull();
+  });
+
+  it("parks until the reset time the provider states, not a blind hour", () => {
+    const classified = classifyProviderQuotaFailure(
+      run("You've hit your usage limit. Try again at 3pm (UTC)."),
+      NOW,
+    );
+    expect(classified!.parsedResetTime).toBe(true);
+    expect(classified!.retryAt.toISOString()).toBe("2026-08-14T15:00:00.000Z");
+  });
+
+  it("honours a reset time the adapter already persisted", () => {
+    const classified = classifyProviderQuotaFailure(
+      run("provider quota", { resultJson: { providerQuotaRetryNotBefore: "2026-08-17T00:00:00.000Z" } }),
+      NOW,
+    );
+    expect(classified!.parsedResetTime).toBe(true);
+    expect(classified!.retryAt.toISOString()).toBe("2026-08-17T00:00:00.000Z");
+  });
+
+  it("leaves genuinely transient gateway failures alone", () => {
+    // These must keep riding the fast transient ladder — the fix must not turn
+    // every gateway hiccup into an hour-long park.
+    expect(classifyProviderQuotaFailure(run("Error: socket hang up"), NOW)).toBeNull();
+    expect(
+      classifyProviderQuotaFailure(run("CLI transcript compaction failed for bailian/glm-5: Compaction timed out"), NOW),
+    ).toBeNull();
+    expect(
+      classifyProviderQuotaFailure(
+        run("EmbeddedAttemptSessionTakeoverError: session file changed while embedded prompt lock was released"),
+        NOW,
+      ),
+    ).toBeNull();
+    expect(classifyProviderQuotaFailure(run("connect ECONNREFUSED 127.0.0.1:3100"), NOW)).toBeNull();
+  });
+
+  it("every park is strictly in the future, so a retry can never fire immediately", () => {
+    for (const text of [
+      "FailoverError: ⚠️ month allocated quota exceeded.",
+      "402 Insufficient Balance (billing)",
+      "You've hit your usage limit. Try again at 3pm (UTC).",
+      "model is at capacity",
+    ]) {
+      expect(classifyProviderQuotaFailure(run(text), NOW)!.retryAt.getTime()).toBeGreaterThan(NOW.getTime());
+    }
+  });
+});
+
+describe("GH #706: provider quota clock-reset parsing", () => {
+  it("rolls a reset time that already passed today to tomorrow", () => {
+    expect(parseProviderQuotaClockReset("try again at 9am (UTC)", NOW)!.toISOString()).toBe(
+      "2026-08-15T09:00:00.000Z",
+    );
+  });
+
+  it("returns null when the message states no reset time", () => {
+    expect(parseProviderQuotaClockReset("month allocated quota exceeded", NOW)).toBeNull();
+  });
+
+  it("returns null for an out-of-range clock", () => {
+    expect(parseProviderQuotaClockReset("try again at 99:99", NOW)).toBeNull();
+  });
+});

@@ -402,10 +402,137 @@ const GATEWAY_ONLY_TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set([
   "process_lost",
 ]);
 
+// Provider quota / billing exhaustion is NOT transient: retrying cannot succeed
+// until the allowance window resets or the operator tops the account up. GH #706
+// (fleet-wide outage 2026-08-07 → 08-15): every failure carried errorCode
+// `openclaw_gateway_wait_error`, which is in TRANSIENT_UPSTREAM_ERROR_CODES, so
+// 27,080 of 34,064 failed runs in 12 days were `transient_failure_retry` wakes
+// against a dead provider. The cause is only visible in the error TEXT — the
+// gateway adapter has no quota-specific errorCode — so this classifies on text,
+// unlike upstream/master which keys on an adapter-supplied `provider_quota` code.
+// Live samples this must match (verified against heartbeat_runs on fsn):
+//   "FailoverError: ⚠️ month allocated quota exceeded."
+//   "FallbackSummaryError: All models failed (2): bailian/glm-5: 429 month
+//    allocated quota exceeded. (rate_limit) | deepseek/deepseek-v4-pro:
+//    402 Insufficient Balance (billing) <- ..."
+// The first four alternatives are ported verbatim from upstream/master's
+// PROVIDER_QUOTA_ERROR_RE; the rest cover the billing half, which upstream has no
+// case for.
+const PROVIDER_QUOTA_ERROR_RE =
+  /(?:you(?:'|’)ve hit your usage limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|allocated quota|model (?:is )?at capacity|insufficient balance|insufficient (?:credits?|funds)|billing error|payment required)/i;
+
+// Fallback park window when the provider does not state a reset time. Ported
+// from upstream/master's PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS.
+export const PROVIDER_QUOTA_RETRY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
+
+// Ported from upstream/master's parseProviderQuotaClockReset: pull "try again at
+// 3pm (PST)" out of the provider's message so the retry is scheduled at the real
+// reset instead of a blind hour.
+export function parseProviderQuotaClockReset(error: string, now: Date) {
+  const match = error.match(
+    /try again at\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
+  );
+  if (!match) return null;
+
+  const hourValue = Number.parseInt(match[1] ?? "", 10);
+  const minute = Number.parseInt(match[2] ?? "0", 10);
+  const meridiem = (match[3] ?? "").toLowerCase();
+  if (!Number.isInteger(hourValue)) return null;
+  if (meridiem ? hourValue < 1 || hourValue > 12 : hourValue < 0 || hourValue > 23) return null;
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+
+  let hour = meridiem ? hourValue % 12 : hourValue;
+  if (meridiem === "p") hour += 12;
+  const timeZone = (match[4] ?? match[5])?.trim();
+  if (!timeZone) {
+    const retryAt = new Date(now);
+    retryAt.setUTCHours(hour, minute, 0, 0);
+    if (retryAt.getTime() <= now.getTime()) retryAt.setUTCDate(retryAt.getUTCDate() + 1);
+    return retryAt;
+  }
+
+  try {
+    const wallClock = (date: Date) => Object.fromEntries(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).formatToParts(date).map((part) => [part.type, part.value]),
+    );
+    const nowParts = wallClock(now);
+    const buildRetryAt = (dayOffset: number) => {
+      const targetDay = new Date(Date.UTC(
+        Number(nowParts.year),
+        Number(nowParts.month) - 1,
+        Number(nowParts.day) + dayOffset,
+        hour,
+        minute,
+      ));
+      let candidate = targetDay;
+      const targetMs = targetDay.getTime();
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const actual = wallClock(candidate);
+        const actualMs = Date.UTC(
+          Number(actual.year),
+          Number(actual.month) - 1,
+          Number(actual.day),
+          Number(actual.hour),
+          Number(actual.minute),
+        );
+        const adjustment = targetMs - actualMs;
+        if (adjustment === 0) break;
+        candidate = new Date(candidate.getTime() + adjustment);
+      }
+      return candidate;
+    };
+    const sameDay = buildRetryAt(0);
+    return sameDay.getTime() > now.getTime() ? sameDay : buildRetryAt(1);
+  } catch {
+    return null;
+  }
+}
+
+// Returns the park-until instant for a provider quota/billing failure, or null
+// when the run is not one. Exported for tests.
+export function classifyProviderQuotaFailure(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
+  now = new Date(),
+): { retryAt: Date; parsedResetTime: boolean } | null {
+  const resultJson = parseObject(run.resultJson);
+  const text = [run.errorCode ?? "", run.error ?? "", JSON.stringify(resultJson)].join("\n");
+  if (run.errorCode !== "provider_quota" && !PROVIDER_QUOTA_ERROR_RE.test(text)) return null;
+
+  const persistedRetryAt = readNonEmptyString(resultJson.providerQuotaRetryNotBefore) ??
+    readNonEmptyString(resultJson.retryNotBefore) ??
+    readNonEmptyString(resultJson.transientRetryNotBefore);
+  const parsedPersistedRetryAt = persistedRetryAt ? new Date(persistedRetryAt) : null;
+  if (parsedPersistedRetryAt && !Number.isNaN(parsedPersistedRetryAt.getTime()) && parsedPersistedRetryAt > now) {
+    return { retryAt: parsedPersistedRetryAt, parsedResetTime: true };
+  }
+
+  const parsedClockReset = parseProviderQuotaClockReset(text, now);
+  if (parsedClockReset) return { retryAt: parsedClockReset, parsedResetTime: true };
+
+  return {
+    retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RETRY_DEFAULT_BACKOFF_MS),
+    parsedResetTime: false,
+  };
+}
+
 function readHeartbeatRunErrorFamily(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
   adapterType?: string | null,
 ) {
+  // Checked ahead of the persisted family on purpose: the gateway adapter
+  // persists no family at all today, but if one ever persists
+  // "transient_upstream" for a quota failure that is precisely the
+  // misclassification GH #706 is about, and text is the stronger evidence.
+  if (classifyProviderQuotaFailure(run)) return "provider_quota";
+
   const resultJson = parseObject(run.resultJson);
   const persistedFamily = readNonEmptyString(resultJson.errorFamily);
   if (persistedFamily) return persistedFamily;
@@ -444,10 +571,21 @@ function readTransientRetryNotBeforeFromRun(run: Pick<typeof heartbeatRuns.$infe
 }
 
 function readTransientRecoveryContractFromRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
   adapterType?: string | null,
 ) {
-  return readHeartbeatRunErrorFamily(run, adapterType) === "transient_upstream"
+  const family = readHeartbeatRunErrorFamily(run, adapterType);
+  // provider_quota rides the same bounded retry ladder as transient_upstream —
+  // but with retryNotBefore pinned to the allowance reset, so the ladder's
+  // 2m/10m/30m/2h delays cannot fire against a provider that is still dead.
+  // Same shape as upstream/master's readTransientRecoveryContractFromRun.
+  if (family === "provider_quota") {
+    const quota = classifyProviderQuotaFailure(run);
+    return quota
+      ? { errorFamily: "provider_quota" as const, retryNotBefore: quota.retryAt }
+      : null;
+  }
+  return family === "transient_upstream"
     ? {
         errorFamily: "transient_upstream" as const,
         retryNotBefore: readTransientRetryNotBeforeFromRun(run),
