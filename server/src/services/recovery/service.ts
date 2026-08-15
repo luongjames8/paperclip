@@ -125,9 +125,20 @@ export const STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN = Math.max(
   Number(process.env.STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN) || 20,
 );
 
-// How far back the chain counter looks. One more than the cap so an exhausted
-// chain is always distinguishable from a chain sitting exactly at the cap.
-const PRODUCTIVE_CONTINUATION_CHAIN_SCAN_LIMIT = STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN + 1;
+// contextSnapshot key carrying the chain length forward from one productive
+// continuation recovery to the next, so the cap is an O(1) read off the current
+// run instead of a history scan. Same pattern as heartbeatRuns.continuationAttempt
+// on the run_liveness_continuation path.
+const PRODUCTIVE_CONTINUATION_CHAIN_KEY = "productiveContinuationChain";
+
+// How long the chain the given run belongs to already is, counting that run.
+// A run that carries no counter is the start of a chain (length 1) — which is
+// also what every in-flight chain looks like on the deploy that adds this, so
+// those simply restart their count once.
+export function readProductiveContinuationChainLength(contextSnapshot: unknown) {
+  const chain = asNumber(parseObject(contextSnapshot)[PRODUCTIVE_CONTINUATION_CHAIN_KEY], 0);
+  return Number.isFinite(chain) && chain > 0 ? Math.floor(chain) : 1;
+}
 
 export type ProductiveContinuationDecision = "requeue" | "escalate_no_progress" | "escalate_chain_exhausted";
 
@@ -139,10 +150,8 @@ export function decideProductiveContinuationRecovery(input: {
   repeated: boolean;
   exempted: boolean;
   chainLength: number;
-  maxChain?: number;
 }): ProductiveContinuationDecision {
-  const maxChain = input.maxChain ?? STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN;
-  if (input.chainLength >= maxChain) return "escalate_chain_exhausted";
+  if (input.chainLength >= STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN) return "escalate_chain_exhausted";
   if (!input.repeated) return "requeue";
   return input.exempted ? "requeue" : "escalate_no_progress";
 }
@@ -639,38 +648,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
       .limit(1)
       .then((rows) => rows[0] ?? null);
-  }
-
-  // GH #706: length of the unbroken run of productive continuation recoveries
-  // this issue is currently riding. Counts back from the newest run and stops at
-  // the first run that is not one, so any other kind of work on the issue resets
-  // the chain naturally.
-  async function countConsecutiveProductiveContinuationRecoveries(
-    companyId: string,
-    issueId: string,
-  ) {
-    const rows = await db
-      .select({
-        status: heartbeatRuns.status,
-        livenessState: heartbeatRuns.livenessState,
-        contextSnapshot: heartbeatRuns.contextSnapshot,
-      })
-      .from(heartbeatRuns)
-      .where(
-        and(
-          eq(heartbeatRuns.companyId, companyId),
-          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
-        ),
-      )
-      .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
-      .limit(PRODUCTIVE_CONTINUATION_CHAIN_SCAN_LIMIT);
-
-    let chainLength = 0;
-    for (const row of rows) {
-      if (!isRepeatedProductiveContinuationRecovery(row)) break;
-      chainLength += 1;
-    }
-    return chainLength;
   }
 
   async function summarizeRecentContinuationRetries(
@@ -3234,9 +3211,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         // counted and capped regardless, because the assignee's own comment is
         // circular evidence and refreshes that window forever.
         const chainLength = repeatedContinuation
-          ? await countConsecutiveProductiveContinuationRecoveries(issue.companyId, issue.id)
+          ? readProductiveContinuationChainLength(successfulRun.contextSnapshot)
           : 0;
-        const exempted = repeatedContinuation
+        // Not asked when the chain is already spent: the cap decides on its own,
+        // so the exemption lookup would be two queries thrown away.
+        const exempted = repeatedContinuation && chainLength < STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN
           ? await hasRecentVisibleProgress(
             issue.companyId,
             issue.id,
@@ -3286,6 +3265,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           retryReason: "issue_continuation_needed",
           source: "issue.productive_terminal_continuation_recovery",
           retryOfRunId: successfulRun.id,
+          // GH #706: hand the chain length to the next link so the cap is a
+          // read off the run, not a scan of the issue's run history.
+          extraContext: { [PRODUCTIVE_CONTINUATION_CHAIN_KEY]: chainLength + 1 },
         });
         if (queued) {
           result.continuationRequeued += 1;

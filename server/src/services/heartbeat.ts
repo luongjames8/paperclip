@@ -429,8 +429,10 @@ const PROVIDER_QUOTA_ERROR_RE =
 // scanning it would classify any run whose transcript merely discusses quotas or
 // billing — a fleet agent writing payment code parking itself for an hour is the
 // same defect as GH #706 pointed the other way.
-function readRunFailureText(run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">) {
-  const resultJson = parseObject(run.resultJson);
+function readRunFailureText(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode">,
+  resultJson: Record<string, unknown>,
+) {
   return [
     run.errorCode ?? "",
     run.error ?? "",
@@ -521,7 +523,7 @@ export function classifyProviderQuotaFailure(
   now = new Date(),
 ): { retryAt: Date; parsedResetTime: boolean } | null {
   const resultJson = parseObject(run.resultJson);
-  const text = readRunFailureText(run);
+  const text = readRunFailureText(run, resultJson);
   if (run.errorCode !== "provider_quota" && !PROVIDER_QUOTA_ERROR_RE.test(text)) return null;
 
   const persistedRetryAt = readNonEmptyString(resultJson.providerQuotaRetryNotBefore) ??
@@ -544,12 +546,15 @@ export function classifyProviderQuotaFailure(
 function readHeartbeatRunErrorFamily(
   run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
   adapterType?: string | null,
+  // Pass an already-computed classification (including `null`) to skip the
+  // recompute; JS defaults only fire on `undefined`.
+  quota = classifyProviderQuotaFailure(run),
 ) {
   // Checked ahead of the persisted family on purpose: the gateway adapter
   // persists no family at all today, but if one ever persists
   // "transient_upstream" for a quota failure that is precisely the
   // misclassification GH #706 is about, and text is the stronger evidence.
-  if (classifyProviderQuotaFailure(run)) return "provider_quota";
+  if (quota) return "provider_quota";
 
   const resultJson = parseObject(run.resultJson);
   const persistedFamily = readNonEmptyString(resultJson.errorFamily);
@@ -601,7 +606,7 @@ function readTransientRecoveryContractFromRun(
   const quota = classifyProviderQuotaFailure(run);
   if (quota) return { errorFamily: "provider_quota" as const, retryNotBefore: quota.retryAt };
 
-  return readHeartbeatRunErrorFamily(run, adapterType) === "transient_upstream"
+  return readHeartbeatRunErrorFamily(run, adapterType, quota) === "transient_upstream"
     ? {
         errorFamily: "transient_upstream" as const,
         retryNotBefore: readTransientRetryNotBeforeFromRun(run),

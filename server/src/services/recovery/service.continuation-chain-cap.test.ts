@@ -3,6 +3,7 @@ import {
   STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN,
   decideProductiveContinuationRecovery,
   isRepeatedProductiveContinuationRecovery,
+  readProductiveContinuationChainLength,
 } from "./service.js";
 
 // GH #706. The `in_progress` productive-continuation branch of
@@ -23,13 +24,15 @@ const productiveRecoveryRun = (overrides: Record<string, unknown> = {}) =>
     ...overrides,
   } as unknown as Parameters<typeof isRepeatedProductiveContinuationRecovery>[0]);
 
+const CAP = STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN;
+
 describe("GH #706: productive-continuation chain cap", () => {
   it("keeps requeuing while the chain is short and the exemption holds", () => {
     expect(
-      decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength: 1, maxChain: 5 }),
+      decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength: 1 }),
     ).toBe("requeue");
     expect(
-      decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength: 4, maxChain: 5 }),
+      decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength: CAP - 1 }),
     ).toBe("requeue");
   });
 
@@ -37,53 +40,65 @@ describe("GH #706: productive-continuation chain cap", () => {
     // This is the whole fix: `exempted: true` no longer buys another wake once
     // the chain has run its budget.
     expect(
-      decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength: 5, maxChain: 5 }),
+      decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength: CAP }),
     ).toBe("escalate_chain_exhausted");
     expect(
-      decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength: 9_183, maxChain: 5 }),
+      decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength: 9_183 }),
     ).toBe("escalate_chain_exhausted");
   });
 
   it("still escalates immediately when there is no visible progress at all", () => {
     expect(
-      decideProductiveContinuationRecovery({ repeated: true, exempted: false, chainLength: 1, maxChain: 5 }),
+      decideProductiveContinuationRecovery({ repeated: true, exempted: false, chainLength: 1 }),
     ).toBe("escalate_no_progress");
   });
 
   it("does not escalate a first, non-repeated productive continuation", () => {
     expect(
-      decideProductiveContinuationRecovery({ repeated: false, exempted: false, chainLength: 0, maxChain: 5 }),
+      decideProductiveContinuationRecovery({ repeated: false, exempted: false, chainLength: 0 }),
     ).toBe("requeue");
   });
 
   it("simulated HIN-2846 loop terminates instead of running forever", () => {
-    // Drive the branch the way reconcileStrandedAssignedIssues does: every
-    // wake the agent comments ("still pending"), so `exempted` is always true.
-    let chainLength = 0;
-    let decision = decideProductiveContinuationRecovery({
-      repeated: true,
-      exempted: true,
-      chainLength,
-      maxChain: 20,
-    });
-    let wakes = 0;
+    // Drives both halves the way reconcileStrandedAssignedIssues does: the agent
+    // comments "still pending" on every wake so `exempted` never goes false, and
+    // each requeue hands the incremented counter to the next link. This is the
+    // regression test for the outage — without the cap it never leaves the loop.
+    let chainLength = readProductiveContinuationChainLength({});
+    let wakes = 1;
+    let decision = decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength });
     while (decision === "requeue" && wakes < 10_000) {
       wakes += 1;
-      chainLength += 1;
-      decision = decideProductiveContinuationRecovery({
-        repeated: true,
-        exempted: true,
-        chainLength,
-        maxChain: 20,
-      });
+      chainLength = readProductiveContinuationChainLength({ productiveContinuationChain: chainLength + 1 });
+      decision = decideProductiveContinuationRecovery({ repeated: true, exempted: true, chainLength });
     }
     expect(decision).toBe("escalate_chain_exhausted");
-    expect(wakes).toBe(20);
+    expect(wakes).toBe(CAP);
   });
 
   it("the shipped default cap is bounded and at least the sibling path's 2", () => {
-    expect(STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN).toBeGreaterThanOrEqual(2);
-    expect(Number.isFinite(STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN)).toBe(true);
+    expect(CAP).toBeGreaterThanOrEqual(2);
+    expect(Number.isFinite(CAP)).toBe(true);
+  });
+});
+
+describe("GH #706: chain length carried on the wake context", () => {
+  it("treats a run with no counter as the start of a chain", () => {
+    // Also the state of every chain already in flight when this deploys: they
+    // simply restart their count once rather than being escalated on sight.
+    expect(readProductiveContinuationChainLength({})).toBe(1);
+    expect(readProductiveContinuationChainLength(null)).toBe(1);
+    expect(readProductiveContinuationChainLength({ productiveContinuationChain: 0 })).toBe(1);
+  });
+
+  it("reads the counter the previous link handed forward", () => {
+    expect(readProductiveContinuationChainLength({ productiveContinuationChain: 7 })).toBe(7);
+  });
+
+  it("ignores a junk counter rather than trusting it", () => {
+    for (const junk of ["nonsense", -3, Number.NaN, Number.POSITIVE_INFINITY, { nested: 1 }]) {
+      expect(readProductiveContinuationChainLength({ productiveContinuationChain: junk })).toBe(1);
+    }
   });
 });
 
