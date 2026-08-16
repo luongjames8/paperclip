@@ -166,6 +166,7 @@ import {
   readContinuationAttempt,
 } from "./recovery/index.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
+import { classifyProviderQuotaFailure } from "./provider-quota.js";
 import {
   recoveryAssigneeAdapterOverrides,
   withRecoveryModelProfileHint,
@@ -402,10 +403,20 @@ const GATEWAY_ONLY_TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set([
   "process_lost",
 ]);
 
+
 function readHeartbeatRunErrorFamily(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
   adapterType?: string | null,
+  // Pass an already-computed classification (including `null`) to skip the
+  // recompute; JS defaults only fire on `undefined`.
+  quota = classifyProviderQuotaFailure(run),
 ) {
+  // Checked ahead of the persisted family on purpose: the gateway adapter
+  // persists no family at all today, but if one ever persists
+  // "transient_upstream" for a quota failure that is precisely the
+  // misclassification GH #706 is about, and text is the stronger evidence.
+  if (quota) return "provider_quota";
+
   const resultJson = parseObject(run.resultJson);
   const persistedFamily = readNonEmptyString(resultJson.errorFamily);
   if (persistedFamily) return persistedFamily;
@@ -444,10 +455,19 @@ function readTransientRetryNotBeforeFromRun(run: Pick<typeof heartbeatRuns.$infe
 }
 
 function readTransientRecoveryContractFromRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
   adapterType?: string | null,
 ) {
-  return readHeartbeatRunErrorFamily(run, adapterType) === "transient_upstream"
+  // provider_quota rides the same bounded retry ladder as transient_upstream —
+  // but with retryNotBefore pinned to the allowance reset, so the ladder's
+  // 2m/10m/30m/2h delays cannot fire against a provider that is still dead.
+  // Same shape as upstream/master's readTransientRecoveryContractFromRun.
+  // Classified here rather than via readHeartbeatRunErrorFamily's string so the
+  // retryAt comes from the same evaluation that decided the family.
+  const quota = classifyProviderQuotaFailure(run);
+  if (quota) return { errorFamily: "provider_quota" as const, retryNotBefore: quota.retryAt };
+
+  return readHeartbeatRunErrorFamily(run, adapterType, quota) === "transient_upstream"
     ? {
         errorFamily: "transient_upstream" as const,
         retryNotBefore: readTransientRetryNotBeforeFromRun(run),
@@ -8243,6 +8263,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           maxAttempts,
         },
       });
+      // GH #706: persist the exhaustion, not just a log line. The recovery
+      // service must tell a SPENT ladder from a failure that has not entered one
+      // yet — it cannot infer that from the run's terminal status, because
+      // setRunStatusIfRunning persists `failed` before this function is even
+      // called, so a reconciliation tick landing in that window would see a
+      // terminal run with no active execution path and act as if the retries
+      // were over. Whoever decides the ladder is finished is the only one who
+      // can say so; jsonb-merged so a concurrent finalizer write is not clobbered.
+      await db
+        .update(heartbeatRuns)
+        .set({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || jsonb_build_object('boundedRetryLadderExhausted', true)`,
+          updatedAt: new Date(),
+        })
+        .where(eq(heartbeatRuns.id, run.id));
       return {
         outcome: "retry_exhausted" as const,
         attempt: nextAttempt,

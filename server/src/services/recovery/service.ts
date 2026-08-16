@@ -34,6 +34,7 @@ import { redactSensitiveText } from "../../redaction.js";
 import { logActivity } from "../activity-log.js";
 import { budgetService } from "../budgets.js";
 import { instanceSettingsService } from "../instance-settings.js";
+import { classifyProviderQuotaFailure } from "../provider-quota.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
 import { TERMINAL_HEARTBEAT_RUN_STATUSES, issueService } from "../issues.js";
@@ -101,6 +102,103 @@ export const STRANDED_RECENT_PROGRESS_EXEMPTION_MS = Math.max(
   60_000,
   Number(process.env.STRANDED_RECENT_PROGRESS_EXEMPTION_MS) || 30 * 60 * 1000,
 );
+
+// GH #706: hard ceiling on the productive-continuation recovery chain, which had
+// none. The GGU-809 exemption above accepts "the assignee commented recently" as
+// progress evidence — but the comment is usually written BY the wake being
+// evaluated, so an agent that is merely waiting and says "still pending" each
+// wake refreshes its own exemption window and guarantees its own next wake.
+// HIN-2846 rode that loop for 9,183 wakes / 9,110 comments in 4 days (~40s
+// period) and exhausted the monthly model allocation, taking all five companies
+// down for nine days. heartbeat-protocol.md is explicit that comments are not a
+// liveness path by themselves.
+//
+// The exemption stays (genuine batch workflows still need it) but is now bounded:
+// once the chain reaches this many consecutive productive continuation
+// recoveries, the issue escalates to `blocked` with an audit comment regardless
+// of the exemption. Sized to clear real multi-frame batches while still being
+// ~460x below the incident. Floored at 2 to match
+// DEFAULT_MAX_LIVENESS_CONTINUATION_ATTEMPTS on the sibling path.
+// ponytail: one flat ceiling, no per-workflow budget — add that only if a real
+// batch is measured hitting it.
+export const STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN = Math.max(
+  2,
+  Number(process.env.STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN) || 20,
+);
+
+// contextSnapshot key carrying the chain length forward from one productive
+// continuation recovery to the next, so the cap is an O(1) read off the current
+// run instead of a history scan. Same pattern as heartbeatRuns.continuationAttempt
+// on the run_liveness_continuation path.
+const PRODUCTIVE_CONTINUATION_CHAIN_KEY = "productiveContinuationChain";
+
+// How many productive continuation recoveries the chain this run belongs to has
+// already spent. Zero means "not in a chain yet" — a genuinely first
+// continuation, and also every chain in flight on the deploy that adds this, so
+// those restart their count once rather than being escalated on sight.
+//
+// The COUNTER, not the run's retryReason, is what identifies chain membership.
+// scheduleBoundedRetryForRun copies a run's context forward but overwrites
+// retryReason with "transient_failure", so a chain link that failed transiently
+// and then succeeded is not an `isRepeatedProductiveContinuationRecovery` — and
+// reading the length only for those runs let one transient failure per fewer
+// than STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN wakes reset the chain and slip
+// the cap indefinitely (codex P1 on PR #40).
+export function readProductiveContinuationChainLength(contextSnapshot: unknown) {
+  const chain = asNumber(parseObject(contextSnapshot)[PRODUCTIVE_CONTINUATION_CHAIN_KEY], 0);
+  return Number.isFinite(chain) && chain > 0 ? Math.floor(chain) : 0;
+}
+
+export const PROVIDER_QUOTA_ESCALATION_COMMENT =
+  "Paperclip stopped automatic recovery for this issue: its last run failed on a model provider " +
+  "quota or billing limit, and the bounded retry ladder is exhausted. Re-running cannot succeed " +
+  "until the allowance resets or the account is topped up, so the issue is moving to `blocked` " +
+  "rather than retrying.";
+
+// Marker heartbeat.ts stamps on a run when its bounded retry ladder is spent.
+export const BOUNDED_RETRY_LADDER_EXHAUSTED_KEY = "boundedRetryLadderExhausted";
+
+// True when `run` is a provider-quota failure belonging to `agentId` whose retry
+// ladder is PROVEN spent. Three conditions, each closing a way this guard could
+// block work that was still recoverable (codex P1s on PR #40):
+//
+//  - the agent must match. Reassignment clears execution locks but keeps run
+//    history, so an issue's latest run can belong to a previous assignee on a
+//    different provider or account; blocking on that would strand the
+//    reassignment that was the operator's way out.
+//  - the ladder must have STAMPED its exhaustion. A terminal quota run does not
+//    prove the retries are over: heartbeat.ts persists the failed status before
+//    it schedules the retry, so a reconciliation tick in that window would
+//    otherwise block the issue on its first quota failure — and the finalizer
+//    would then queue a retry for already-blocked work. Runs that predate this
+//    change carry no marker either, and correctly get a ladder rather than an
+//    immediate block.
+//  - and the failure must actually be a quota/billing one.
+export function isProviderQuotaExhaustedRunFor(
+  run: LatestIssueRun,
+  agentId: string | null | undefined,
+) {
+  if (!run || !agentId || run.agentId !== agentId) return false;
+  if (!isUnsuccessfulTerminalIssueRun(run)) return false;
+  if (parseObject(run.resultJson)[BOUNDED_RETRY_LADDER_EXHAUSTED_KEY] !== true) return false;
+  return Boolean(classifyProviderQuotaFailure(run));
+}
+
+export type ProductiveContinuationDecision = "requeue" | "escalate_no_progress" | "escalate_chain_exhausted";
+
+// Pure decision for the `in_progress` productive-continuation branch of
+// reconcileStrandedAssignedIssues. `chainLength` counts the consecutive
+// productive continuation-recovery runs already spent on this issue, including
+// the run being evaluated.
+export function decideProductiveContinuationRecovery(input: {
+  repeated: boolean;
+  exempted: boolean;
+  chainLength: number;
+}): ProductiveContinuationDecision {
+  if (input.chainLength >= STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN) return "escalate_chain_exhausted";
+  if (!input.repeated) return "requeue";
+  return input.exempted ? "requeue" : "escalate_no_progress";
+}
 
 type RecoveryWakeupOptions = {
   source?: "timer" | "assignment" | "on_demand" | "automation";
@@ -413,7 +511,14 @@ function isSuccessfulInProgressContinuationRun(latestRun: LatestIssueRun): lates
   return latestRun?.status === "succeeded";
 }
 
-function isProductiveContinuationRun(latestRun: LatestIssueRun) {
+// The only fields these two predicates read. Narrowed so the chain counter can
+// feed them rows selected without the rest of the run (GH #706).
+type ProductiveContinuationRunFields = Pick<
+  typeof heartbeatRuns.$inferSelect,
+  "status" | "livenessState" | "contextSnapshot"
+>;
+
+function isProductiveContinuationRun(latestRun: ProductiveContinuationRunFields | null) {
   return latestRun?.status === "succeeded" &&
     (latestRun.livenessState === "advanced" ||
       latestRun.livenessState === "completed" ||
@@ -421,7 +526,7 @@ function isProductiveContinuationRun(latestRun: LatestIssueRun) {
       latestRun.livenessState === "needs_followup");
 }
 
-function isRepeatedProductiveContinuationRecovery(latestRun: SuccessfulLatestIssueRun) {
+export function isRepeatedProductiveContinuationRecovery(latestRun: ProductiveContinuationRunFields) {
   const latestContext = parseObject(latestRun.contextSnapshot);
   return readNonEmptyString(latestContext.retryReason) === "issue_continuation_needed" &&
     readNonEmptyString(latestContext.source) === "issue.productive_terminal_continuation_recovery" &&
@@ -2871,6 +2976,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       escalated: 0,
       waitingOnReviewResolved: 0,
       recentProgressExempted: 0,
+      continuationChainExhausted: 0,
+      providerQuotaEscalated: 0,
       skipped: 0,
       issueIds: [] as string[],
     };
@@ -2921,6 +3028,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       }
 
       const latestRun = await getLatestIssueRun(issue.companyId, issue.id);
+
       if (isStrandedIssueRecoveryIssue(issue) && isUnsuccessfulTerminalIssueRun(latestRun)) {
         const updated = await escalateStrandedRecoveryIssueInPlace({
           issue,
@@ -2928,6 +3036,42 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           latestRun,
         });
         if (updated) {
+          result.escalated += 1;
+          result.issueIds.push(issue.id);
+        } else {
+          result.skipped += 1;
+        }
+        continue;
+      }
+
+      // GH #706: a provider quota/billing failure cannot be fixed by re-running,
+      // and every branch below ends in a requeue. The heartbeat ladder parks each
+      // of its attempts at the allowance reset, and while one is parked the
+      // hasActiveExecutionPath check above already skips this issue — so reaching
+      // here with a quota failure means that bounded ladder is SPENT. Without
+      // this the requeue starts a fresh ladder (didAutomaticRecoveryFail does not
+      // recognise the exhausted ladder's "transient_failure" retryReason), and a
+      // persistent outage keeps looping, just more slowly.
+      //
+      // Scoped to the run's own agent: reassignment clears execution locks but
+      // keeps run history, so the issue's latest run can belong to a PREVIOUS
+      // assignee whose provider has nothing to do with the new one's — blocking
+      // on that would strand the reassignment that was the operator's way out.
+      // Placed after the recovery-issue branch so recovery issues keep their own
+      // in-place escalation, and skipped for in_review so the participant guard
+      // below owns that case — it is the one that passes the review recovery
+      // cause and the participant as recovery owner, which this generic
+      // escalation would lose (it would be recorded as a stranded assignment and
+      // could wake the assignee's manager instead of preserving the review path).
+      if (issue.status !== "in_review" && isProviderQuotaExhaustedRunFor(latestRun, agentId)) {
+        const updated = await escalateStrandedAssignedIssue({
+          issue,
+          previousStatus: issue.status as StrandedPreviousStatus,
+          latestRun,
+          comment: PROVIDER_QUOTA_ESCALATION_COMMENT + (summarizeRunFailureForIssueComment(latestRun) ?? ""),
+        });
+        if (updated) {
+          result.providerQuotaEscalated += 1;
           result.escalated += 1;
           result.issueIds.push(issue.id);
         } else {
@@ -2946,6 +3090,30 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           issue.id,
           participantAgentId,
         );
+
+        // GH #706: same guard as above, on the participant's own latest run.
+        // The shared `latestRun` can be the assignee's rather than the
+        // participant's, so a quota-exhausted reviewer would otherwise be
+        // requeued past it.
+        if (isProviderQuotaExhaustedRunFor(participantLatestRun, participantAgentId)) {
+          const updated = await escalateStrandedAssignedIssue({
+            issue,
+            previousStatus: "in_review",
+            latestRun: participantLatestRun,
+            comment: PROVIDER_QUOTA_ESCALATION_COMMENT +
+              (summarizeRunFailureForIssueComment(participantLatestRun) ?? ""),
+            recoveryCause: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
+            recoveryOwnerAgentId: participantAgentId,
+          });
+          if (updated) {
+            result.providerQuotaEscalated += 1;
+            result.escalated += 1;
+            result.issueIds.push(issue.id);
+          } else {
+            result.skipped += 1;
+          }
+          continue;
+        }
 
         if (!participantLatestRun || !isTerminalIssueRun(participantLatestRun)) {
           if (!agentInvokable) {
@@ -3142,36 +3310,55 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           continue;
         }
 
-        if (isRepeatedProductiveContinuationRecovery(successfulRun)) {
-          // GGU-809: skip escalation if the assignee has shown visible progress
-          // (comment or attachment) within the exemption window. Falling
-          // through here lets the normal continuation-retry path enqueue the
-          // next wake, which is the correct behaviour for batch workflows.
-          const exempted = await hasRecentVisibleProgress(
+        const repeatedContinuation = isRepeatedProductiveContinuationRecovery(successfulRun);
+        // GGU-809: skip escalation if the assignee has shown visible progress
+        // (comment or attachment) within the exemption window, which lets the
+        // requeue below carry batch workflows through. GH #706: the chain is
+        // counted and capped regardless, because the assignee's own comment is
+        // circular evidence and refreshes that window forever.
+        // Read unconditionally: a link that failed transiently and then
+        // succeeded still carries the counter but no longer looks like a
+        // repeated recovery, and gating on that let the chain reset.
+        const chainLength = readProductiveContinuationChainLength(successfulRun.contextSnapshot);
+        // Not asked when the chain is already spent: the cap decides on its own,
+        // so the exemption lookup would be two queries thrown away.
+        const exempted = repeatedContinuation && chainLength < STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN
+          ? await hasRecentVisibleProgress(
             issue.companyId,
             issue.id,
             agentId,
             STRANDED_RECENT_PROGRESS_EXEMPTION_MS,
-          );
-          if (!exempted) {
-            const updated = await escalateStrandedAssignedIssue({
-              issue,
-              previousStatus: "in_progress",
-              latestRun: successfulRun,
-              comment:
-                "Paperclip automatically retried continuation for this assigned `in_progress` issue and the retry " +
+          )
+          : false;
+        const decision = decideProductiveContinuationRecovery({
+          repeated: repeatedContinuation,
+          exempted,
+          chainLength,
+        });
+
+        if (decision !== "requeue") {
+          const updated = await escalateStrandedAssignedIssue({
+            issue,
+            previousStatus: "in_progress",
+            latestRun: successfulRun,
+            comment: decision === "escalate_chain_exhausted"
+              ? "Paperclip has retried continuation for this assigned `in_progress` issue " +
+                `${chainLength}× in a row and it still has no live execution path. The recent-progress ` +
+                "exemption kept the chain alive, but an assignee comment is not by itself evidence of " +
+                "progress, so the chain is capped here. Moving it to `blocked` so it is visible for intervention."
+              : "Paperclip automatically retried continuation for this assigned `in_progress` issue and the retry " +
                 "made progress, but it still has no live execution path. Moving it to `blocked` so it is visible for intervention.",
-            });
-            if (updated) {
-              result.escalated += 1;
-              result.issueIds.push(issue.id);
-            } else {
-              result.skipped += 1;
-            }
-            continue;
+          });
+          if (updated) {
+            if (decision === "escalate_chain_exhausted") result.continuationChainExhausted += 1;
+            result.escalated += 1;
+            result.issueIds.push(issue.id);
+          } else {
+            result.skipped += 1;
           }
-          result.recentProgressExempted += 1;
+          continue;
         }
+        if (repeatedContinuation && exempted) result.recentProgressExempted += 1;
 
         if (await isInvocationBudgetBlocked(issue, agentId)) {
           result.skipped += 1;
@@ -3185,6 +3372,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           retryReason: "issue_continuation_needed",
           source: "issue.productive_terminal_continuation_recovery",
           retryOfRunId: successfulRun.id,
+          // GH #706: hand the chain length to the next link so the cap is a
+          // read off the run, not a scan of the issue's run history.
+          extraContext: { [PRODUCTIVE_CONTINUATION_CHAIN_KEY]: chainLength + 1 },
         });
         if (queued) {
           result.continuationRequeued += 1;
