@@ -501,6 +501,28 @@ const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   "approval_revision_requested",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
 ]);
+// Fleet issue #657 (codex round 5, adversarial-seam-hardening): these four
+// wake reasons are exclusively produced by buildExecutionStageWakeup
+// (routes/issues.ts) from server-computed executionState — never from
+// caller input. execution_completed in particular gets a claim-time
+// staleness EXEMPTION (evaluateQueuedRunStaleness, below) keyed partly on
+// this reason string; if a caller could ever get this reason onto a queued
+// run themselves (the manual /agents/:id/wakeup route and its legacy
+// heartbeat/invoke sibling both accept an arbitrary caller-supplied
+// `reason` with no restriction), they could ride that exemption to start an
+// on-demand run against a closed issue outside the server's own approval
+// flow. Closing this at claim time would mean re-deriving/verifying the
+// wake's entire payload against fresh state — this closes it at the INPUT
+// boundary instead: these reasons are structurally unreachable via any
+// caller-facing route (see the reservedWakeReason check in routes/agents.ts),
+// so the exemption never needs to ask "was this wake really server
+// generated" — it can only ever exist because it was.
+export const SERVER_ONLY_EXECUTION_STAGE_WAKE_REASONS = new Set([
+  "execution_review_requested",
+  "execution_approval_requested",
+  "execution_changes_requested",
+  "execution_completed",
+]);
 const ISSUE_RESPONSIBLE_USER_WAKE_REASONS = new Set([
   "issue_assigned",
   "issue_checked_out",
@@ -2691,6 +2713,13 @@ export function shouldResetTaskSessionForWake(
     wakeReason === EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON ||
     wakeReason === "execution_approval_requested" ||
     wakeReason === "execution_changes_requested" ||
+    // execution_completed (fleet issue #657) is deliberately NOT listed here
+    // — buildExecutionStageWakeup sets contextSnapshot.forceFreshSession
+    // directly on that wake (also required to route it out of same-issue
+    // active-run coalescing, codex P2 round 3), which the check above
+    // already covers. A second, reason-string-based path to the same
+    // decision would be redundant and could drift from the wake's actual
+    // behavior.
     // PF-4: timer-driven wakes are exploratory ("any new work?"). They do not
     // carry meaningful continuation state, so reusing the prior task session
     // for repeated timer wakes accumulates low-value context and pushes the
@@ -2708,6 +2737,13 @@ function shouldRequireIssueCommentForWake(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ) {
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
+  // Fleet issue #657: execution_completed is deliberately NOT in this list.
+  // The other execution_* reasons gate a review/approval decision that needs
+  // an audit-trail comment; execution_completed fires on an issue that's
+  // already done, purely as an FYI. Requiring a comment here would enqueue a
+  // "missing_issue_comment" retry wake on every completion whose executor
+  // skill doesn't (yet) act on it — the opposite of the harmless-if-ignored
+  // backward compatibility this wake is designed for.
   return (
     wakeReason === "issue_assigned" ||
     wakeReason === "execution_review_requested" ||
@@ -2806,6 +2842,8 @@ export function describeSessionResetReason(
   }
   if (wakeReason === "execution_approval_requested") return "wake reason is execution_approval_requested";
   if (wakeReason === "execution_changes_requested") return "wake reason is execution_changes_requested";
+  // execution_completed is covered by the forceFreshSession check above —
+  // see shouldResetTaskSessionForWake for why no reason-string branch here.
   // PF-4: paired with shouldResetTaskSessionForWake — keep the reason wording
   // explicit so run logs make session reuse/reset behavior legible.
   if (wakeReason === "heartbeat_timer") return "wake reason is heartbeat_timer (timer-driven wake starts fresh)";
@@ -9320,7 +9358,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           | "issue_not_in_progress"
           | "issue_execution_lock_changed"
           | "issue_review_participant_changed"
-          | "issue_continuation_waiting_on_review";
+          | "issue_continuation_waiting_on_review"
+          | "execution_completed_target_changed";
         details: Record<string, unknown>;
       };
 
@@ -9355,6 +9394,74 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const resumeIntent = context.resumeIntent === true || context.followUpRequested === true;
     const wakeReason = readNonEmptyString(context.wakeReason);
     const retryReason = readNonEmptyString(context.retryReason) ?? run.scheduledRetryReason ?? null;
+    // Fleet issue #657 + adversarial-seam-hardening (codex rounds 1, 4, 8):
+    // execution_completed notifies the ORIGINAL EXECUTOR after an
+    // executionPolicy completes on an issue that is (by definition, at
+    // wake-creation time) "done" — deliberately WITHOUT reassigning the
+    // issue back to them (that would be a state change this
+    // notification-only wake must not make; see buildExecutionStageWakeup).
+    // Every OTHER wake this function guards (issue_assigned,
+    // execution_review_requested, execution_approval_requested,
+    // execution_changes_requested) makes its target the CURRENT assignee of
+    // a NON-terminal issue as part of the same transition that queues it —
+    // so "assignee changed" / "reached done/cancelled" are genuine
+    // staleness signals for THEM. For execution_completed those same
+    // signals are backwards (the assignee is expected to differ, and "done"
+    // is the expected, not stale, state) — so it needs an entirely
+    // DIFFERENT, self-contained validity condition, not exemptions bolted
+    // onto checks built for a different wake shape.
+    //
+    // Layering `!isValidExecutionCompletedTarget` onto those two OTHER
+    // checks (as this used to) was the wrong shape: each generic check only
+    // evaluates when ITS OWN precondition holds (assignee mismatch; status
+    // done/cancelled) — so if the issue is REOPENED and reassigned back to
+    // the SAME executor before the queued run is claimed (codex round 8),
+    // NEITHER generic check's precondition even fires (assignee now
+    // matches; status is no longer terminal) — the stale run still starts,
+    // delivering a "your work was approved, publish now" prompt while the
+    // executor is actively back in progress on the SAME issue. Two
+    // narrowly-reactive exemption rounds (identity binding, round 4; the
+    // done-vs-cancelled scope, round 1) each closed one symptom without
+    // fixing the underlying mismatch between the exemption's shape and what
+    // it was exempting.
+    //
+    // Fix: execution_completed gets its OWN dedicated, POSITIVE branch,
+    // evaluated first and independent of every other check below —
+    // isValidExecutionCompletedTarget is the complete, self-sufficient
+    // definition of "this run is still valid" (issue currently done, its
+    // executionState currently completed, and run.agentId currently equal
+    // to that state's returnAssignee — type-discriminated, mirroring this
+    // same function's "in_review" participant-match check a few lines
+    // below). If it holds, the wake is valid full stop — nothing else in
+    // this function needs to agree. If it doesn't, the wake is stale full
+    // stop — no other check gets a chance to accidentally wave it through
+    // because its own unrelated precondition didn't happen to fire.
+    const completedExecutionState = parseIssueExecutionState(issue.executionState);
+    const isValidExecutionCompletedTarget =
+      issue.status === "done" &&
+      completedExecutionState?.status === "completed" &&
+      completedExecutionState.returnAssignee?.type === "agent" &&
+      completedExecutionState.returnAssignee.agentId === run.agentId;
+
+    if (wakeReason === "execution_completed") {
+      if (isValidExecutionCompletedTarget) return { stale: false };
+      return {
+        stale: true,
+        errorCode: "execution_completed_target_changed",
+        reason:
+          "Cancelled because the issue's execution-completion state no longer matches this wake (reopened, reassigned to a different executor, or the executionPolicy changed) before the queued run could start",
+        details: {
+          issueId,
+          expectedReturnAssigneeAgentId: run.agentId,
+          currentStatus: issue.status,
+          currentExecutionStateStatus: completedExecutionState?.status ?? null,
+          currentReturnAssigneeAgentId:
+            completedExecutionState?.returnAssignee?.type === "agent"
+              ? completedExecutionState.returnAssignee.agentId
+              : null,
+        },
+      };
+    }
 
     if (
       issue.status === "in_progress" &&

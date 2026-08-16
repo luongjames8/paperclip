@@ -2165,6 +2165,121 @@ function buildExecutionStageWakeup(input: {
     };
   }
 
+  // Fleet issue #657: the FINAL stage's approval closes the workflow (and
+  // usually the issue itself, to "done") without ever waking anyone —
+  // buildCompletedState (issue-execution-policy.ts) clears currentStageId/
+  // currentParticipant and the route lets the approver's own requested
+  // status pass straight through. Every consumer of a review/approval gate
+  // needs SOME way to act after the gate opens (e.g. "now publish"), so wake
+  // the original executor (returnAssignee — stable across multi-stage
+  // policies and changes-requested loops, see issue-execution-policy.ts).
+  // This is a notification wake, not a state transition: it must never
+  // reopen the issue or touch executionState — the wake payload only, same
+  // as the two branches above.
+  if (nextState.status === "completed") {
+    const agentId = nextState.returnAssignee?.type === "agent" ? (nextState.returnAssignee.agentId ?? null) : null;
+    // Mirrors becameChangesRequested's three-way check below: lastDecisionId
+    // alone can miss a returnAssignee change that isn't accompanied by a
+    // fresh decision (defensive symmetry with the sibling branch — no known
+    // path produces this today since buildCompletedState always carries
+    // returnAssignee forward unchanged, but drifting from that invariant
+    // silently would otherwise wake the WRONG executor).
+    const becameCompleted =
+      previousState?.status !== "completed" ||
+      previousState?.lastDecisionId !== nextState.lastDecisionId ||
+      !executionPrincipalsEqual(previousState?.returnAssignee ?? null, nextState.returnAssignee ?? null);
+    // codex P2 (round 2): a policy whose only remaining stages are review
+    // stages the executor is the sole eligible participant for can auto-skip
+    // straight to "completed" (issue-execution-policy.ts's
+    // canAutoSkipPendingStage) on ANY actor's PATCH — not just the
+    // executor's own, since canAutoSkipPendingStage never checks who the
+    // actor is, only that the stage's participants all equal returnAssignee.
+    // That path never records a decision, so lastDecisionOutcome stays
+    // whatever it was before (never "approved"). Require a REAL approval to
+    // have actually closed the workflow: this is both semantically correct
+    // (this wake means "someone else signed off", which didn't happen here)
+    // and avoids the prompt builder having no sane copy for "nobody actually
+    // reviewed this".
+    if (!agentId || !becameCompleted || nextState.lastDecisionOutcome !== "approved") return null;
+
+    // No-self-wake guard (defense-in-depth): the lastDecisionOutcome check
+    // above already screens out every reachable auto-skip-to-completed path
+    // (it never records "approved"). This guards a DIFFERENT, still-live
+    // case — a genuine recorded approval where the approving actor happens
+    // to equal returnAssignee — which the exclusion invariant in
+    // selectStageParticipant (issue-execution-policy.ts) is supposed to make
+    // impossible today, but this branch has no visibility into that
+    // invariant holding. Compare the ACTOR who triggered THIS transition
+    // (reusing the same actor/participant predicate the comment-driven
+    // auto-approval path already trusts).
+    if (
+      actorMatchesExecutionParticipant(
+        { actorType: input.requestedByActorType, actorId: input.requestedByActorId },
+        nextState.returnAssignee,
+      )
+    ) {
+      return null;
+    }
+
+    // currentStageId/currentStageType/currentParticipant are cleared on
+    // nextState by buildCompletedState — pull the just-approved stage's
+    // identity from previousState (the pending stage this decision closed)
+    // so the wake context still names which stage/who approved.
+    const executionStage = buildExecutionStageWakeContext({
+      state: {
+        ...nextState,
+        currentStageId: previousState?.currentStageId ?? null,
+        currentStageType: previousState?.currentStageType ?? null,
+        currentParticipant: previousState?.currentParticipant ?? null,
+      },
+      wakeRole: "executor",
+      // No gated decision to make here (unlike the two wake types above) —
+      // this is FYI only, so an executor/skill that ignores it is harmless.
+      allowedActions: [],
+    });
+
+    return {
+      agentId,
+      wakeup: {
+        source: "assignment" as const,
+        triggerDetail: "system" as const,
+        reason: "execution_completed",
+        payload: {
+          issueId,
+          mutation: "update",
+          executionStage,
+          ...(interruptedRunId ? { interruptedRunId } : {}),
+        },
+        requestedByActorType: input.requestedByActorType,
+        requestedByActorId: input.requestedByActorId,
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          wakeReason: "execution_completed",
+          source: "issue.execution_stage",
+          executionStage,
+          // codex P2 (round 3): unlike execution_review_requested/
+          // execution_approval_requested (which wake a DIFFERENT agent —
+          // the reviewer/approver — from whoever executed the issue),
+          // execution_completed targets the SAME agent identity as the
+          // original executor. If that agent's own run for this issue is
+          // still "running" (e.g. still finishing workspace-finalize work)
+          // when the approver's PATCH lands, heartbeat.ts's same-issue
+          // active-run coalescing (enqueueWakeup, isSameExecutionAgent
+          // branch) would silently merge this wake's contextSnapshot into
+          // that ALREADY-EXECUTING process instead of queueing a follow-up
+          // — an adapter process that already received its prompt will
+          // never observe the merge, so the notification is lost exactly
+          // like the bug this wake exists to fix. forceFreshSession routes
+          // through shouldDeferFollowupWakeForSameIssue to force a genuine
+          // deferred follow-up instead of a silent coalesce.
+          forceFreshSession: true,
+          ...(interruptedRunId ? { interruptedRunId } : {}),
+        },
+      },
+    };
+  }
+
   return null;
 }
 
@@ -8236,7 +8351,21 @@ export function issueRoutes(
 
         for (const mentionedId of mentionedIds) {
           if (actor.actorType === "agent" && actor.actorId === mentionedId) continue;
-          addWakeup(mentionedId, {
+          // codex P2 (round 6, fleet issue #657): plain addWakeup is
+          // last-write-wins on the SAME agent+issue key. If this comment
+          // both closes the workflow (execution_completed already queued
+          // for the returnAssignee, above) AND @-mentions that same
+          // executor — a natural thing for an approver to write ("approved,
+          // @executor please publish") — this generic mention wake would
+          // silently clobber the execution_completed wake, dropping its
+          // executionStage follow-through context entirely. Reuse the same
+          // generic-vs-specific precedence helper the interaction-supersede
+          // wakes below already rely on: "issue_comment_mentioned" is
+          // already in GENERIC_COMMENT_WAKE_REASONS, so this refuses to
+          // overwrite a more specific (e.g. execution_completed,
+          // execution_review_requested, issue_assigned) wake already queued
+          // for the same key.
+          addWakeupPreferringInteractionOverGenericComment(mentionedId, {
             source: "automation",
             triggerDetail: "system",
             reason: "issue_comment_mentioned",
@@ -9786,16 +9915,27 @@ export function issueRoutes(
 
       for (const mentionedId of mentionedIds) {
         if (actorIsAgent && actor.actorId === mentionedId) continue;
+        // codex P2 (round 7, fleet issue #657): this route's addWakeup keys
+        // on issueId (first-write-wins — see its definition above), so the
+        // key MUST match the earlier commentDecisionStageWakeup insert's
+        // key (currentIssue.id, the resolved UUID) or the two are treated
+        // as different agent+issue pairs entirely — the mention wake then
+        // reaches heartbeat.wakeup as a SEPARATE call, which can
+        // canonicalize/coalesce over the execution_completed run and lose
+        // its wakeReason. currentIssue.id (resolved UUID), not the raw path
+        // param `id` (may be an identifier like "PAP-123") — same
+        // identifier-vs-uuid fix already applied to the other wakes in this
+        // function (see the addComment call above).
         addWakeup(mentionedId, {
           source: "automation",
           triggerDetail: "system",
           reason: "issue_comment_mentioned",
-          payload: { issueId: id, commentId: comment.id },
+          payload: { issueId: currentIssue.id, commentId: comment.id },
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
           contextSnapshot: {
-            issueId: id,
-            taskId: id,
+            issueId: currentIssue.id,
+            taskId: currentIssue.id,
             commentId: comment.id,
             wakeCommentId: comment.id,
             wakeReason: "issue_comment_mentioned",

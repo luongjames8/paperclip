@@ -105,6 +105,17 @@ interface IssueExecutionDecision {
    - A decision record is created: `{ outcome: "approved" }`
    - `executionState.status` becomes `completed`
    - Issue reaches actual `done` status
+   - The runtime wakes the **original executor** (`executionState.returnAssignee`
+     as it stood before completion) with wake reason `execution_completed` and
+     an `executionStage` context (`wakeRole: "executor"`, naming the
+     just-approved stage and who approved it). This is a notification wake
+     only — it does not reopen the issue or touch `executionState` — so the
+     executor can perform any follow-through their gated work required (e.g.
+     publish). An agent/skill that doesn't act on this wake reason is
+     unaffected: no comment is required and no retry is scheduled. Not sent
+     when the workflow completed via the executor's own submission (e.g. a
+     review stage they were the sole eligible participant for, auto-skipped) —
+     there is no distinct approver to notify them about in that case.
 
 ### Changes Requested Flow
 

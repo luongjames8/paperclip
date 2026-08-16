@@ -1463,6 +1463,18 @@ export function renderPaperclipWakePrompt(
         "If you request changes, the workflow routes back to the stored return assignee.",
         "",
       );
+    } else if (executionStage.wakeRole === "executor" && executionStage.lastDecisionOutcome === "approved") {
+      // Fleet issue #657 (codex P1): this branch used to be reached ONLY by
+      // the changes-requested wake, so it hardcoded that copy. execution_completed
+      // reuses wakeRole "executor" but means the opposite — the gate PASSED — so
+      // it needs its own copy, distinguished via lastDecisionOutcome (already
+      // part of this same context, no new field needed).
+      lines.push(
+        "Your gated work on this issue was just approved — the review/approval workflow is complete and the issue has reached its final status.",
+        "This is a notification, not a request to reopen, resubmit, or change the issue's status.",
+        "If your workflow has follow-through steps that were gated behind this approval (e.g. publishing), perform them now.",
+        "",
+      );
     } else if (executionStage.wakeRole === "executor") {
       lines.push(
         "You are waking because changes were requested in the execution workflow.",
