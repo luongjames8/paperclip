@@ -931,6 +931,33 @@ function readGatewayMeta(value: unknown): Record<string, unknown> | undefined {
   return asRecord(asRecord(payload?.result)?.meta) ?? asRecord(payload?.meta) ?? undefined;
 }
 
+/** Later payloads win: the terminal `agent` frame is the only one carrying usage. */
+function mergeGatewayMeta(payloads: unknown[]) {
+  const mergedMeta: Record<string, unknown> = Object.assign(
+    {},
+    ...payloads.map((payload) => readGatewayMeta(payload) ?? {}),
+  );
+  return { mergedMeta, agentMeta: asRecord(mergedMeta.agentMeta) };
+}
+
+/**
+ * Provider/model/usage/cost fields for an execution result. Failed and
+ * timed-out runs burn tokens too, and paperclip bills them the same way, so
+ * every terminal path reports these — not just the successful one.
+ */
+function buildGatewayUsageFields(payloads: unknown[]): Partial<AdapterExecutionResult> {
+  const { mergedMeta, agentMeta } = mergeGatewayMeta(payloads);
+  const usage = parseUsage(agentMeta?.usage ?? mergedMeta.usage);
+  const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model);
+  const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
+  return {
+    provider: nonEmpty(agentMeta?.provider) ?? nonEmpty(mergedMeta.provider) ?? "openclaw",
+    ...(model ? { model } : {}),
+    ...(usage ? { usage } : {}),
+    ...(costUsd > 0 ? { costUsd } : {}),
+  };
+}
+
 function parseUsage(value: unknown): AdapterExecutionResult["usage"] | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
@@ -1361,6 +1388,26 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
         latestResultPayload = waitPayload;
 
+        // The terminal `agent` frame and the `agent.wait` response are emitted
+        // back-to-back by the gateway, so their arrival order is not
+        // guaranteed. Wait for it before every terminal return below, not just
+        // the successful one — a failed or timed-out run still burned tokens.
+        if (!terminalAgentPayload) {
+          await Promise.race([
+            terminalAgentPayloadPromise,
+            new Promise<void>((resolve) => setTimeout(resolve, TERMINAL_AGENT_FRAME_GRACE_MS)),
+          ]);
+          if (!terminalAgentPayload) {
+            // Without it there is no usage/provider/model for this run, so a
+            // rising rate of this line is why cost telemetry would go quiet.
+            await ctx.onLog(
+              "stdout",
+              `[openclaw-gateway] no terminal agent frame within ${TERMINAL_AGENT_FRAME_GRACE_MS}ms; usage unavailable for this run\n`,
+            );
+          }
+        }
+        const usageFields = buildGatewayUsageFields([acceptedPayload, waitPayload, terminalAgentPayload]);
+
         const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
         if (waitStatus === "timeout") {
           return {
@@ -1370,6 +1417,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
             errorCode: "openclaw_gateway_wait_timeout",
             resultJson: waitPayload,
+            ...usageFields,
           };
         }
 
@@ -1384,6 +1432,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               "OpenClaw gateway run failed",
             errorCode: "openclaw_gateway_wait_error",
             resultJson: waitPayload,
+            ...usageFields,
           };
         }
 
@@ -1395,25 +1444,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
             errorCode: "openclaw_gateway_wait_status_unexpected",
             resultJson: waitPayload,
+            ...usageFields,
           };
-        }
-      }
-
-      // The terminal `agent` frame and the `agent.wait` response are emitted
-      // back-to-back by the gateway, so their arrival order is not guaranteed.
-      // A synchronous `ok` needs no wait: that first frame is already terminal.
-      if (acceptedStatus !== "ok" && !terminalAgentPayload) {
-        await Promise.race([
-          terminalAgentPayloadPromise,
-          new Promise<void>((resolve) => setTimeout(resolve, TERMINAL_AGENT_FRAME_GRACE_MS)),
-        ]);
-        if (!terminalAgentPayload) {
-          // Without it there is no usage/provider/model for this run, so a
-          // rising rate of this line is why cost telemetry would go quiet.
-          await ctx.onLog(
-            "stdout",
-            `[openclaw-gateway] no terminal agent frame within ${TERMINAL_AGENT_FRAME_GRACE_MS}ms; usage unavailable for this run\n`,
-          );
         }
       }
 
@@ -1425,18 +1457,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         null;
       const summary = summaryFromEvents || summaryFromPayload || null;
 
-      // Later sources win: the terminal frame is the only one carrying usage.
-      const mergedMeta = {
-        ...(readGatewayMeta(acceptedPayload) ?? {}),
-        ...(readGatewayMeta(latestResultPayload) ?? {}),
-        ...(readGatewayMeta(terminalAgentPayload) ?? {}),
-      };
-      const agentMeta = asRecord(mergedMeta.agentMeta);
-      const usage = parseUsage(agentMeta?.usage ?? mergedMeta.usage);
+      const metaPayloads = [acceptedPayload, latestResultPayload, terminalAgentPayload];
+      const { mergedMeta, agentMeta } = mergeGatewayMeta(metaPayloads);
       const runtimeServices = extractRuntimeServicesFromMeta(agentMeta ?? mergedMeta);
-      const provider = nonEmpty(agentMeta?.provider) ?? nonEmpty(mergedMeta.provider) ?? "openclaw";
-      const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
-      const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
 
       await ctx.onLog(
         "stdout",
@@ -1447,10 +1470,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         exitCode: 0,
         signal: null,
         timedOut: false,
-        provider,
-        ...(model ? { model } : {}),
-        ...(usage ? { usage } : {}),
-        ...(costUsd > 0 ? { costUsd } : {}),
+        ...buildGatewayUsageFields(metaPayloads),
         resultJson: asRecord(latestResultPayload),
         ...(runtimeServices.length > 0 ? { runtimeServices } : {}),
         ...(summary ? { summary } : {}),

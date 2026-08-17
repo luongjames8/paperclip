@@ -18,6 +18,8 @@ type FakeGatewayOptions = {
   terminalBeforeWait?: boolean;
   /** Answer `agent` synchronously with the terminal payload, as older gateways do. */
   synchronousOk?: boolean;
+  /** Status returned by `agent.wait` (default "ok"). */
+  waitStatus?: string;
 };
 
 const AGENT_META = {
@@ -66,7 +68,12 @@ function startFakeGateway(opts: FakeGatewayOptions) {
       }
       if (frame.method === "agent.wait") {
         if (opts.terminalBeforeWait) sendTerminal();
-        send({ type: "res", id: frame.id, ok: true, payload: { runId: "run-usage", status: "ok" } });
+        send({
+          type: "res",
+          id: frame.id,
+          ok: true,
+          payload: { runId: "run-usage", status: opts.waitStatus ?? "ok" },
+        });
         if (!opts.terminalBeforeWait) sendTerminal();
       }
     });
@@ -130,6 +137,18 @@ describe("openclaw gateway usage capture", () => {
 
     expect(result.usage).toEqual({ inputTokens: 1200, outputTokens: 340, cachedInputTokens: 90 });
     expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it.each(["error", "timeout"])("reports the tokens a %s run already burned", async (waitStatus) => {
+    const result = await runAgainstFakeGateway({
+      sendTerminalFrame: true,
+      terminalBeforeWait: true,
+      waitStatus,
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.usage).toEqual({ inputTokens: 1200, outputTokens: 340, cachedInputTokens: 90 });
+    expect(result.model).toBe("glm-5");
   });
 
   it("still completes when the gateway never sends a terminal frame", async () => {
