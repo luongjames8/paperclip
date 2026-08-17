@@ -637,6 +637,7 @@ function isEventFrame(value: unknown): value is GatewayEventFrame {
 class GatewayWsClient {
   private ws: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
+  /** Separate from `pending`: these fire only after their request resolved and its pending entry is gone. */
   private lateResponseHandlers = new Map<string, (frame: GatewayResponseFrame) => void>();
   private challengePromise: Promise<string>;
   private resolveChallenge!: (nonce: string) => void;
@@ -924,6 +925,12 @@ async function autoApproveDevicePairing(params: {
   }
 }
 
+/** Gateway payloads carry their meta either under `result` or at the top level. */
+function readGatewayMeta(value: unknown): Record<string, unknown> | undefined {
+  const payload = asRecord(value);
+  return asRecord(asRecord(payload?.result)?.meta) ?? asRecord(payload?.meta) ?? undefined;
+}
+
 function parseUsage(value: unknown): AdapterExecutionResult["usage"] | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
@@ -1181,7 +1188,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   while (true) {
     let terminalAgentPayload: Record<string, unknown> | null = null;
-    let terminalAgentPayloadArrived: () => void = () => {};
+    let terminalAgentPayloadArrived!: () => void;
     const terminalAgentPayloadPromise = new Promise<void>((resolve) => {
       terminalAgentPayloadArrived = resolve;
     });
@@ -1400,6 +1407,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           terminalAgentPayloadPromise,
           new Promise<void>((resolve) => setTimeout(resolve, TERMINAL_AGENT_FRAME_GRACE_MS)),
         ]);
+        if (!terminalAgentPayload) {
+          // Without it there is no usage/provider/model for this run, so a
+          // rising rate of this line is why cost telemetry would go quiet.
+          await ctx.onLog(
+            "stdout",
+            `[openclaw-gateway] no terminal agent frame within ${TERMINAL_AGENT_FRAME_GRACE_MS}ms; usage unavailable for this run\n`,
+          );
+        }
       }
 
       const summaryFromEvents = assistantChunks.join("").trim();
@@ -1410,23 +1425,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         null;
       const summary = summaryFromEvents || summaryFromPayload || null;
 
-      const acceptedResult = asRecord(acceptedPayload?.result);
-      const latestPayload = asRecord(latestResultPayload);
-      const latestResult = asRecord(latestPayload?.result);
-      const terminalPayload = asRecord(terminalAgentPayload);
-      const terminalResult = asRecord(terminalPayload?.result);
-      const acceptedMeta = asRecord(acceptedResult?.meta) ?? asRecord(acceptedPayload?.meta);
-      const latestMeta = asRecord(latestResult?.meta) ?? asRecord(latestPayload?.meta);
-      const terminalMeta = asRecord(terminalResult?.meta) ?? asRecord(terminalPayload?.meta);
+      // Later sources win: the terminal frame is the only one carrying usage.
       const mergedMeta = {
-        ...(acceptedMeta ?? {}),
-        ...(latestMeta ?? {}),
-        ...(terminalMeta ?? {}),
+        ...(readGatewayMeta(acceptedPayload) ?? {}),
+        ...(readGatewayMeta(latestResultPayload) ?? {}),
+        ...(readGatewayMeta(terminalAgentPayload) ?? {}),
       };
-      const agentMeta =
-        asRecord(mergedMeta.agentMeta) ??
-        asRecord(acceptedMeta?.agentMeta) ??
-        asRecord(latestMeta?.agentMeta);
+      const agentMeta = asRecord(mergedMeta.agentMeta);
       const usage = parseUsage(agentMeta?.usage ?? mergedMeta.usage);
       const runtimeServices = extractRuntimeServicesFromMeta(agentMeta ?? mergedMeta);
       const provider = nonEmpty(agentMeta?.provider) ?? nonEmpty(mergedMeta.provider) ?? "openclaw";
