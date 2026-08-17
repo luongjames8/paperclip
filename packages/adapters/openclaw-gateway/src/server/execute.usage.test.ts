@@ -20,6 +20,8 @@ type FakeGatewayOptions = {
   synchronousOk?: boolean;
   /** Status returned by `agent.wait` (default "ok"). */
   waitStatus?: string;
+  /** Status the initial `agent` response carries, answered synchronously. */
+  agentStatus?: string;
 };
 
 const AGENT_META = {
@@ -59,6 +61,20 @@ function startFakeGateway(opts: FakeGatewayOptions) {
       }
       if (frame.method === "agent") {
         agentFrameId = frame.id;
+        if (opts.agentStatus) {
+          send({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              runId: "run-usage",
+              status: opts.agentStatus,
+              summary: "boom",
+              result: { meta: { agentMeta: AGENT_META } },
+            },
+          });
+          return;
+        }
         if (opts.synchronousOk) {
           sendTerminal();
           return;
@@ -149,6 +165,14 @@ describe("openclaw gateway usage capture", () => {
     expect(result.exitCode).toBe(1);
     expect(result.usage).toEqual({ inputTokens: 1200, outputTokens: 340, cachedInputTokens: 90 });
     expect(result.model).toBe("glm-5");
+  });
+
+  it("reports the tokens burned before a synchronous agent error", async () => {
+    const result = await runAgainstFakeGateway({ sendTerminalFrame: false, agentStatus: "error" });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("openclaw_gateway_agent_error");
+    expect(result.usage).toEqual({ inputTokens: 1200, outputTokens: 340, cachedInputTokens: 90 });
   });
 
   it("still completes when the gateway never sends a terminal frame", async () => {
