@@ -84,9 +84,19 @@ type GatewayClientOptions = {
 type GatewayClientRequestOptions = {
   timeoutMs: number;
   expectFinal?: boolean;
+  /**
+   * The gateway answers an async `agent` request twice on the same frame id:
+   * once with `status: "accepted"`, then again with the terminal payload that
+   * carries `result.meta.agentMeta` (provider, model, token usage). We resolve
+   * on the accepted frame and wait via `agent.wait`, whose response carries no
+   * meta at all, so the terminal frame is the only place usage reaches us.
+   */
+  onLateResponse?: (frame: GatewayResponseFrame) => void;
 };
 
 const PROTOCOL_VERSION = 4;
+/** How long to wait for the terminal `agent` frame once `agent.wait` returned. */
+const TERMINAL_AGENT_FRAME_GRACE_MS = 2_000;
 const DEFAULT_SCOPES = ["operator.admin"];
 const DEFAULT_CLIENT_ID = "gateway-client";
 const DEFAULT_CLIENT_MODE = "backend";
@@ -627,6 +637,8 @@ function isEventFrame(value: unknown): value is GatewayEventFrame {
 class GatewayWsClient {
   private ws: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
+  /** Separate from `pending`: these fire only after their request resolved and its pending entry is gone. */
+  private lateResponseHandlers = new Map<string, (frame: GatewayResponseFrame) => void>();
   private challengePromise: Promise<string>;
   private resolveChallenge!: (nonce: string) => void;
   private rejectChallenge!: (err: Error) => void;
@@ -726,6 +738,7 @@ class GatewayWsClient {
         opts.timeoutMs > 0
           ? setTimeout(() => {
               this.pending.delete(id);
+              this.lateResponseHandlers.delete(id);
               reject(new Error(`gateway request timeout (${method})`));
             }, opts.timeoutMs)
           : null;
@@ -736,6 +749,9 @@ class GatewayWsClient {
         expectFinal: opts.expectFinal === true,
         timer,
       });
+      if (opts.onLateResponse) {
+        this.lateResponseHandlers.set(id, opts.onLateResponse);
+      }
     });
 
     this.ws.send(payload);
@@ -754,6 +770,7 @@ class GatewayWsClient {
       pending.reject(err);
     }
     this.pending.clear();
+    this.lateResponseHandlers.clear();
   }
 
   private handleMessage(raw: string) {
@@ -782,7 +799,14 @@ class GatewayWsClient {
     if (!isResponseFrame(parsed)) return;
 
     const pending = this.pending.get(parsed.id);
-    if (!pending) return;
+    if (!pending) {
+      const lateHandler = this.lateResponseHandlers.get(parsed.id);
+      if (lateHandler) {
+        this.lateResponseHandlers.delete(parsed.id);
+        lateHandler(parsed);
+      }
+      return;
+    }
 
     const payload = asRecord(parsed.payload);
     const status = nonEmpty(payload?.status)?.toLowerCase();
@@ -899,6 +923,39 @@ async function autoApproveDevicePairing(params: {
   } finally {
     client.close();
   }
+}
+
+/** Gateway payloads carry their meta either under `result` or at the top level. */
+function readGatewayMeta(value: unknown): Record<string, unknown> | undefined {
+  const payload = asRecord(value);
+  return asRecord(asRecord(payload?.result)?.meta) ?? asRecord(payload?.meta) ?? undefined;
+}
+
+/** Later payloads win: the terminal `agent` frame is the only one carrying usage. */
+function mergeGatewayMeta(payloads: unknown[]) {
+  const mergedMeta: Record<string, unknown> = Object.assign(
+    {},
+    ...payloads.map((payload) => readGatewayMeta(payload) ?? {}),
+  );
+  return { mergedMeta, agentMeta: asRecord(mergedMeta.agentMeta) };
+}
+
+/**
+ * Provider/model/usage/cost fields for an execution result. Failed and
+ * timed-out runs burn tokens too, and paperclip bills them the same way, so
+ * every terminal path reports these — not just the successful one.
+ */
+function buildGatewayUsageFields(payloads: unknown[]): Partial<AdapterExecutionResult> {
+  const { mergedMeta, agentMeta } = mergeGatewayMeta(payloads);
+  const usage = parseUsage(agentMeta?.usage ?? mergedMeta.usage);
+  const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model);
+  const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
+  return {
+    provider: nonEmpty(agentMeta?.provider) ?? nonEmpty(mergedMeta.provider) ?? "openclaw",
+    ...(model ? { model } : {}),
+    ...(usage ? { usage } : {}),
+    ...(costUsd > 0 ? { costUsd } : {}),
+  };
 }
 
 function parseUsage(value: unknown): AdapterExecutionResult["usage"] | undefined {
@@ -1153,10 +1210,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
   let autoPairAttempted = false;
   let latestResultPayload: unknown = null;
+  /**
+   * Every payload that may carry `meta.agentMeta`, in precedence order. Each
+   * terminal return past the connect reports usage from this, so a run that
+   * failed halfway still bills the tokens it burned.
+   */
+  const metaPayloads: unknown[] = [];
   let retryCount = 0;
   const MAX_RETRIES = 2;
 
   while (true) {
+    let terminalAgentPayload: Record<string, unknown> | null = null;
+    let terminalAgentPayloadArrived!: () => void;
+    const terminalAgentPayloadPromise = new Promise<void>((resolve) => {
+      terminalAgentPayloadArrived = resolve;
+    });
     const trackedRunIds = new Set<string>([ctx.runId]);
     const assistantChunks: string[] = [];
     let lifecycleError: string | null = null;
@@ -1285,9 +1353,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       const acceptedPayload = await client.request<Record<string, unknown>>("agent", agentParams, {
         timeoutMs: connectTimeoutMs,
+        onLateResponse: (frame) => {
+          if (frame.ok) {
+            terminalAgentPayload = asRecord(frame.payload) ?? null;
+            metaPayloads.push(terminalAgentPayload);
+          }
+          terminalAgentPayloadArrived();
+        },
       });
 
       latestResultPayload = acceptedPayload;
+      metaPayloads.push(acceptedPayload);
 
       const acceptedStatus = nonEmpty(acceptedPayload?.status)?.toLowerCase() ?? "";
       const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
@@ -1308,6 +1384,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           errorMessage,
           errorCode: "openclaw_gateway_agent_error",
           resultJson: acceptedPayload,
+          ...buildGatewayUsageFields(metaPayloads),
         };
       }
 
@@ -1319,6 +1396,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         );
 
         latestResultPayload = waitPayload;
+        metaPayloads.push(waitPayload);
+
+        // The terminal `agent` frame and the `agent.wait` response are emitted
+        // back-to-back by the gateway, so their arrival order is not
+        // guaranteed. Wait for it before every terminal return below, not just
+        // the successful one — a failed or timed-out run still burned tokens.
+        if (!terminalAgentPayload) {
+          await Promise.race([
+            terminalAgentPayloadPromise,
+            new Promise<void>((resolve) => setTimeout(resolve, TERMINAL_AGENT_FRAME_GRACE_MS)),
+          ]);
+          if (!terminalAgentPayload) {
+            // Without it there is no usage/provider/model for this run, so a
+            // rising rate of this line is why cost telemetry would go quiet.
+            await ctx.onLog(
+              "stdout",
+              `[openclaw-gateway] no terminal agent frame within ${TERMINAL_AGENT_FRAME_GRACE_MS}ms; usage unavailable for this run\n`,
+            );
+          }
+        }
+        const usageFields = buildGatewayUsageFields(metaPayloads);
 
         const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
         if (waitStatus === "timeout") {
@@ -1329,6 +1427,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
             errorCode: "openclaw_gateway_wait_timeout",
             resultJson: waitPayload,
+            ...usageFields,
           };
         }
 
@@ -1343,6 +1442,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               "OpenClaw gateway run failed",
             errorCode: "openclaw_gateway_wait_error",
             resultJson: waitPayload,
+            ...usageFields,
           };
         }
 
@@ -1354,6 +1454,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
             errorCode: "openclaw_gateway_wait_status_unexpected",
             resultJson: waitPayload,
+            ...usageFields,
           };
         }
       }
@@ -1366,24 +1467,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         null;
       const summary = summaryFromEvents || summaryFromPayload || null;
 
-      const acceptedResult = asRecord(acceptedPayload?.result);
-      const latestPayload = asRecord(latestResultPayload);
-      const latestResult = asRecord(latestPayload?.result);
-      const acceptedMeta = asRecord(acceptedResult?.meta) ?? asRecord(acceptedPayload?.meta);
-      const latestMeta = asRecord(latestResult?.meta) ?? asRecord(latestPayload?.meta);
-      const mergedMeta = {
-        ...(acceptedMeta ?? {}),
-        ...(latestMeta ?? {}),
-      };
-      const agentMeta =
-        asRecord(mergedMeta.agentMeta) ??
-        asRecord(acceptedMeta?.agentMeta) ??
-        asRecord(latestMeta?.agentMeta);
-      const usage = parseUsage(agentMeta?.usage ?? mergedMeta.usage);
+      const { mergedMeta, agentMeta } = mergeGatewayMeta(metaPayloads);
       const runtimeServices = extractRuntimeServicesFromMeta(agentMeta ?? mergedMeta);
-      const provider = nonEmpty(agentMeta?.provider) ?? nonEmpty(mergedMeta.provider) ?? "openclaw";
-      const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
-      const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
 
       await ctx.onLog(
         "stdout",
@@ -1394,10 +1479,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         exitCode: 0,
         signal: null,
         timedOut: false,
-        provider,
-        ...(model ? { model } : {}),
-        ...(usage ? { usage } : {}),
-        ...(costUsd > 0 ? { costUsd } : {}),
+        ...buildGatewayUsageFields(metaPayloads),
         resultJson: asRecord(latestResultPayload),
         ...(runtimeServices.length > 0 ? { runtimeServices } : {}),
         ...(summary ? { summary } : {}),
@@ -1480,6 +1562,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             ? "openclaw_gateway_pairing_required"
             : "openclaw_gateway_request_failed",
         resultJson: asRecord(latestResultPayload),
+        ...buildGatewayUsageFields(metaPayloads),
       };
     } finally {
       client.close();
