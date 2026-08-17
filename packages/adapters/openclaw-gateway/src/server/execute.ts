@@ -84,9 +84,19 @@ type GatewayClientOptions = {
 type GatewayClientRequestOptions = {
   timeoutMs: number;
   expectFinal?: boolean;
+  /**
+   * The gateway answers an async `agent` request twice on the same frame id:
+   * once with `status: "accepted"`, then again with the terminal payload that
+   * carries `result.meta.agentMeta` (provider, model, token usage). We resolve
+   * on the accepted frame and wait via `agent.wait`, whose response carries no
+   * meta at all, so the terminal frame is the only place usage reaches us.
+   */
+  onLateResponse?: (frame: GatewayResponseFrame) => void;
 };
 
 const PROTOCOL_VERSION = 4;
+/** How long to wait for the terminal `agent` frame once `agent.wait` returned. */
+const TERMINAL_AGENT_FRAME_GRACE_MS = 2_000;
 const DEFAULT_SCOPES = ["operator.admin"];
 const DEFAULT_CLIENT_ID = "gateway-client";
 const DEFAULT_CLIENT_MODE = "backend";
@@ -627,6 +637,7 @@ function isEventFrame(value: unknown): value is GatewayEventFrame {
 class GatewayWsClient {
   private ws: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
+  private lateResponseHandlers = new Map<string, (frame: GatewayResponseFrame) => void>();
   private challengePromise: Promise<string>;
   private resolveChallenge!: (nonce: string) => void;
   private rejectChallenge!: (err: Error) => void;
@@ -726,6 +737,7 @@ class GatewayWsClient {
         opts.timeoutMs > 0
           ? setTimeout(() => {
               this.pending.delete(id);
+              this.lateResponseHandlers.delete(id);
               reject(new Error(`gateway request timeout (${method})`));
             }, opts.timeoutMs)
           : null;
@@ -736,6 +748,9 @@ class GatewayWsClient {
         expectFinal: opts.expectFinal === true,
         timer,
       });
+      if (opts.onLateResponse) {
+        this.lateResponseHandlers.set(id, opts.onLateResponse);
+      }
     });
 
     this.ws.send(payload);
@@ -754,6 +769,7 @@ class GatewayWsClient {
       pending.reject(err);
     }
     this.pending.clear();
+    this.lateResponseHandlers.clear();
   }
 
   private handleMessage(raw: string) {
@@ -782,7 +798,14 @@ class GatewayWsClient {
     if (!isResponseFrame(parsed)) return;
 
     const pending = this.pending.get(parsed.id);
-    if (!pending) return;
+    if (!pending) {
+      const lateHandler = this.lateResponseHandlers.get(parsed.id);
+      if (lateHandler) {
+        this.lateResponseHandlers.delete(parsed.id);
+        lateHandler(parsed);
+      }
+      return;
+    }
 
     const payload = asRecord(parsed.payload);
     const status = nonEmpty(payload?.status)?.toLowerCase();
@@ -1157,6 +1180,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const MAX_RETRIES = 2;
 
   while (true) {
+    let terminalAgentPayload: Record<string, unknown> | null = null;
+    let terminalAgentPayloadArrived: () => void = () => {};
+    const terminalAgentPayloadPromise = new Promise<void>((resolve) => {
+      terminalAgentPayloadArrived = resolve;
+    });
     const trackedRunIds = new Set<string>([ctx.runId]);
     const assistantChunks: string[] = [];
     let lifecycleError: string | null = null;
@@ -1285,6 +1313,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       const acceptedPayload = await client.request<Record<string, unknown>>("agent", agentParams, {
         timeoutMs: connectTimeoutMs,
+        onLateResponse: (frame) => {
+          if (frame.ok) {
+            terminalAgentPayload = asRecord(frame.payload) ?? null;
+          }
+          terminalAgentPayloadArrived();
+        },
       });
 
       latestResultPayload = acceptedPayload;
@@ -1358,6 +1392,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
       }
 
+      // The terminal `agent` frame and the `agent.wait` response are emitted
+      // back-to-back by the gateway, so their arrival order is not guaranteed.
+      // A synchronous `ok` needs no wait: that first frame is already terminal.
+      if (acceptedStatus !== "ok" && !terminalAgentPayload) {
+        await Promise.race([
+          terminalAgentPayloadPromise,
+          new Promise<void>((resolve) => setTimeout(resolve, TERMINAL_AGENT_FRAME_GRACE_MS)),
+        ]);
+      }
+
       const summaryFromEvents = assistantChunks.join("").trim();
       const summaryFromPayload =
         extractResultText(asRecord(acceptedPayload?.result)) ??
@@ -1369,11 +1413,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const acceptedResult = asRecord(acceptedPayload?.result);
       const latestPayload = asRecord(latestResultPayload);
       const latestResult = asRecord(latestPayload?.result);
+      const terminalPayload = asRecord(terminalAgentPayload);
+      const terminalResult = asRecord(terminalPayload?.result);
       const acceptedMeta = asRecord(acceptedResult?.meta) ?? asRecord(acceptedPayload?.meta);
       const latestMeta = asRecord(latestResult?.meta) ?? asRecord(latestPayload?.meta);
+      const terminalMeta = asRecord(terminalResult?.meta) ?? asRecord(terminalPayload?.meta);
       const mergedMeta = {
         ...(acceptedMeta ?? {}),
         ...(latestMeta ?? {}),
+        ...(terminalMeta ?? {}),
       };
       const agentMeta =
         asRecord(mergedMeta.agentMeta) ??
