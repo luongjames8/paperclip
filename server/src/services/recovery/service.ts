@@ -3207,6 +3207,18 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       }
 
       if (issue.status === "todo") {
+        // Fleet #751: a todo issue with unresolved blockers is not stranded —
+        // enqueueWakeup skips its wake as `issue_dependencies_blocked` without
+        // creating a run, so latestRun never changes and every sweep would
+        // re-dispatch it forever. The blockers-resolved wake resumes it.
+        const readiness = await issuesSvc
+          .listDependencyReadiness(issue.companyId, [issue.id])
+          .then((rows) => rows.get(issue.id) ?? null);
+        if (readiness && !readiness.isDependencyReady) {
+          result.skipped += 1;
+          continue;
+        }
+
         if (!latestRun) {
           if (await hasQueuedIssueWake(issue.companyId, issue.id)) {
             result.skipped += 1;
