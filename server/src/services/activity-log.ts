@@ -206,7 +206,7 @@ export async function persistActivity(db: Db, input: LogActivityInput) {
         companyId: input.companyId,
         payload: {
           ...redactedDetails,
-          action: input.action,
+          activityAction: input.action,
           agentId: input.agentId ?? null,
           runId: safeRunId,
           responsibleUserId,

@@ -60,9 +60,11 @@ describeEmbeddedPostgres("logActivity run-id guard", () => {
     expect(row).toBeDefined();
     expect(row?.runId).toBeNull();
     expect(publications[0]?.payload).toMatchObject({ runId: null });
-    // Typed plugin event payloads carry the action (discord-fleet demuxes on it).
+    // Typed plugin event payloads carry the activity action under its own key
+    // (helper-runner derives approval.decided status from it) — never over a
+    // details field named `action`.
     expect(publications[0]?.pluginEvent?.payload).toMatchObject({
-      action: "approval.created",
+      activityAction: "approval.created",
       runId: null,
     });
   });

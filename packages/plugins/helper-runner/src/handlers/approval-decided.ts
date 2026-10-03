@@ -58,9 +58,9 @@ export class ApprovalDecidedHandler {
       type: payload?.["type"],
     });
 
-    // The server's approval.decided payload carries the activity action
+    // The server's approval.decided payload carries the activity action as `activityAction`
     // (approval.approved / approval.rejected / approval.revision_requested), not a status.
-    const action = (payload?.["action"] as string | undefined) ?? "";
+    const action = (payload?.["activityAction"] as string | undefined) ?? "";
     const status =
       (payload?.["status"] as string | undefined) ??
       (action.startsWith("approval.") ? action.slice("approval.".length) : "");

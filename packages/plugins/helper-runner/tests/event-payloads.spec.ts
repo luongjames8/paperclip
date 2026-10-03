@@ -4,7 +4,7 @@ import { ApprovalDecidedHandler } from "../src/handlers/approval-decided.js";
 import { IssueUpdatedHandler } from "../src/handlers/issue-updated.js";
 import type { PluginConfig } from "../src/config/schema.js";
 
-// Payload shapes the server actually emits (activity-log persistActivity: details + action).
+// Payload shapes the server actually emits (activity-log persistActivity: details + activityAction).
 function makeCtx(issue: Record<string, unknown> | null = null) {
   return {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
@@ -38,14 +38,14 @@ describe("approval.decided payload", () => {
   it("derives status from the emitted action and issue ids from linkedIssueIds", async () => {
     const ctx = makeCtx();
     const handler = new ApprovalDecidedHandler(() => helper({ kind: "approval", event: "decided" }), ctx);
-    await handler.handle(event("approval.decided", { action: "approval.approved", type: "t", linkedIssueIds: ["iss-1"] }));
+    await handler.handle(event("approval.decided", { activityAction: "approval.approved", type: "t", linkedIssueIds: ["iss-1"] }));
     expect(ctx.issues.documents.upsert).toHaveBeenCalledWith(expect.objectContaining({ issueId: "iss-1" }));
   });
 
   it("does not fire an approved-only helper on a rejection", async () => {
     const ctx = makeCtx();
     const handler = new ApprovalDecidedHandler(() => helper({ kind: "approval", event: "decided" }), ctx);
-    await handler.handle(event("approval.decided", { action: "approval.rejected", linkedIssueIds: ["iss-1"] }));
+    await handler.handle(event("approval.decided", { activityAction: "approval.rejected", linkedIssueIds: ["iss-1"] }));
     expect(ctx.issues.documents.upsert).not.toHaveBeenCalled();
   });
 });
