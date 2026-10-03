@@ -46,6 +46,8 @@ COPY --parents packages/plugins/sandbox-providers/./*/package.json packages/plug
 COPY packages/plugins/paperclip-plugin-fake-sandbox/package.json packages/plugins/paperclip-plugin-fake-sandbox/
 COPY packages/plugins/plugin-llm-wiki/package.json packages/plugins/plugin-llm-wiki/
 COPY packages/plugins/plugin-workspace-diff/package.json packages/plugins/plugin-workspace-diff/
+COPY packages/plugins/discord-fleet/package.json packages/plugins/discord-fleet/
+COPY packages/plugins/helper-runner/package.json packages/plugins/helper-runner/
 COPY patches/ patches/
 COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
@@ -142,6 +144,16 @@ RUN pnpm --filter @paperclipai/plugin-sdk build
 ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+# Fleet workspace plugins. Without dist/worker.js the plugin loader cannot
+# activate them and they fail silently (the container stays healthy).
+# discord-fleet: Discord notifications + approval buttons. helper-runner:
+# bridges paperclip events into fleet bash/python helper scripts.
+RUN pnpm --filter @openclaw/plugin-discord-fleet build \
+  && test -f packages/plugins/discord-fleet/dist/worker.js \
+  || (echo "ERROR: discord-fleet build output missing" && exit 1)
+RUN pnpm --filter @openclaw/plugin-helper-runner build \
+  && test -f packages/plugins/helper-runner/dist/worker.js \
+  || (echo "ERROR: helper-runner build output missing" && exit 1)
 RUN rm -rf packages/paperclip-runner/runner/target
 
 FROM base AS production
@@ -151,13 +163,16 @@ ARG USER_GID=1000
 # the @latest CLI tools advance weekly). Without it the cached layer would
 # freeze the tools until an unrelated cache bust.
 ARG CLI_TOOLS_CACHE_EPOCH=""
+# Fleet carry: the paperclipai CLI the fleet's configurator calls inside the
+# container (docker exec paperclip paperclipai ...), pinned to the server version.
+ARG PAPERCLIPAI_CLI_VERSION=2026.1001.0
 WORKDIR /app
 # Tool and OS layer BEFORE the app copy: it references nothing from /app, and
 # the app copy changes on every commit — ordered the other way around, this
 # (the single most expensive layer: four CLI toolchains + apt, per arch) can
 # never hit the layer cache and rebuilds on every build.
 RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
-  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest @moonshot-ai/kimi-code@latest \
+  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest @moonshot-ai/kimi-code@latest paperclipai@${PAPERCLIPAI_CLI_VERSION} \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
   && rm -rf /var/lib/apt/lists/* \
