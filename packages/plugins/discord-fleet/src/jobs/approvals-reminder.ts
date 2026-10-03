@@ -161,10 +161,11 @@ export async function runApprovalsReminder(
             titleRegex: matchedExpiry.titleRegex,
           });
         } catch (err) {
-          if (err instanceof PaperclipApiError && err.status === 409) {
-            // Already decided (race lost to a human) — human decision stands;
-            // nothing to remind.
-            ctx.logger.info("approvals-reminder: expiry skipped — approval already decided (409)", { approvalId: approval.id });
+          // Already decided (race lost to a human) — human decision stands;
+          // nothing to remind. The server answers a stale transition with 422
+          // (resolveApproval's unprocessable); 409 kept for older servers.
+          if (err instanceof PaperclipApiError && (err.status === 409 || err.status === 422)) {
+            ctx.logger.info("approvals-reminder: expiry skipped — approval already decided", { approvalId: approval.id, status: err.status });
             continue;
           }
           // 403 = not a board key; log clearly as instructed. Fall through so

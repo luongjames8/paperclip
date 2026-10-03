@@ -237,8 +237,10 @@ export function approvalService(db: Db) {
         throw unprocessable("Only pending approvals can request revision");
       }
 
+      // Conditional on still-pending (fleet carry): of two overlapping requests only
+      // one applies, so the route's activity + requester wake fire exactly once.
       const now = new Date();
-      return db
+      const updated = await db
         .update(approvals)
         .set({
           status: "revision_requested",
@@ -247,9 +249,11 @@ export function approvalService(db: Db) {
           decidedAt: now,
           updatedAt: now,
         })
-        .where(eq(approvals.id, id))
+        .where(and(eq(approvals.id, id), eq(approvals.status, "pending")))
         .returning()
-        .then((rows) => rows[0]);
+        .then((rows) => rows[0] ?? null);
+      if (!updated) throw unprocessable("Only pending approvals can request revision");
+      return updated;
     },
 
     resubmit: async (id: string, payload?: Record<string, unknown>) => {

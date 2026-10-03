@@ -251,8 +251,8 @@ describe("runApprovalsReminder — CHANGE 2: auto-expiry", () => {
     expect(postEmbedToChannel).toHaveBeenCalled();
   });
 
-  it("rejectApproval throws PaperclipApiError with status 409 → no reminder posted, no throw", async () => {
-    // 409 = approval already decided (race lost to a human) — human decision stands.
+  it.each([409, 422])("rejectApproval throws PaperclipApiError with status %i → no reminder posted, no throw", async (status) => {
+    // Approval already decided (race lost to a human; the server answers 422) — human decision stands.
     // The job must continue without posting a stale reminder card.
     const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
     const { postEmbedToChannel } = await import("../src/discord/rest.js");
@@ -260,7 +260,7 @@ describe("runApprovalsReminder — CHANGE 2: auto-expiry", () => {
     const harness = createTestHarness({ manifest });
     const company = makeCompanyConfig();
     const rejectFn = vi.fn().mockRejectedValue(
-      new PaperclipApiError("paperclip API reject error: 409", 409, "http://localhost:3000/api/approvals/appr-1/reject"),
+      new PaperclipApiError(`paperclip API reject error: ${status}`, status, "http://localhost:3000/api/approvals/appr-1/reject"),
     );
     const paperclip = makePaperclip(
       [makePendingApproval({ createdAt: new Date(NOW.getTime() - 80 * 3_600_000).toISOString() })],
@@ -275,7 +275,7 @@ describe("runApprovalsReminder — CHANGE 2: auto-expiry", () => {
     ).resolves.toBeUndefined();
 
     expect(rejectFn).toHaveBeenCalledWith("appr-1", expect.stringContaining("auto-expiry after 72h"));
-    // 409 branch: continue → no reminder posted
+    // lost-race branch: continue → no reminder posted
     expect(postEmbedToChannel).not.toHaveBeenCalled();
   });
 
