@@ -9,7 +9,7 @@ export interface Approval {
   status: ApprovalStatus;
   // Derived server-side from the linked issues' inherited approvalKind at
   // creation — never accepted as direct input (fleet issue #687).
-  approvalKind: string | null;
+  approvalKind?: string | null;
   payload: Record<string, unknown>;
   decisionNote: string | null;
   decidedByUserId: string | null;

@@ -159,8 +159,8 @@ export interface RoutineRevisionSnapshotRoutineV1 {
   originId?: string | null;
   variables: RoutineVariable[];
   env: RoutineEnvConfig | null;
-  executionPolicy: RoutineExecutionPolicy | null;
-  approvalKind: string | null;
+  executionPolicy?: RoutineExecutionPolicy | null;
+  approvalKind?: string | null;
   responsibleUserId: string | null;
 }
 

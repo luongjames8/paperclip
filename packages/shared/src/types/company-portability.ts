@@ -431,7 +431,7 @@ export interface CompanyPortabilityImportResult {
     action: "created" | "renamed" | "replaced" | "skipped";
     reason: string | null;
   }[];
-  pendingSteps: CompanyPortabilityImportPendingSteps[];
+  pendingSteps?: CompanyPortabilityImportPendingSteps[];
   projects: {
     slug: string;
     id: string | null;
