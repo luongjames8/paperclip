@@ -60,11 +60,36 @@ describe("Semaphore", () => {
 });
 
 describe("SemaphorePool", () => {
-  it("keys per company and resizes on a max change", () => {
+  it("keys per company and resizes in place", () => {
     const pool = new SemaphorePool();
     const a = pool.get("co-a|h", 1);
     expect(pool.get("co-a|h", 1)).toBe(a);
     expect(pool.get("co-b|h", 1)).not.toBe(a);
-    expect(pool.get("co-a|h", 2)).not.toBe(a);
+    expect(pool.get("co-a|h", 2)).toBe(a);
+  });
+
+  it("keeps in-flight permits across a resize", async () => {
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const pool = new SemaphorePool();
+    const sem = pool.get("k", 1);
+    await sem.acquire();
+    let second = false;
+    void sem.acquire().then(() => (second = true));
+    await flush();
+    expect(second).toBe(false);
+    pool.get("k", 1); // same max: still bounded by the held permit
+    await flush();
+    expect(second).toBe(false);
+    pool.get("k", 2); // raised: the waiter is admitted alongside the holder
+    await flush();
+    expect(second).toBe(true);
+    sem.release();
+    sem.release();
+    pool.get("k", 1);
+    await sem.acquire(); // capacity back to exactly one
+    let third = false;
+    void sem.acquire().then(() => (third = true));
+    await flush();
+    expect(third).toBe(false);
   });
 });

@@ -2908,9 +2908,7 @@ export function routineService(
         existingRoutine.companyId,
         routineSnapshot.executionPolicy ?? null,
       );
-      assertActorMayChangeExecutionPolicy(actor, existingRoutine.executionPolicy, restoredExecutionPolicy);
       const restoredApprovalKind = routineSnapshot.approvalKind ?? null;
-      assertActorMayChangeApprovalKind(actor, existingRoutine.approvalKind, restoredApprovalKind);
 
       const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
@@ -2921,6 +2919,10 @@ export function routineService(
           .where(eq(routines.id, existingRoutine.id))
           .then((rows) => rows[0] ?? null);
         if (!locked) throw notFound("Routine not found");
+        // Actor checks run against the LOCKED row so a racing board policy change is
+        // never silently reverted by an agent's restore.
+        assertActorMayChangeExecutionPolicy(actor, locked.executionPolicy, restoredExecutionPolicy);
+        assertActorMayChangeApprovalKind(actor, locked.approvalKind, restoredApprovalKind);
         if (locked.latestRevisionId === targetRevision.id) {
           throw conflict("Selected revision is already the latest revision", {
             currentRevisionId: locked.latestRevisionId,
