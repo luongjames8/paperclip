@@ -41,6 +41,7 @@ import {
   trustAuthorizationPolicySchema,
 } from "./trust-policy.js";
 import { objectWithoutDefaults } from "./partial.js";
+import { approvalKindSchema } from "./approval.js";
 
 export const issueBlockedInboxStateSchema = z.enum([
   "needs_attention",
@@ -65,6 +66,7 @@ export const issueBlockedInboxReasonSchema = z.enum([
   "blocked_chain_stalled",
   "invalid_review_participant",
   "in_review_without_action_path",
+  "stale_assigned_backlog_issue",
   "missing_successful_run_disposition",
   "pending_board_decision",
   "pending_user_decision",
@@ -713,6 +715,12 @@ const createIssueBaseSchema = z.object({
     .optional()
     .nullable(),
   executionPolicy: issueExecutionPolicySchema.optional().nullable(),
+  // Config-carried approval routing tag. Never agent-composed: the server only
+  // trusts this value when the actor is a human user (routes/issues.ts), and
+  // otherwise always derives it from parentId inheritance / the originating
+  // routine template (server/src/services/issues.ts resolveApprovalKindForIssueCreate).
+  // Immutable after creation — see updateIssueSchema's .omit() below.
+  approvalKind: approvalKindSchema.optional().nullable(),
   executionWorkspaceId: z.string().guid().optional().nullable(),
   executionWorkspacePreference: z
     .enum(ISSUE_EXECUTION_WORKSPACE_PREFERENCES)
@@ -848,6 +856,9 @@ export const updateIssueSchema = objectWithoutDefaults(
     createdByUserId: true,
     responsibleUserId: true,
     watchdog: true,
+    // Immutable after creation — stamped from the routine template / parentId
+    // inheritance, never a direct-PATCH field (see createIssueBaseSchema).
+    approvalKind: true,
   }),
 )
   .partial()
@@ -861,6 +872,20 @@ export const updateIssueSchema = objectWithoutDefaults(
     onBehalfOfUserId: z.string().trim().min(1).optional().nullable(),
     reviewInteractionId: z.string().guid().optional(),
     reviewRequest: issueReviewRequestSchema.optional().nullable(),
+    // Compare-and-swap guard for executionPolicy stage decisions (fleet issue
+    // #631 / PR-0, codex P1): when present, the runtime rejects the status
+    // transition unless this matches the issue's CURRENT pending execution
+    // stage — closing the round-trip race between a client's own "is this
+    // still current" check and the actual mutation. Optional/unused by any
+    // caller that isn't driving an executionPolicy decision.
+    expectedExecutionStageId: z.string().optional(),
+    // Paired generation token (codex round 5): stageId + status alone don't
+    // distinguish a stage's pending instance from a LATER pending instance of
+    // the same stage after a changes-requested-then-resubmit cycle. An 8-char
+    // token derived from executionState.lastDecisionId (or "none" if no
+    // decision has ever been recorded) — see executionStageDecisionToken in
+    // services/issue-execution-policy.ts.
+    expectedLastDecisionToken: z.string().optional(),
     reopen: z.boolean().optional(),
     resume: z.boolean().optional(),
     interrupt: z.boolean().optional(),
@@ -1510,6 +1535,17 @@ export const requestConfirmationPayloadSchema = z.object({
     .nullable()
     .optional(),
   detailsMarkdown: z.string().max(20000).nullable().optional(),
+  // Structured, machine-consumed render payloads (the discord-fleet
+  // confirmation sweep's carouselBatch contract) ride ALONGSIDE the prose
+  // detailsMarkdown. The server persists them opaquely — consumers
+  // shape-guard at read time (parseCarouselBatchPayload) and degrade
+  // visibly on contract misses — but the key MUST be enumerated here:
+  // zod object parsing strips unknown keys, and this schema's parse
+  // result REPLACES req.body at the route boundary
+  // (server/src/middleware/validate.ts), so an unlisted key silently
+  // never persists (codex P1: the structured contract was dead for every
+  // production-created interaction).
+  carouselBatch: z.record(z.string(), z.unknown()).nullable().optional(),
   supersedeOnUserComment: z.boolean().optional(),
   target: requestConfirmationTargetSchema.nullable().optional(),
   toolAction: requestConfirmationToolActionPayloadSchema.optional(),

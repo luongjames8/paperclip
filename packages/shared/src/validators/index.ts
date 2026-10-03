@@ -626,6 +626,7 @@ export {
 } from "./onboarding-seed.js";
 
 export {
+  approvalKindSchema,
   createApprovalSchema,
   resolveApprovalSchema,
   requestApprovalRevisionSchema,
@@ -689,12 +690,14 @@ export {
   createRoutineTriggerSchema,
   updateRoutineTriggerSchema,
   routineVariableSchema,
+  routineExecutionPolicySchema,
   routineRevisionSnapshotRoutineV1Schema,
   routineRevisionSnapshotTriggerV1Schema,
   routineRevisionSnapshotV1Schema,
   routineRevisionSnapshotSchema,
   runRoutineSchema,
   rotateRoutineTriggerSecretSchema,
+  type RoutineExecutionPolicyInput,
   type CreateRoutine,
   type UpdateRoutine,
   type CreateRoutineTrigger,

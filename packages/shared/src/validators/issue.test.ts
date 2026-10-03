@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { MAX_ISSUE_REQUEST_DEPTH } from "../index.js";
 import {
   addIssueCommentSchema,
+  createChildIssueSchema,
   createIssueSchema,
+  createIssueThreadInteractionSchema,
   issueBlockedInboxAttentionSchema,
   resolveIssueRecoveryActionSchema,
   respondIssueThreadInteractionSchema,
@@ -68,6 +70,38 @@ describe("issue validators", () => {
     expect(stalledReviewDecisionSchema.parse({ action: "send_back" })).toEqual({
       action: "send_back",
     });
+  });
+
+  // codex P1 (PR #28): validate() REPLACES req.body with the zod parse
+  // result, and zod object parsing STRIPS unknown keys — so any payload
+  // field not enumerated in requestConfirmationPayloadSchema silently never
+  // persists for production-created interactions. This pins carouselBatch
+  // surviving the parse (the structured render contract was dead without
+  // it) while unknown keys still get stripped (we did not passthrough
+  // everything).
+  it("request_confirmation payload preserves carouselBatch through schema parse (unknown keys still stripped)", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_confirmation",
+      idempotencyKey: "carousel-batch:2026-07-13",
+      payload: {
+        version: 1,
+        prompt: "Approve & publish?",
+        detailsMarkdown: "prose artifact",
+        carouselBatch: {
+          version: 1,
+          weekOf: "2026-07-13",
+          cadence: { days: ["Sat", "Sun"], held: 0, strays: 0 },
+          items: [{ slug: "akihabara", day: "Sat", caption: "Electric town.", slides: ["https://r2.example.com/a1.jpg"] }],
+        },
+        someUnknownKey: "should be stripped",
+      },
+    });
+
+    expect(parsed.kind).toBe("request_confirmation");
+    const payload = parsed.payload as Record<string, unknown>;
+    expect(payload.carouselBatch).toMatchObject({ version: 1, weekOf: "2026-07-13" });
+    expect((payload.carouselBatch as Record<string, unknown>).items).toHaveLength(1);
+    expect("someUnknownKey" in payload).toBe(false);
   });
 
   it("passes real line breaks through unchanged", () => {
@@ -619,5 +653,34 @@ describe("issue validators", () => {
     });
 
     expect(parsed.success).toBe(false);
+  });
+
+  describe("approvalKind (fleet issue #687)", () => {
+    it("accepts a lowercase snake_case kind on create", () => {
+      expect(createIssueSchema.parse({
+        title: "Weekly content batch",
+        approvalKind: "content_batch_approval",
+      }).approvalKind).toBe("content_batch_approval");
+    });
+
+    it("accepts a kind on createChildIssueSchema (human-actor override path)", () => {
+      expect(createChildIssueSchema.parse({
+        title: "Sub-item",
+        approvalKind: "content_batch_approval",
+      }).approvalKind).toBe("content_batch_approval");
+    });
+
+    it("rejects a malformed kind", () => {
+      expect(createIssueSchema.safeParse({ title: "x", approvalKind: "Not Valid!" }).success).toBe(false);
+    });
+
+    // Immutable after creation (server/src/services/issues.ts
+    // resolveApprovalKindForIssueCreate is the only writer) — updateIssueSchema
+    // must not even carry the key, so a stray approvalKind in a PATCH body is
+    // silently dropped by zod rather than reaching the service layer at all.
+    it("updateIssueSchema has no approvalKind key — PATCH input silently drops it", () => {
+      const parsed = updateIssueSchema.parse({ title: "renamed", approvalKind: "sneaky_kind" } as never);
+      expect(parsed).not.toHaveProperty("approvalKind");
+    });
   });
 });

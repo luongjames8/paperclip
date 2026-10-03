@@ -11,6 +11,10 @@ export const approvals = pgTable(
     requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id),
     requestedByUserId: text("requested_by_user_id"),
     status: text("status").notNull().default("pending"),
+    // Derived server-side from the linked issues' inherited approvalKind at
+    // creation (server/src/routes/approvals.ts) — never accepted as direct
+    // input; see packages/shared/src/validators/approval.ts.
+    approvalKind: text("approval_kind"),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
     decisionNote: text("decision_note"),
     decidedByUserId: text("decided_by_user_id"),
