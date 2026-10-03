@@ -76,6 +76,7 @@ import { emitAgentTaskRun } from "../agent-task-run-telemetry.js";
 import { budgetService } from "../budgets.js";
 import { unadmittedChatWakeupCondition } from "../durable-chat-wakeup.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
+import { classifyProviderQuotaFailure } from "../provider-quota.js";
 import {
   legacyExecutionNeedsReconciliation,
   terminalizeLegacyExecution,
@@ -175,6 +176,71 @@ export const STRANDED_RECENT_PROGRESS_EXEMPTION_MS = Math.max(
   60_000,
   Number(process.env.STRANDED_RECENT_PROGRESS_EXEMPTION_MS) || 30 * 60 * 1000,
 );
+
+// Fleet carry (GH #706): hard ceiling on the productive-continuation recovery
+// chain. The GGU-809 exemption above accepts "the assignee commented recently"
+// as progress evidence — but that comment is usually written BY the wake being
+// evaluated, so a waiting agent refreshes its own exemption and guarantees its
+// own next wake (HIN-2846: 9,183 wakes / 9,110 comments in 4 days, which spent
+// the monthly model allocation and took all five companies down for nine
+// days). Once the chain reaches this many consecutive productive continuation
+// recoveries the issue escalates to `blocked` regardless of the exemption.
+// ponytail: one flat ceiling, no per-workflow budget — add that only if a real
+// batch is measured hitting it.
+export const STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN = Math.max(
+  2,
+  Number(process.env.STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN) || 20,
+);
+
+// contextSnapshot key carrying the chain length from one productive
+// continuation recovery to the next, so the cap is an O(1) read off the run.
+const PRODUCTIVE_CONTINUATION_CHAIN_KEY = "productiveContinuationChain";
+
+// The COUNTER, not the run's retryReason, identifies chain membership: the
+// bounded transient retry overwrites retryReason, and gating the read on it let
+// one transient failure reset the chain (codex P1 on fork PR #40).
+export function readProductiveContinuationChainLength(contextSnapshot: unknown) {
+  const chain = asNumber(parseObject(contextSnapshot)[PRODUCTIVE_CONTINUATION_CHAIN_KEY], 0);
+  return Number.isFinite(chain) && chain > 0 ? Math.floor(chain) : 0;
+}
+
+export const PROVIDER_QUOTA_ESCALATION_COMMENT =
+  "Paperclip stopped automatic recovery for this issue: its last run failed on a model provider " +
+  "quota or billing limit, and the bounded retry ladder is exhausted. Re-running cannot succeed " +
+  "until the allowance resets or the account is topped up, so the issue is moving to `blocked` " +
+  "rather than retrying.";
+
+// Marker heartbeat.ts stamps on a run when its bounded retry ladder is spent.
+export const BOUNDED_RETRY_LADDER_EXHAUSTED_KEY = "boundedRetryLadderExhausted";
+
+// True when `run` is a provider-quota failure belonging to `agentId` whose
+// retry ladder is PROVEN spent: same agent (reassignment keeps run history),
+// exhaustion stamped by the ladder itself (a terminal run alone does not prove
+// it), and the failure is actually a quota/billing one.
+export function isProviderQuotaExhaustedRunFor(
+  run: LatestIssueRun,
+  agentId: string | null | undefined,
+) {
+  if (!run || !agentId || run.agentId !== agentId) return false;
+  if (!isUnsuccessfulTerminalIssueRun(run)) return false;
+  if (parseObject(run.resultJson)[BOUNDED_RETRY_LADDER_EXHAUSTED_KEY] !== true) return false;
+  return Boolean(classifyProviderQuotaFailure(run));
+}
+
+export type ProductiveContinuationDecision = "requeue" | "escalate_no_progress" | "escalate_chain_exhausted";
+
+// Pure decision for the `in_progress` productive-continuation branch.
+// `chainLength` counts the consecutive productive continuation recoveries
+// already spent on this issue, including the run being evaluated.
+export function decideProductiveContinuationRecovery(input: {
+  repeated: boolean;
+  exempted: boolean;
+  chainLength: number;
+}): ProductiveContinuationDecision {
+  if (input.chainLength >= STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN) return "escalate_chain_exhausted";
+  if (!input.repeated) return "requeue";
+  return input.exempted ? "requeue" : "escalate_no_progress";
+}
 
 type RecoveryWakeupOptions = {
   source?: "timer" | "assignment" | "on_demand" | "automation";
@@ -869,7 +935,14 @@ function isSuccessfulInProgressContinuationRun(
   return latestRun?.status === "succeeded";
 }
 
-function isProductiveContinuationRun(latestRun: LatestIssueRun) {
+// The only fields these predicates read, so the chain-cap helpers can take rows
+// selected without the rest of the run (fleet GH #706).
+type ProductiveContinuationRunFields = Pick<
+  typeof heartbeatRuns.$inferSelect,
+  "status" | "livenessState" | "contextSnapshot"
+>;
+
+function isProductiveContinuationRun(latestRun: ProductiveContinuationRunFields | null) {
   return (
     latestRun?.status === "succeeded" &&
     (latestRun.livenessState === "advanced" ||
@@ -879,8 +952,8 @@ function isProductiveContinuationRun(latestRun: LatestIssueRun) {
   );
 }
 
-function isRepeatedProductiveContinuationRecovery(
-  latestRun: SuccessfulLatestIssueRun,
+export function isRepeatedProductiveContinuationRecovery(
+  latestRun: ProductiveContinuationRunFields,
 ) {
   const latestContext = parseObject(latestRun.contextSnapshot);
   return (
@@ -4177,6 +4250,8 @@ export function recoveryService(
       waitingOnReviewResolved: 0,
       providerQuotaMonitored: 0,
       recentProgressExempted: 0,
+      continuationChainExhausted: 0,
+      providerQuotaEscalated: 0,
       operatorCancelExempted: 0,
       onboardingFirstTaskExempted: 0,
       skipped: 0,
@@ -4563,6 +4638,30 @@ export function recoveryService(
         }
       }
 
+      // Fleet carry (GH #706): a provider quota/billing failure whose bounded
+      // retry ladder is spent cannot be fixed by re-running, and every branch
+      // below ends in a requeue. Upstream's provider-quota monitor above only
+      // classifies adapter_failed/provider_quota codes; the openclaw_gateway
+      // adapter reports neither, so this text-classified guard catches it.
+      // Scoped to the run's own agent (reassignment keeps run history) and
+      // skipped for in_review so the participant guard below owns that case.
+      if (issue.status !== "in_review" && isProviderQuotaExhaustedRunFor(latestRun, agentId)) {
+        const updated = await escalateStrandedAssignedIssue({
+          issue,
+          previousStatus: issue.status as StrandedPreviousStatus,
+          latestRun,
+          comment: PROVIDER_QUOTA_ESCALATION_COMMENT + (summarizeRunFailureForIssueComment(latestRun) ?? ""),
+        });
+        if (updated) {
+          result.providerQuotaEscalated += 1;
+          result.escalated += 1;
+          result.issueIds.push(issue.id);
+        } else {
+          result.skipped += 1;
+        }
+        continue;
+      }
+
       const acceptedContinuationInteraction =
         await getLatestAcceptedContinuationInteraction(
           issue.companyId,
@@ -4791,6 +4890,26 @@ export function recoveryService(
           continue;
         }
 
+        // Fleet carry (GH #706): same guard on the participant's own latest run.
+        if (isProviderQuotaExhaustedRunFor(participantLatestRun, participantAgentId)) {
+          const updated = await escalateStrandedAssignedIssue({
+            issue,
+            previousStatus: "in_review",
+            latestRun: participantLatestRun,
+            comment: PROVIDER_QUOTA_ESCALATION_COMMENT +
+              (summarizeRunFailureForIssueComment(participantLatestRun) ?? ""),
+            recoveryCause: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
+          });
+          if (updated) {
+            result.providerQuotaEscalated += 1;
+            result.escalated += 1;
+            result.issueIds.push(issue.id);
+          } else {
+            result.skipped += 1;
+          }
+          continue;
+        }
+
         if (!agentInvokable) {
           const updated = await escalateStrandedAssignedIssue({
             issue,
@@ -4870,6 +4989,19 @@ export function recoveryService(
       }
 
       if (issue.status === "todo") {
+        // Fleet carry (#751 / fork PR #42): a todo issue with unresolved
+        // blockers is not stranded — enqueueWakeup skips its wake as
+        // issue_dependencies_blocked without creating a run, so latestRun never
+        // changes and every sweep would re-dispatch it forever. The
+        // blockers-resolved wake resumes it.
+        const readiness = await issuesSvc
+          .listDependencyReadiness(issue.companyId, [issue.id])
+          .then((rows) => rows.get(issue.id) ?? null);
+        if (readiness && !readiness.isDependencyReady) {
+          result.skipped += 1;
+          continue;
+        }
+
         if (!latestRun) {
           // The onboarding first task is deliberately created without a wake:
           // nothing runs and no token is spent until the user types. It is not
@@ -5022,36 +5154,50 @@ export function recoveryService(
           continue;
         }
 
-        if (isRepeatedProductiveContinuationRecovery(successfulRun)) {
-          // GGU-809: skip escalation if the assignee has shown visible progress
-          // (comment or attachment) within the exemption window. Falling
-          // through here lets the normal continuation-retry path enqueue the
-          // next wake, which is the correct behaviour for batch workflows.
-          const exempted = await hasRecentVisibleProgress(
+        const repeatedContinuation = isRepeatedProductiveContinuationRecovery(successfulRun);
+        // GGU-809: skip escalation if the assignee has shown visible progress
+        // (comment or attachment) within the exemption window. Fleet carry
+        // (GH #706): the chain is counted and capped regardless, because the
+        // assignee's own comment is circular evidence and refreshes that window
+        // forever. Read unconditionally: a link that failed transiently and then
+        // succeeded still carries the counter.
+        const chainLength = readProductiveContinuationChainLength(successfulRun.contextSnapshot);
+        const exempted = repeatedContinuation && chainLength < STRANDED_PRODUCTIVE_CONTINUATION_MAX_CHAIN
+          ? await hasRecentVisibleProgress(
             issue.companyId,
             issue.id,
             agentId,
             STRANDED_RECENT_PROGRESS_EXEMPTION_MS,
-          );
-          if (!exempted) {
-            const updated = await escalateStrandedAssignedIssue({
-              issue,
-              previousStatus: "in_progress",
-              latestRun: successfulRun,
-              comment:
-                "Paperclip automatically retried continuation for this assigned `in_progress` issue and the retry " +
+          )
+          : false;
+        const decision = decideProductiveContinuationRecovery({
+          repeated: repeatedContinuation,
+          exempted,
+          chainLength,
+        });
+        if (decision !== "requeue") {
+          const updated = await escalateStrandedAssignedIssue({
+            issue,
+            previousStatus: "in_progress",
+            latestRun: successfulRun,
+            comment: decision === "escalate_chain_exhausted"
+              ? "Paperclip has retried continuation for this assigned `in_progress` issue " +
+                `${chainLength}× in a row and it still has no live execution path. The recent-progress ` +
+                "exemption kept the chain alive, but an assignee comment is not by itself evidence of " +
+                "progress, so the chain is capped here. Moving it to `blocked` so it is visible for intervention."
+              : "Paperclip automatically retried continuation for this assigned `in_progress` issue and the retry " +
                 "made progress, but it still has no live execution path. Moving it to `blocked` so it is visible for intervention.",
-            });
-            if (updated) {
-              result.escalated += 1;
-              result.issueIds.push(issue.id);
-            } else {
-              result.skipped += 1;
-            }
-            continue;
+          });
+          if (updated) {
+            if (decision === "escalate_chain_exhausted") result.continuationChainExhausted += 1;
+            result.escalated += 1;
+            result.issueIds.push(issue.id);
+          } else {
+            result.skipped += 1;
           }
-          result.recentProgressExempted += 1;
+          continue;
         }
+        if (repeatedContinuation && exempted) result.recentProgressExempted += 1;
 
         if (await isInvocationBudgetBlocked(issue, agentId)) {
           result.skipped += 1;
@@ -5065,6 +5211,8 @@ export function recoveryService(
           retryReason: "issue_continuation_needed",
           source: "issue.productive_terminal_continuation_recovery",
           retryOfRunId: successfulRun.id,
+          // Fleet carry (GH #706): hand the chain length to the next link.
+          extraContext: { [PRODUCTIVE_CONTINUATION_CHAIN_KEY]: chainLength + 1 },
         });
         if (queued) {
           result.continuationRequeued += 1;

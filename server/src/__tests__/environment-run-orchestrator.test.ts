@@ -43,6 +43,7 @@ vi.mock("../services/execution-workspaces.js", () => ({
 
 vi.mock("../services/activity-log.js", () => ({
   logActivity: mockLogActivity,
+  publishPluginDomainEvent: vi.fn(),
 }));
 
 vi.mock("../middleware/logger.js", () => ({

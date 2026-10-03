@@ -12,7 +12,7 @@ import { getExecutionBlocker } from "../services/execution-blocker.js";
 import { paperclipRunnerTransitionConfig, normalizeLegacyRunnerProvider, isPaperclipRunnerProvider } from "@paperclipai/adapter-utils";
 import { executionProjectionForRun, executionProjectionsForRuns } from "../services/execution-projection.js";
 import { Router, type NextFunction, type Request, type Response } from "express";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
@@ -2476,22 +2476,6 @@ export function agentRoutes(
     );
   }
 
-  function generateEd25519PrivateKeyPem(): string {
-    const { privateKey } = generateKeyPairSync("ed25519");
-    return privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-  }
-
-  function ensureGatewayDeviceKey(
-    adapterType: string | null | undefined,
-    adapterConfig: Record<string, unknown>,
-  ): Record<string, unknown> {
-    if (adapterType !== "openclaw_gateway") return adapterConfig;
-    const disableDeviceAuth = parseBooleanLike(adapterConfig.disableDeviceAuth) === true;
-    if (disableDeviceAuth) return adapterConfig;
-    if (asNonEmptyString(adapterConfig.devicePrivateKeyPem)) return adapterConfig;
-    return { ...adapterConfig, devicePrivateKeyPem: generateEd25519PrivateKeyPem() };
-  }
-
   function codexLocalAgentHome(companyId: string, agentId: string): string {
     const instanceRoot = resolvePaperclipInstanceRootForAdapter({
       homeDir: asNonEmptyString(process.env.PAPERCLIP_HOME) ?? undefined,
@@ -2623,24 +2607,24 @@ export function agentRoutes(
       if (!hasBypassFlag) {
         next.dangerouslyBypassApprovalsAndSandbox = DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
       }
-      return ensureGatewayDeviceKey(adapterType, next);
+      return next;
     }
     if (adapterType === "gemini_local" && !asNonEmptyString(next.model)) {
       next.model = DEFAULT_GEMINI_LOCAL_MODEL;
-      return ensureGatewayDeviceKey(adapterType, next);
+      return next;
     }
     if (adapterType === "kimi_local" && !asNonEmptyString(next.model)) {
       next.model = DEFAULT_KIMI_LOCAL_MODEL;
-      return ensureGatewayDeviceKey(adapterType, next);
+      return next;
     }
     if (adapterType === "opencode_local" && !asNonEmptyString(next.model)) {
       next.model = DEFAULT_OPENCODE_LOCAL_MODEL;
-      return ensureGatewayDeviceKey(adapterType, next);
+      return next;
     }
     if (adapterType === "cursor" && !asNonEmptyString(next.model)) {
       next.model = DEFAULT_CURSOR_LOCAL_MODEL;
     }
-    return ensureGatewayDeviceKey(adapterType, next);
+    return next;
   }
 
   async function assertAdapterConfigConstraints(
@@ -4659,10 +4643,13 @@ export function agentRoutes(
         });
 
         if (sourceIssueIds.length > 0) {
-          await issueApprovalsSvc.linkManyForApproval(approval.id, sourceIssueIds, {
+          // Fleet carry (#687): capture the approvalKind derived from the linked
+          // issues so the approval.created activity below carries it.
+          const { approvalKind } = await issueApprovalsSvc.linkManyForApproval(approval.id, sourceIssueIds, {
             agentId: actor.actorType === "agent" ? actor.actorId : null,
             userId: actor.actorType === "user" ? actor.actorId : null,
           });
+          approval = { ...approval, approvalKind };
         }
       }
 
@@ -4708,7 +4695,8 @@ export function agentRoutes(
           action: "approval.created",
           entityType: "approval",
           entityId: approval.id,
-          details: { type: approval.type, linkedAgentId: agent.id },
+          // Fleet carry (#687): discord-fleet routes on these details.
+          details: { type: approval.type, linkedAgentId: agent.id, approvalKind: approval.approvalKind ?? null },
         });
       }
 

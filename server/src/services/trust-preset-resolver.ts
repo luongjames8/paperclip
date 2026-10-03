@@ -41,7 +41,8 @@ export type TrustPresetDenyReason =
   | "invalid_low_trust_boundary"
   | "cross_company_boundary"
   | "conflicting_low_trust_boundary"
-  | "missing_low_trust_boundary_scope";
+  | "missing_low_trust_boundary_scope"
+  | "invalid_run_id";
 
 export type TrustPresetResolution =
   | {

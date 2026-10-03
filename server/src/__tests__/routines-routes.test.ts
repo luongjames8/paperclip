@@ -155,6 +155,7 @@ function registerModuleMocks() {
 
   vi.doMock("../services/activity-log.js", () => ({
     logActivity: mockLogActivity,
+    publishPluginDomainEvent: vi.fn(),
   }));
 
   vi.doMock("../services/index.js", () => ({
@@ -530,6 +531,149 @@ describe("routine routes", () => {
       .patch(`/api/routines/${routineId}`)
       .send({
         assigneeAgentId: otherAgentId,
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("tasks:assign");
+    expect(mockRoutineService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects agent-authored execution policy changes even on the agent's own routine", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+    });
+
+    const res = await request(app)
+      .patch(`/api/routines/${routineId}`)
+      .send({
+        executionPolicy: {
+          stages: [{ type: "review", participants: [{ type: "agent", agentId: otherAgentId }] }],
+        },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Agents cannot set a routine execution policy");
+    expect(mockRoutineService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects agent-authored execution policies on routine creation", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Self-hydrating routine",
+        assigneeAgentId: agentId,
+        executionPolicy: {
+          stages: [{ type: "review", participants: [{ type: "agent", agentId: otherAgentId }] }],
+        },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Agents cannot set a routine execution policy");
+    expect(mockRoutineService.create).not.toHaveBeenCalled();
+  });
+
+  // ─── approvalKind route-level governance (fleet issue #687) ────────────────
+  // Same boundary as executionPolicy above: config-carried, never agent-composed.
+
+  it("rejects agent-authored approvalKind changes even on the agent's own routine", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+    });
+
+    const res = await request(app)
+      .patch(`/api/routines/${routineId}`)
+      .send({ approvalKind: "content_batch_approval" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Agents cannot set a routine approvalKind");
+    expect(mockRoutineService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects agent-authored approvalKind on routine creation", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Self-hydrating routine",
+        assigneeAgentId: agentId,
+        approvalKind: "content_batch_approval",
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Agents cannot set a routine approvalKind");
+    expect(mockRoutineService.create).not.toHaveBeenCalled();
+  });
+
+  it("allows an agent to create a routine with approvalKind explicitly null (no-op, not a change)", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Self-hydrating routine",
+        assigneeAgentId: agentId,
+        approvalKind: null,
+      });
+
+    expect(res.status).not.toBe(403);
+    expect(mockRoutineService.create).toHaveBeenCalled();
+  });
+
+  it("requires tasks:assign permission to change a routine's approvalKind", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .patch(`/api/routines/${routineId}`)
+      .send({ approvalKind: "content_batch_approval" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("tasks:assign");
+    expect(mockRoutineService.update).not.toHaveBeenCalled();
+  });
+
+  it("requires tasks:assign permission to change a routine's execution policy", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .patch(`/api/routines/${routineId}`)
+      .send({
+        executionPolicy: {
+          stages: [{ type: "review", participants: [{ type: "agent", agentId: otherAgentId }] }],
+        },
       });
 
     expect(res.status).toBe(403);

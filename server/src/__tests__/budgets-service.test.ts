@@ -20,6 +20,7 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/activity-log.js", () => ({
   logActivity: mockLogActivity,
+  publishPluginDomainEvent: vi.fn(),
 }));
 
 type SelectResult = unknown[];

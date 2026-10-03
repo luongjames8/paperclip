@@ -485,6 +485,7 @@ import {
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
   readContinuationAttempt,
 } from "./recovery/index.js";
+import { classifyProviderQuotaFailure } from "./provider-quota.js";
 import {
   buildConfigurationIncompleteRecoveryNoticeSeed,
   buildExecutionReviewParticipantRecoveryNoticeSeed,
@@ -1058,9 +1059,61 @@ function resolveCodexTransientFallbackMode(
   return "fresh_session_safer_invocation";
 }
 
+// Error codes mapped to the "transient_upstream" recovery family when an adapter
+// result does not already carry a persisted errorFamily. The openclaw_gateway
+// agent.wait codes are intentionally excluded from the adapter's own isTransient
+// predicate (quota errors + 600s run timeouts must not blindly re-run);
+// classifying them here routes them into the bounded scheduled retry instead of
+// stranding in status=error.
+const TRANSIENT_UPSTREAM_ERROR_CODES: ReadonlySet<string> = new Set([
+  "codex_transient_upstream",
+  "claude_transient_upstream",
+  "openclaw_gateway_wait_error",
+  "openclaw_gateway_wait_timeout",
+  // Live incident 2026-07-05 (hinomaru, 3 agents stranded in one night): the
+  // codes that actually PERSIST for gateway transients were missing from this
+  // set, so the strands sailed past it into terminal status=error:
+  //   - "timeout": the run-finalizer overrides the adapter's errorCode for
+  //     every timed_out outcome (heartbeat.ts runErrorCode ternary), so the
+  //     adapter-specific "openclaw_gateway_timeout" never reaches the DB.
+  //   - "openclaw_gateway_request_failed": connection-level failures
+  //     (ECONNREFUSED / ws 1012 service restart / "gateway starting") — the
+  //     canonical cron-deploy-restart victim class.
+  //   - "process_lost": server restarted mid-run.
+  // All are safe here BECAUSE this family is the BOUNDED scheduled retry
+  // (4 attempts: 2m/10m/30m/2h + jitter), never a blind unbounded re-run.
+  // Deliberately excluded: openclaw_gateway_pairing_required (config problem —
+  // retrying cannot fix it) and openclaw_gateway_agent_error (the agent's own
+  // reported failure — needs its content read, not a resubmit).
+  "openclaw_gateway_timeout",
+  "openclaw_gateway_request_failed",
+]);
+
+// Bare codes that are NOT self-scoping: the finalizer stamps "timeout" on every
+// timed_out outcome regardless of adapter, and "process_lost" is heartbeat-level.
+// Auto-reissuing a timed-out HTTP adapter call would replay a request the remote
+// may already have processed (codex P2) — so these classify as transient ONLY
+// for openclaw_gateway runs, the incident class this targets. Gateway heartbeat
+// re-runs are safe: agents re-enter via issue checkout, which 409s duplicates.
+const GATEWAY_ONLY_TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "timeout",
+  "process_lost",
+]);
+
+
 function readHeartbeatRunErrorFamily(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
+  adapterType?: string | null,
+  // Pass an already-computed classification (including `null`) to skip the
+  // recompute; JS defaults only fire on `undefined`.
+  quota = classifyProviderQuotaFailure(run),
 ) {
+  // Checked ahead of the persisted family on purpose: the gateway adapter
+  // persists no family at all today, but if one ever persists
+  // "transient_upstream" for a quota failure that is precisely the
+  // misclassification GH #706 is about, and text is the stronger evidence.
+  if (quota) return "provider_quota";
+
   const resultJson = parseObject(run.resultJson);
   const persistedFamily = readNonEmptyString(resultJson.errorFamily);
   if (persistedFamily) return persistedFamily;
@@ -1068,10 +1121,13 @@ function readHeartbeatRunErrorFamily(
   if (run.errorCode === "provider_quota") {
     return "provider_quota";
   }
+  if (run.errorCode && TRANSIENT_UPSTREAM_ERROR_CODES.has(run.errorCode)) {
+    return "transient_upstream";
+  }
   if (
-    run.errorCode === "codex_transient_upstream" ||
-    run.errorCode === "claude_transient_upstream" ||
-    run.errorCode === "codex_harness_crash"
+    run.errorCode &&
+    adapterType === "openclaw_gateway" &&
+    GATEWAY_ONLY_TRANSIENT_ERROR_CODES.has(run.errorCode)
   ) {
     return "transient_upstream";
   }
@@ -1105,9 +1161,16 @@ function readTransientRetryNotBeforeFromRun(
 }
 
 function readTransientRecoveryContractFromRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
+  adapterType?: string | null,
 ) {
-  const errorFamily = readHeartbeatRunErrorFamily(run);
+  // Fleet carry (GH #706): provider_quota is classified from failure TEXT too
+  // (the openclaw_gateway adapter never sets errorCode=provider_quota), with
+  // retryNotBefore pinned to the allowance reset so the bounded ladder's
+  // 2m/10m/30m/2h delays cannot fire against a provider that is still dead.
+  const quota = classifyProviderQuotaFailure(run);
+  if (quota) return { errorFamily: "provider_quota" as const, retryNotBefore: quota.retryAt };
+  const errorFamily = readHeartbeatRunErrorFamily(run, adapterType, quota);
   return errorFamily === "transient_upstream" ||
     errorFamily === "provider_quota"
     ? {
@@ -1225,6 +1288,8 @@ function mergeAdapterRecoveryMetadata(input: {
 }
 const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   "approval_approved",
+  "approval_rejected",
+  "approval_revision_requested",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   "issue_recovery_action_restored",
 ]);
@@ -13768,6 +13833,21 @@ export function heartbeatService(
   }
 
   async function clearDetachedRunWarning(runId: string) {
+    // runId is exposed as the public reportRunActivity(actor.runId) entry
+    // point, fed straight from the caller-supplied X-Paperclip-Run-Id header
+    // with no upstream validation. heartbeatRuns.id is a Postgres uuid
+    // column — eq() against a malformed value throws, uncaught, at whatever
+    // called this (existing callers happen to .catch() it today, but that's
+    // an accident of call-site discipline, not a guarantee — see the
+    // logActivity runId fix in services/activity-log.ts for the same class).
+    // Judgment: null (not fail-closed) is correct here. This function only
+    // clears a "detached process" liveness warning flag on the run row — it
+    // never reads or decides trust/permissions, so dropping a malformed
+    // runId can only mean the warning stays set (a bookkeeping/telemetry
+    // miss, already best-effort .catch()'d at both call sites in
+    // routes/issues.ts), never a permission escalation. Same class as the
+    // logActivity guard, not the resolveAgentTrustForIssue guard.
+    if (!isUuidLike(runId)) return null;
     const updated = await db
       .update(heartbeatRuns)
       .set({
@@ -15230,7 +15310,7 @@ export function heartbeatService(
       : null;
     const transientRecovery =
       retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
-        ? readTransientRecoveryContractFromRun(run)
+        ? readTransientRecoveryContractFromRun(run, agent.adapterType)
         : null;
     const codexTransientFallbackMode =
       agent.adapterType === "codex_local" &&
@@ -15271,6 +15351,17 @@ export function heartbeatService(
           );
         });
       }
+      // Fleet carry (GH #706): persist the exhaustion so the recovery service can
+      // tell a SPENT ladder from a failure that has not entered one yet (the run
+      // is already terminal before this runs). jsonb-merged so a concurrent
+      // finalizer write is not clobbered.
+      await db
+        .update(heartbeatRuns)
+        .set({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || jsonb_build_object('boundedRetryLadderExhausted', true)`,
+          updatedAt: new Date(),
+        })
+        .where(eq(heartbeatRuns.id, run.id));
       return {
         outcome: "retry_exhausted" as const,
         attempt: nextAttempt,
@@ -19195,6 +19286,16 @@ export function heartbeatService(
             now,
           );
         }
+      } else if (
+        // Fleet carry (2026-07-05 strand fix): reaped runs never pass through the
+        // adapter-finalization gate that consults the transient classifier, so a
+        // gateway run lost to a server restart (process_lost) would terminate
+        // with no retry. Local-child adapters keep enqueueProcessLossRetry above.
+        retryAgent &&
+        readTransientRecoveryContractFromRun(finalizedRun, retryAgent.adapterType)
+      ) {
+        const scheduled = await scheduleBoundedRetryForRun(finalizedRun, retryAgent);
+        retriedRun = scheduled?.outcome === "scheduled" ? scheduled.run : null;
       } else if (retryAgent) {
         const scheduled =
           await scheduleInteractionContinuationInfrastructureRetryIfEligible(
@@ -25109,8 +25210,11 @@ export function heartbeatService(
               });
             }
           } else if (
-            outcome === "failed" &&
-            readTransientRecoveryContractFromRun(livenessRun)
+            // Fleet carry (2026-07-05): gateway agent.wait timeouts persist as
+            // outcome "timed_out" with errorCode "timeout"; failed-only gating
+            // left every real timed-out run stranded in terminal error.
+            (outcome === "failed" || outcome === "timed_out") &&
+            readTransientRecoveryContractFromRun(livenessRun, agent.adapterType)
           ) {
             await scheduleBoundedRetryForRun(livenessRun, agent);
           } else if (
