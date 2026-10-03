@@ -2551,7 +2551,10 @@ function buildRequestItemVerdictsWakeIdempotencyKey(args: {
   return `request_item_verdicts:${args.issueId}:${args.interactionId}:${bucket}`;
 }
 
-async function queueResolvedInteractionContinuationWakeup(input: {
+// Fleet carry (#35): pure-ish builder so comment routes can merge an
+// interaction continuation into their per-request wake dedupe map instead
+// of firing a second, competing heartbeat.wakeup().
+type ResolvedInteractionContinuationInput = {
   db: Db;
   heartbeat: ReturnType<typeof heartbeatService>;
   issue: {
@@ -2576,9 +2579,11 @@ async function queueResolvedInteractionContinuationWakeup(input: {
   workspaceRefreshReason?: string | null;
   newlyResolvedItemIds?: string[];
   idempotencyKey?: string | null;
-}) {
+};
+
+async function buildResolvedInteractionContinuationWakeup(input: ResolvedInteractionContinuationInput) {
   if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status))
-    return;
+    return null;
 
   const reviewPathLost =
     input.issue.status === "in_review" &&
@@ -2617,7 +2622,7 @@ async function queueResolvedInteractionContinuationWakeup(input: {
     !rejectedPlanNeedsRevision &&
     !reviewPathLost
   )
-    return;
+    return null;
   // Fleet carry (#35): a silent stale-target / sweep expiry never got a real
   // resolution to continue from, but an expiry caused by the operator
   // commenting IS a live signal ("redo it") and must reach the assignee with
@@ -2626,7 +2631,7 @@ async function queueResolvedInteractionContinuationWakeup(input: {
     input.interaction.status === "expired" &&
     !reviewPathLost &&
     !isInteractionResultSupersededByComment(input.interaction.result)
-  ) return;
+  ) return null;
   // A normal interaction continuation is itself the durable recovery path.
   // Do not contaminate that wake with the fallback "review path lost"
   // instruction merely because the just-consumed interaction now appears
@@ -2721,8 +2726,9 @@ async function queueResolvedInteractionContinuationWakeup(input: {
       publication.idempotencyKey ===
       `interaction:${input.interaction.id}:${publication.endpointId}`,
   );
-  await input.heartbeat
-    .wakeup(input.issue.assigneeAgentId, {
+  return {
+    agentId: input.issue.assigneeAgentId,
+    wakeup: {
       source: "automation",
       triggerDetail: "system",
       reason: "issue_commented",
@@ -2781,14 +2787,22 @@ async function queueResolvedInteractionContinuationWakeup(input: {
         ...(forceFreshSession ? { forceFreshSession: true } : {}),
         ...(workspaceRefreshReason ? { workspaceRefreshReason } : {}),
       },
-    })
+    } as NonNullable<Parameters<typeof input.heartbeat.wakeup>[1]>,
+  };
+}
+
+async function queueResolvedInteractionContinuationWakeup(input: ResolvedInteractionContinuationInput) {
+  const built = await buildResolvedInteractionContinuationWakeup(input);
+  if (!built?.agentId) return;
+  await input.heartbeat
+    .wakeup(built.agentId, built.wakeup)
     .catch((err) =>
       logger.warn(
         {
           err,
           issueId: input.issue.id,
           interactionId: input.interaction.id,
-          agentId: input.issue.assigneeAgentId,
+          agentId: built.agentId,
         },
         "failed to wake assignee on issue interaction resolution",
       ),
@@ -4038,29 +4052,12 @@ export function issueRoutes(
     );
   }
 
-  // Fleet carry (2026-07-11 live incident): X-Paperclip-Run-Id is an
-  // unvalidated header for agent-key callers; eq() against the uuid column
-  // throws on a malformed value. "Header omitted" and "header present but
-  // garbage" must be told apart where the run locates a trust boundary.
-  function isPresentButMalformedRunId(runId: string | null | undefined): boolean {
-    return typeof runId === "string" && runId.trim().length > 0 && !isUuidLike(runId);
-  }
-
   async function resolveRunIssueWorkspaceInheritanceSource(
     companyId: string,
     actor: ReturnType<typeof getActorInfo>,
   ): Promise<string | null> {
-    // A malformed run id only means "don't inherit this run's workspace" —
-    // the narrower path, so null + warn rather than fail closed.
-    if (actor.actorType !== "agent" || !actor.agentId || !isUuidLike(actor.runId)) {
-      if (isPresentButMalformedRunId(actor.runId)) {
-        logger.warn(
-          { runId: actor.runId, agentId: actor.agentId },
-          "resolveRunIssueWorkspaceInheritanceSource: runId is not a valid uuid — skipping workspace inheritance",
-        );
-      }
+    if (actor.actorType !== "agent" || !actor.agentId || !actor.runId)
       return null;
-    }
     const run = await db
       .select({
         agentId: heartbeatRuns.agentId,
@@ -4069,7 +4066,7 @@ export function issueRoutes(
       .from(heartbeatRuns)
       .where(
         and(
-          eq(heartbeatRuns.id, actor.runId as string),
+          eq(heartbeatRuns.id, actor.runId),
           eq(heartbeatRuns.companyId, companyId),
         ),
       )
@@ -4104,14 +4101,9 @@ export function issueRoutes(
     } | null,
   ): Promise<TrustPresetResolution | null> {
     if (!input.agentId) return null;
-    // Fleet carry: this resolves TRUST. Treating a malformed / unknown run id as
-    // "no run" would skip a run-scoped low-trust boundary and can resolve a MORE
-    // permissive preset — so it fails closed below when that would happen.
-    const malformedRunId = isPresentButMalformedRunId(input.runId);
-    const runIdSupplied = !malformedRunId && isUuidLike(input.runId);
     const [agent, run] = await Promise.all([
       agentsSvc.getById(input.agentId),
-      runIdSupplied
+      input.runId
         ? db
             .select({
               companyId: heartbeatRuns.companyId,
@@ -4121,7 +4113,7 @@ export function issueRoutes(
             .from(heartbeatRuns)
             .where(
               and(
-                eq(heartbeatRuns.id, input.runId as string),
+                eq(heartbeatRuns.id, input.runId),
                 eq(heartbeatRuns.companyId, companyId),
               ),
             )
@@ -4143,7 +4135,7 @@ export function issueRoutes(
     const project = issue?.projectId
       ? await projectsSvc.getById(issue.projectId)
       : null;
-    const resolution = resolveCoreTrustPreset({
+    return resolveCoreTrustPreset({
       companyId,
       agent,
       project: project?.companyId === companyId ? project : null,
@@ -4157,15 +4149,6 @@ export function issueRoutes(
         ? { companyId, executionPolicy: runExecutionPolicy }
         : null,
     });
-    const wellFormedButUnknownRunId = runIdSupplied && (!run || run.agentId !== input.agentId);
-    if ((malformedRunId || wellFormedButUnknownRunId) && resolution.kind === "standard") {
-      throw badRequest(
-        malformedRunId
-          ? `X-Paperclip-Run-Id header is present but not a valid uuid: "${input.runId}". Drop the header or fix its value.`
-          : `X-Paperclip-Run-Id header does not match a known run for this agent: "${input.runId}". Drop the header or fix its value.`,
-      );
-    }
-    return resolution;
   }
 
   async function actorIsLowTrustReview(
@@ -14434,6 +14417,11 @@ export function issueRoutes(
         attachmentComment;
       let goalCommentSteered = false;
       let lostReviewPathRef: string | null = null;
+      // Fleet carry (#35): interactions this request's comment superseded; their
+      // own continuation wakes are merged into the wake map below.
+      let commentSupersededInteractions: Awaited<
+        ReturnType<ReturnType<typeof issueThreadInteractionService>["expireRequestConfirmationsSupersededByComment"]>
+      > = [];
       if (commentBody) {
         const commentReferenceSummaryBefore =
           updateReferenceSummaryAfter ??
@@ -14580,22 +14568,7 @@ export function issueRoutes(
           actor,
           source: "issue.comment",
         });
-        // Fleet carry (#35): route each comment-superseded interaction through its
-        // own wake_assignee continuation. Source must stay "issue.comment" so an
-        // active subtree pause hold still admits it (issue-tree-control).
-        for (const expired of expiredInteractions) {
-          void queueResolvedInteractionContinuationWakeup({
-            db,
-            heartbeat,
-            issue: issue,
-            interaction: expired,
-            actor,
-            source: "issue.comment",
-          }).catch((err) => logger.warn(
-            { err, issueId: issue.id, interactionId: expired.id },
-            "failed to wake assignee for comment-superseded interaction",
-          ));
-        }
+        commentSupersededInteractions = expiredInteractions;
         if (issue.status === "in_review" && expiredInteractions.length > 0) {
           const reviewAttention = await svc
             .listReviewAttention(issue.companyId, [issue])
@@ -14930,6 +14903,40 @@ export function issueRoutes(
               },
             });
           }
+        }
+
+        // Fleet carry (#35): the interaction-specific supersede wake (richer
+        // context: interactionId/kind/result) must beat a generic comment or
+        // mention wake for the same agent+issue key (addWakeup here is
+        // last-write-wins) — but never clobber an assignment/status wake, the
+        // primary mutation of this request.
+        const GENERIC_COMMENT_WAKE_REASONS = new Set([
+          "issue_commented",
+          "issue_reopened_via_comment",
+          "issue_comment_mentioned",
+        ]);
+        for (const expired of commentSupersededInteractions) {
+          const built = await buildResolvedInteractionContinuationWakeup({
+            db,
+            heartbeat,
+            issue,
+            interaction: expired,
+            actor,
+            source: "issue.comment",
+          }).catch((err) => {
+            logger.warn({ err, issueId: issue.id, interactionId: expired.id }, "failed to build comment-superseded interaction wake");
+            return null;
+          });
+          if (!built?.agentId) continue;
+          // Generic wakes key on the route param, which stays the raw identifier
+          // when router.param's identifier lookup misses — check both forms.
+          const keys = [...new Set([`${built.agentId}:${issue.id}`, `${built.agentId}:${id}`])];
+          const primaryWake = keys
+            .map((key) => wakeups.get(key))
+            .find((wake) => wake && !GENERIC_COMMENT_WAKE_REASONS.has(wake.wakeup.reason ?? ""));
+          if (primaryWake) continue;
+          for (const key of keys) wakeups.delete(key);
+          wakeups.set(keys[0]!, { agentId: built.agentId, wakeup: built.wakeup });
         }
 
         const becameDone =
@@ -18104,22 +18111,6 @@ export function issueRoutes(
         actor,
         source: "issue.comment",
       });
-      // Fleet carry (#35): route each comment-superseded interaction through its
-      // own wake_assignee continuation. Source must stay "issue.comment" so an
-      // active subtree pause hold still admits it (issue-tree-control).
-      for (const expired of expiredInteractions) {
-        void queueResolvedInteractionContinuationWakeup({
-          db,
-          heartbeat,
-          issue: currentIssue,
-          interaction: expired,
-          actor,
-          source: "issue.comment",
-        }).catch((err) => logger.warn(
-          { err, issueId: currentIssue.id, interactionId: expired.id },
-          "failed to wake assignee for comment-superseded interaction",
-        ));
-      }
       let lostReviewPathRef: string | null = null;
       if (
         currentIssue.status === "in_review" &&
@@ -18233,6 +18224,25 @@ export function issueRoutes(
             commentDecisionStageWakeup.agentId,
             commentDecisionStageWakeup.wakeup,
           );
+        }
+
+        // Fleet carry (#35): the interaction-specific wake (interactionId/kind/
+        // result) must claim the agent+issue key before the generic
+        // issue_commented wake below — this addWakeup is first-write-wins. Source
+        // stays "issue.comment" so an active subtree pause hold still admits it.
+        for (const expired of expiredInteractions) {
+          const built = await buildResolvedInteractionContinuationWakeup({
+            db,
+            heartbeat,
+            issue: currentIssue,
+            interaction: expired,
+            actor,
+            source: "issue.comment",
+          }).catch((err) => {
+            logger.warn({ err, issueId: currentIssue.id, interactionId: expired.id }, "failed to build comment-superseded interaction wake");
+            return null;
+          });
+          if (built?.agentId) addWakeup(built.agentId, built.wakeup);
         }
 
         // Re-fetch immediately before deciding whether to wake anyone: outside

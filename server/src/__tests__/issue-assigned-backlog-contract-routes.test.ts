@@ -256,6 +256,31 @@ describe("assigned backlog creation contract", () => {
     );
   });
 
+  // Fleet carry: helper-runner trigger filters discriminate on the issue.created
+  // details without a follow-up GET; approvalKind is only trusted from a human.
+  it("enriches issue.created details and trusts an explicit approvalKind only from a user", async () => {
+    const res = await request(await createApp())
+      .post("/api/companies/company-1/issues")
+      .send({ title: "Assigned executable work", assigneeAgentId, status: "todo" });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ trustExplicitApprovalKind: true }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.created",
+        details: expect.objectContaining({
+          parentId: null,
+          originKind: "manual",
+          assigneeAgentId,
+        }),
+      }),
+    );
+  });
+
   it("does not let a parent-blocking assigned child become an unwoken backlog leaf by default", async () => {
     const res = await request(await createApp())
       .post("/api/issues/parent-1/children")

@@ -9,7 +9,6 @@ const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
   getByIdForUpdate: vi.fn(),
   assertCheckoutOwner: vi.fn(),
-  create: vi.fn(),
   update: vi.fn(),
   addComment: vi.fn(),
   findMentionedAgents: vi.fn(),
@@ -59,7 +58,6 @@ function registerModuleMocks() {
 
   vi.doMock("../services/activity-log.js", () => ({
     logActivity: mockLogActivity,
-    publishPluginDomainEvent: vi.fn(),
   }));
 
   vi.doMock("../services/feedback.js", () => ({
@@ -395,43 +393,6 @@ describe("issue activity event routes", () => {
         "updatedAt": "2026-07-30T12:01:00.000Z",
       }
     `);
-  it("issue.created logActivity includes projectId, parentId, originKind, assigneeId", async () => {
-    const createdIssue = {
-      id: "33333333-3333-4333-8333-333333333333",
-      companyId: "company-1",
-      identifier: "PAP-1",
-      title: "New task",
-      status: "todo",
-      projectId: "44444444-4444-4444-8444-444444444444",
-      parentId: null,
-      originKind: "manual",
-      assigneeId: null,
-      assigneeAgentId: null,
-      executionPolicy: null,
-      executionState: null,
-    };
-    mockIssueService.create.mockResolvedValue(createdIssue);
-    mockIssueService.findMentionedAgents.mockResolvedValue([]);
-
-    const res = await request(await createApp())
-      .post("/api/companies/company-1/issues")
-      .send({ title: "New task", projectId: "44444444-4444-4444-8444-444444444444" });
-
-    expect(res.status).toBe(201);
-    expect(mockLogActivity).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        action: "issue.created",
-        entityId: createdIssue.id,
-        details: expect.objectContaining({
-          identifier: "PAP-1",
-          projectId: "44444444-4444-4444-8444-444444444444",
-          parentId: null,
-          originKind: "manual",
-          assigneeAgentId: null,
-        }),
-      }),
-    );
   });
 
   it("logs blocker activity with added and removed issue summaries", async () => {

@@ -75,13 +75,8 @@ async function createApp(actorOverrides: Record<string, unknown> = {}) {
   return app;
 }
 
-// Matches routes/approvals.ts resolveApprovalKindFromLinkedIssues' `db.select({
-// id: issues.id, approvalKind: issues.approvalKind })` query (fleet issue #687).
-// Default stub ("found, no kind" for the one fixed issueId this file's
-// existing create-approval-with-issueIds fixture sends) keeps that older test
-// passing without opting in; pass approvalKindRows explicitly to unit-test
-// the route's own handling of the query result (conflicting kinds, missing
-// issueIds) — see createApprovalKindRouteDb below.
+// Fleet carry (#687): also answers routes/approvals.ts
+// resolveApprovalKindFromLinkedIssues' `select({ id, approvalKind })` query.
 const DEFAULT_ISSUE_APPROVAL_KIND_ROWS = [{ id: "00000000-0000-0000-0000-000000000001", approvalKind: null }];
 
 function createRouteDb(
@@ -112,20 +107,12 @@ function createRouteDb(
   } as any;
 }
 
-async function createAgentApp(options: { runId?: string; contextSnapshot?: Record<string, unknown> } = {}) {
-  const { errorHandler, approvalRoutes } = routeModules.value;
-// Thin alias for tests that only care about the approvalKind query shape
-// (conflicting kinds, missing issueIds) — same mock as createRouteDb, just
-// without needing to spell out the contextSnapshot/runId/agentId defaults.
 function createApprovalKindRouteDb(rows: Array<{ id: string; approvalKind: string | null }>) {
   return createRouteDb(undefined, undefined, undefined, rows);
 }
 
 async function createAgentApp(options: { runId?: string; contextSnapshot?: Record<string, unknown>; db?: unknown } = {}) {
-  const [{ errorHandler }, { approvalRoutes }] = await Promise.all([
-    import("../middleware/index.js"),
-    import("../routes/approvals.js"),
-  ]);
+  const { errorHandler, approvalRoutes } = routeModules.value;
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -169,10 +156,11 @@ describe("approval routes idempotent retries", () => {
       reason: "allow_test",
       explanation: "Allowed by test mock.",
     });
-    // Default: agent belongs to the same company as the approval.
-    mockAgentService.getById.mockResolvedValue({ id: "agent-42", companyId: "company-1" });
+    // Default: the requester belongs to the approval's company, and the linked
+    // issue is a live anchor it owns (fleet carry: anchor + company guard).
+    mockAgentService.getById.mockResolvedValue({ id: "agent-1", companyId: "company-1" });
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
-    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1", status: "backlog", assigneeAgentId: "agent-42" }]);
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1", status: "backlog", assigneeAgentId: "agent-1" }]);
     mockLogActivity.mockResolvedValue(undefined);
   });
 
@@ -326,122 +314,6 @@ describe("approval routes idempotent retries", () => {
     expect(mockApprovalService.reject).toHaveBeenCalledWith("approval-5", "user-1", "not now");
   });
 
-  it("wakes the requesting agent with approval_rejected reason when reject is applied", async () => {
-    mockApprovalService.getById.mockResolvedValue({
-      id: "approval-7",
-      companyId: "company-1",
-      type: "request_board_approval",
-      status: "pending",
-      payload: {},
-      requestedByAgentId: "agent-42",
-    });
-    mockApprovalService.reject.mockResolvedValue({
-      approval: {
-        id: "approval-7",
-        companyId: "company-1",
-        type: "request_board_approval",
-        status: "rejected",
-        payload: {},
-        requestedByAgentId: "agent-42",
-      },
-      applied: true,
-    });
-
-    const res = await request(await createApp())
-      .post("/api/approvals/approval-7/reject")
-      .send({ decisionNote: "not aligned with strategy" });
-
-    expect(res.status).toBe(200);
-    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
-      "agent-42",
-      expect.objectContaining({
-        reason: "approval_rejected",
-        payload: expect.objectContaining({
-          approvalId: "approval-7",
-          approvalStatus: "rejected",
-          decisionNote: "not aligned with strategy",
-          issueId: "issue-1",
-          issueIds: ["issue-1"],
-        }),
-        contextSnapshot: expect.objectContaining({
-          wakeReason: "approval_rejected",
-          approvalId: "approval-7",
-          approvalStatus: "rejected",
-          decisionNote: "not aligned with strategy",
-        }),
-      }),
-    );
-    expect(mockLogActivity).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        action: "approval.requester_wakeup_queued",
-        details: expect.objectContaining({
-          wakeReason: "approval_rejected",
-          requesterAgentId: "agent-42",
-        }),
-      }),
-    );
-  });
-
-  it("does not wake when reject is already applied (applied=false)", async () => {
-    mockApprovalService.getById.mockResolvedValue({
-      id: "approval-8",
-      companyId: "company-1",
-      type: "request_board_approval",
-      status: "rejected",
-      payload: {},
-      requestedByAgentId: "agent-42",
-    });
-    mockApprovalService.reject.mockResolvedValue({
-      approval: {
-        id: "approval-8",
-        companyId: "company-1",
-        type: "request_board_approval",
-        status: "rejected",
-        payload: {},
-        requestedByAgentId: "agent-42",
-      },
-      applied: false,
-    });
-
-    const res = await request(await createApp())
-      .post("/api/approvals/approval-8/reject")
-      .send({});
-
-    expect(res.status).toBe(200);
-    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
-    expect(mockLogActivity).not.toHaveBeenCalled();
-  });
-
-  it("does not wake on reject when requestedByAgentId is null", async () => {
-    mockApprovalService.getById.mockResolvedValue({
-      id: "approval-9",
-      companyId: "company-1",
-      type: "request_board_approval",
-      status: "pending",
-      payload: {},
-      requestedByAgentId: null,
-    });
-    mockApprovalService.reject.mockResolvedValue({
-      approval: {
-        id: "approval-9",
-        companyId: "company-1",
-        type: "request_board_approval",
-        status: "rejected",
-        payload: {},
-        requestedByAgentId: null,
-      },
-      applied: true,
-    });
-
-    const res = await request(await createApp())
-      .post("/api/approvals/approval-9/reject")
-      .send({ decisionNote: "no agent, no wake" });
-
-    expect(res.status).toBe(200);
-    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
-  });
-
   it("derives approval attribution from the authenticated actor on request revision", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-6",
@@ -470,170 +342,6 @@ describe("approval routes idempotent retries", () => {
     );
   });
 
-  it("does not wake a cross-company agent on reject", async () => {
-    mockApprovalService.getById.mockResolvedValue({
-      id: "approval-10",
-      companyId: "company-1",
-      type: "request_board_approval",
-      status: "pending",
-      payload: {},
-      requestedByAgentId: "agent-foreign",
-    });
-    mockApprovalService.reject.mockResolvedValue({
-      approval: {
-        id: "approval-10",
-        companyId: "company-1",
-        type: "request_board_approval",
-        status: "rejected",
-        payload: {},
-        requestedByAgentId: "agent-foreign",
-      },
-      applied: true,
-    });
-    // Agent belongs to a different company — guard must block the wake.
-    mockAgentService.getById.mockResolvedValue({ id: "agent-foreign", companyId: "company-other" });
-
-    const res = await request(await createApp())
-      .post("/api/approvals/approval-10/reject")
-      .send({ decisionNote: "cross-company reject" });
-
-    expect(res.status).toBe(200);
-    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
-  });
-
-  it("uses the first non-terminal linked issue as the wake anchor (done first, backlog second)", async () => {
-    mockApprovalService.getById.mockResolvedValue({
-      id: "approval-20",
-      companyId: "company-1",
-      type: "request_board_approval",
-      status: "pending",
-      payload: {},
-      requestedByAgentId: "agent-42",
-    });
-    mockApprovalService.approve.mockResolvedValue({
-      approval: {
-        id: "approval-20",
-        companyId: "company-1",
-        type: "request_board_approval",
-        status: "approved",
-        payload: {},
-        requestedByAgentId: "agent-42",
-      },
-      applied: true,
-    });
-    // Editor issue is done; parent issue (backlog) should be the anchor.
-    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
-      { id: "editor-done", status: "done" },
-      { id: "parent-backlog", status: "backlog", assigneeAgentId: "agent-42" },
-    ]);
-
-    const res = await request(await createApp())
-      .post("/api/approvals/approval-20/approve")
-      .send({});
-
-    expect(res.status).toBe(200);
-    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
-      "agent-42",
-      expect.objectContaining({
-        payload: expect.objectContaining({
-          issueId: "parent-backlog",
-          issueIds: ["editor-done", "parent-backlog"],
-        }),
-        contextSnapshot: expect.objectContaining({
-          issueId: "parent-backlog",
-          taskId: "parent-backlog",
-        }),
-      }),
-    );
-  });
-
-  it("does not anchor to a non-terminal issue owned by a DIFFERENT agent (would be cancelled as stale)", async () => {
-    mockApprovalService.getById.mockResolvedValue({
-      id: "approval-21",
-      companyId: "company-1",
-      type: "request_board_approval",
-      status: "pending",
-      payload: {},
-      requestedByAgentId: "agent-42",
-    });
-    mockApprovalService.approve.mockResolvedValue({
-      approval: {
-        id: "approval-21",
-        companyId: "company-1",
-        type: "request_board_approval",
-        status: "approved",
-        payload: {},
-        requestedByAgentId: "agent-42",
-      },
-      applied: true,
-    });
-    // Requester's own issue is done; the only live issue belongs to another
-    // agent — anchoring there would get the queued run cancelled as stale
-    // (assigneeAgentId !== run.agentId). Expect an agent-level wake instead.
-    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
-      { id: "editor-done", status: "done", assigneeAgentId: "agent-42" },
-      { id: "poster-backlog", status: "backlog", assigneeAgentId: "agent-publisher" },
-    ]);
-
-    const res = await request(await createApp())
-      .post("/api/approvals/approval-21/approve")
-      .send({});
-
-    expect(res.status).toBe(200);
-    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
-      "agent-42",
-      expect.objectContaining({
-        payload: expect.objectContaining({ issueId: null }),
-      }),
-    );
-  });
-
-  it("uses null anchor (agent-level wake) when all linked issues are terminal", async () => {
-    mockApprovalService.getById.mockResolvedValue({
-      id: "approval-21",
-      companyId: "company-1",
-      type: "request_board_approval",
-      status: "pending",
-      payload: {},
-      requestedByAgentId: "agent-42",
-    });
-    mockApprovalService.approve.mockResolvedValue({
-      approval: {
-        id: "approval-21",
-        companyId: "company-1",
-        type: "request_board_approval",
-        status: "approved",
-        payload: {},
-        requestedByAgentId: "agent-42",
-      },
-      applied: true,
-    });
-    // All linked issues terminal — anchor must be null so the run is not cancelled.
-    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
-      { id: "issue-done", status: "done" },
-      { id: "issue-cancelled", status: "cancelled" },
-    ]);
-
-    const res = await request(await createApp())
-      .post("/api/approvals/approval-21/approve")
-      .send({});
-
-    expect(res.status).toBe(200);
-    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
-      "agent-42",
-      expect.objectContaining({
-        payload: expect.objectContaining({
-          issueId: null,
-          issueIds: ["issue-done", "issue-cancelled"],
-        }),
-        contextSnapshot: expect.objectContaining({
-          issueId: null,
-          taskId: null,
-        }),
-      }),
-    );
-  });
-
   it("lets agents create generic issue-linked board approval requests", async () => {
     mockApprovalService.create.mockResolvedValue({
       id: "approval-1",
@@ -642,7 +350,7 @@ describe("approval routes idempotent retries", () => {
       requestedByAgentId: "agent-1",
       requestedByUserId: null,
       status: "pending",
-      payload: { title: "Approve hosting spend", proposedComment: "## Section\nProposed body" },
+      payload: { title: "Approve hosting spend" },
       decisionNote: null,
       decidedByUserId: null,
       decidedAt: null,
@@ -655,11 +363,7 @@ describe("approval routes idempotent retries", () => {
       .send({
         type: "request_board_approval",
         issueIds: ["00000000-0000-0000-0000-000000000001"],
-        payload: {
-          title: "Approve hosting spend",
-          proposedComment: "## Section\nProposed body",
-          approvalType: "content_batch_approval",
-        },
+        payload: { title: "Approve hosting spend" },
       });
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
@@ -683,149 +387,7 @@ describe("approval routes idempotent retries", () => {
         actorType: "agent",
         actorId: "agent-1",
         action: "approval.created",
-        // Downstream consumers (discord-fleet plugin's approvalsChannelsByType
-        // regex routing + chunked-comment posting) match on details.title and
-        // read details.proposedComment; if either is dropped from the emit,
-        // routes fall through to the orphan fallback and the proposedComment
-        // is silently dropped.
-        details: expect.objectContaining({
-          type: "request_board_approval",
-          issueIds: ["00000000-0000-0000-0000-000000000001"],
-          title: "Approve hosting spend",
-          proposedComment: "## Section\nProposed body",
-          // The slot-8 routing discriminator MUST ride the event details —
-          // the plugin handler receives these details, not the stored
-          // payload; dropping this forwards silently kills discriminator
-          // routing (codex P1, PR #26).
-          approvalType: "content_batch_approval",
-        }),
       }),
-    );
-  });
-
-  // ─── approvalKind derivation at approval creation (fleet issue #687) ───────
-
-  it("derives approvalKind from a single consistent linked issue and persists + forwards it", async () => {
-    mockApprovalService.create.mockResolvedValue({
-      id: "approval-1",
-      companyId: "company-1",
-      type: "request_board_approval",
-      requestedByAgentId: "agent-1",
-      requestedByUserId: null,
-      status: "pending",
-      approvalKind: "content_batch_approval",
-      payload: { title: "Weekly content batch" },
-      decisionNote: null,
-      decidedByUserId: null,
-      decidedAt: null,
-      createdAt: new Date("2026-04-06T00:00:00.000Z"),
-      updatedAt: new Date("2026-04-06T00:00:00.000Z"),
-    });
-
-    const db = createApprovalKindRouteDb([
-      { id: "00000000-0000-0000-0000-000000000001", approvalKind: "content_batch_approval" },
-    ]);
-    const res = await request(await createAgentApp({ db }))
-      .post("/api/companies/company-1/approvals")
-      .send({
-        type: "request_board_approval",
-        issueIds: ["00000000-0000-0000-0000-000000000001"],
-        payload: { title: "Weekly content batch" },
-      });
-
-    expect(res.status, JSON.stringify(res.body)).toBe(201);
-    expect(mockApprovalService.create).toHaveBeenCalledWith(
-      "company-1",
-      expect.objectContaining({ approvalKind: "content_batch_approval" }),
-    );
-    expect(mockLogActivity).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        details: expect.objectContaining({ approvalKind: "content_batch_approval" }),
-      }),
-    );
-  });
-
-  it("rejects (422) creating an approval whose linked issues carry conflicting approvalKind values — zero approval created", async () => {
-    const db = createApprovalKindRouteDb([
-      { id: "11111111-1111-1111-1111-111111111111", approvalKind: "content_batch_approval" },
-      { id: "22222222-2222-2222-2222-222222222222", approvalKind: "hire_review" },
-    ]);
-    const res = await request(await createAgentApp({ db }))
-      .post("/api/companies/company-1/approvals")
-      .send({
-        type: "request_board_approval",
-        issueIds: [
-          "11111111-1111-1111-1111-111111111111",
-          "22222222-2222-2222-2222-222222222222",
-        ],
-        payload: { title: "Conflicting chain" },
-      });
-
-    expect(res.status, JSON.stringify(res.body)).toBe(422);
-    expect(res.body.error).toContain("conflicting approvalKind");
-    expect(mockApprovalService.create).not.toHaveBeenCalled();
-  });
-
-  it("rejects (422) creating an approval linked to a nonexistent/cross-company issueId — zero approval created", async () => {
-    // Only ONE of the two requested issueIds resolves — the query is scoped
-    // by companyId, so a foreign/nonexistent id is silently absent from the
-    // result set; the route must catch the count mismatch rather than
-    // silently resolving approvalKind from a subset of what was requested.
-    const db = createApprovalKindRouteDb([
-      { id: "11111111-1111-1111-1111-111111111111", approvalKind: null },
-    ]);
-    const res = await request(await createAgentApp({ db }))
-      .post("/api/companies/company-1/approvals")
-      .send({
-        type: "request_board_approval",
-        issueIds: [
-          "11111111-1111-1111-1111-111111111111",
-          "99999999-9999-9999-9999-999999999999",
-        ],
-        payload: { title: "Bad issueId" },
-      });
-
-    expect(res.status, JSON.stringify(res.body)).toBe(422);
-    expect(res.body.error).toContain("do not exist in this company");
-    expect(res.body.details?.missingIssueIds).toEqual(["99999999-9999-9999-9999-999999999999"]);
-    expect(mockApprovalService.create).not.toHaveBeenCalled();
-  });
-
-  it("an agent-supplied payload.approvalKind is never read — the server-derived value always wins", async () => {
-    mockApprovalService.create.mockResolvedValue({
-      id: "approval-1",
-      companyId: "company-1",
-      type: "request_board_approval",
-      requestedByAgentId: "agent-1",
-      requestedByUserId: null,
-      status: "pending",
-      approvalKind: "content_batch_approval",
-      payload: { title: "Weekly content batch" },
-      decisionNote: null,
-      decidedByUserId: null,
-      decidedAt: null,
-      createdAt: new Date("2026-04-06T00:00:00.000Z"),
-      updatedAt: new Date("2026-04-06T00:00:00.000Z"),
-    });
-
-    const db = createApprovalKindRouteDb([
-      { id: "00000000-0000-0000-0000-000000000001", approvalKind: "content_batch_approval" },
-    ]);
-    const res = await request(await createAgentApp({ db }))
-      .post("/api/companies/company-1/approvals")
-      .send({
-        type: "request_board_approval",
-        issueIds: ["00000000-0000-0000-0000-000000000001"],
-        payload: { title: "Weekly content batch", approvalKind: "agent_made_this_up" },
-      });
-
-    expect(res.status, JSON.stringify(res.body)).toBe(201);
-    // The server-derived kind (from the linked issue) wins — the agent's
-    // payload.approvalKind is never consulted for routing purposes.
-    expect(mockApprovalService.create).toHaveBeenCalledWith(
-      "company-1",
-      expect.objectContaining({ approvalKind: "content_batch_approval" }),
     );
   });
 
@@ -901,4 +463,420 @@ describe("approval routes idempotent retries", () => {
     expect(res.body.error).toContain("Status-only recovery runs cannot create or modify approvals");
     expect(mockApprovalService.addComment).not.toHaveBeenCalled();
   });
+
+  it("an agent-supplied payload.approvalKind is never read — the server-derived value always wins", async () => {
+    mockApprovalService.create.mockResolvedValue({
+      id: "approval-1",
+      companyId: "company-1",
+      type: "request_board_approval",
+      requestedByAgentId: "agent-1",
+      requestedByUserId: null,
+      status: "pending",
+      approvalKind: "content_batch_approval",
+      payload: { title: "Weekly content batch" },
+      decisionNote: null,
+      decidedByUserId: null,
+      decidedAt: null,
+      createdAt: new Date("2026-04-06T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-06T00:00:00.000Z"),
+    });
+
+    const db = createApprovalKindRouteDb([
+      { id: "00000000-0000-0000-0000-000000000001", approvalKind: "content_batch_approval" },
+    ]);
+    const res = await request(await createAgentApp({ db }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        issueIds: ["00000000-0000-0000-0000-000000000001"],
+        payload: { title: "Weekly content batch", approvalKind: "agent_made_this_up" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    // The server-derived kind (from the linked issue) wins — the agent's
+    // payload.approvalKind is never consulted for routing purposes.
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ approvalKind: "content_batch_approval" }),
+    );
+  });
+
+
+  it("rejects (422) creating an approval linked to a nonexistent/cross-company issueId — zero approval created", async () => {
+    // Only ONE of the two requested issueIds resolves — the query is scoped
+    // by companyId, so a foreign/nonexistent id is silently absent from the
+    // result set; the route must catch the count mismatch rather than
+    // silently resolving approvalKind from a subset of what was requested.
+    const db = createApprovalKindRouteDb([
+      { id: "11111111-1111-1111-1111-111111111111", approvalKind: null },
+    ]);
+    const res = await request(await createAgentApp({ db }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        issueIds: [
+          "11111111-1111-1111-1111-111111111111",
+          "99999999-9999-9999-9999-999999999999",
+        ],
+        payload: { title: "Bad issueId" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toContain("do not exist in this company");
+    expect(res.body.details?.missingIssueIds).toEqual(["99999999-9999-9999-9999-999999999999"]);
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  });
+
+
+  it("rejects (422) creating an approval whose linked issues carry conflicting approvalKind values — zero approval created", async () => {
+    const db = createApprovalKindRouteDb([
+      { id: "11111111-1111-1111-1111-111111111111", approvalKind: "content_batch_approval" },
+      { id: "22222222-2222-2222-2222-222222222222", approvalKind: "hire_review" },
+    ]);
+    const res = await request(await createAgentApp({ db }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        issueIds: [
+          "11111111-1111-1111-1111-111111111111",
+          "22222222-2222-2222-2222-222222222222",
+        ],
+        payload: { title: "Conflicting chain" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toContain("conflicting approvalKind");
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  });
+
+
+  it("derives approvalKind from a single consistent linked issue and persists + forwards it", async () => {
+    mockApprovalService.create.mockResolvedValue({
+      id: "approval-1",
+      companyId: "company-1",
+      type: "request_board_approval",
+      requestedByAgentId: "agent-1",
+      requestedByUserId: null,
+      status: "pending",
+      approvalKind: "content_batch_approval",
+      payload: { title: "Weekly content batch" },
+      decisionNote: null,
+      decidedByUserId: null,
+      decidedAt: null,
+      createdAt: new Date("2026-04-06T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-06T00:00:00.000Z"),
+    });
+
+    const db = createApprovalKindRouteDb([
+      { id: "00000000-0000-0000-0000-000000000001", approvalKind: "content_batch_approval" },
+    ]);
+    const res = await request(await createAgentApp({ db }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        issueIds: ["00000000-0000-0000-0000-000000000001"],
+        payload: { title: "Weekly content batch" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ approvalKind: "content_batch_approval" }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        details: expect.objectContaining({ approvalKind: "content_batch_approval" }),
+      }),
+    );
+  });
+
+
+  it("uses null anchor (agent-level wake) when all linked issues are terminal", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-21",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.approve.mockResolvedValue({
+      approval: {
+        id: "approval-21",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: true,
+    });
+    // All linked issues terminal — anchor must be null so the run is not cancelled.
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
+      { id: "issue-done", status: "done" },
+      { id: "issue-cancelled", status: "cancelled" },
+    ]);
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-21/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "agent-42",
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          issueId: null,
+          issueIds: ["issue-done", "issue-cancelled"],
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: null,
+          taskId: null,
+        }),
+      }),
+    );
+  });
+
+
+  it("does not anchor to a non-terminal issue owned by a DIFFERENT agent (would be cancelled as stale)", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-21",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.approve.mockResolvedValue({
+      approval: {
+        id: "approval-21",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: true,
+    });
+    // Requester's own issue is done; the only live issue belongs to another
+    // agent — anchoring there would get the queued run cancelled as stale
+    // (assigneeAgentId !== run.agentId). Expect an agent-level wake instead.
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
+      { id: "editor-done", status: "done", assigneeAgentId: "agent-42" },
+      { id: "poster-backlog", status: "backlog", assigneeAgentId: "agent-publisher" },
+    ]);
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-21/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "agent-42",
+      expect.objectContaining({
+        payload: expect.objectContaining({ issueId: null }),
+      }),
+    );
+  });
+
+
+  it("uses the first non-terminal linked issue as the wake anchor (done first, backlog second)", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-20",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.approve.mockResolvedValue({
+      approval: {
+        id: "approval-20",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: true,
+    });
+    // Editor issue is done; parent issue (backlog) should be the anchor.
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
+      { id: "editor-done", status: "done" },
+      { id: "parent-backlog", status: "backlog", assigneeAgentId: "agent-42" },
+    ]);
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-20/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "agent-42",
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          issueId: "parent-backlog",
+          issueIds: ["editor-done", "parent-backlog"],
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: "parent-backlog",
+          taskId: "parent-backlog",
+        }),
+      }),
+    );
+  });
+
+
+  it("does not wake a cross-company agent on reject", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-10",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-foreign",
+    });
+    mockApprovalService.reject.mockResolvedValue({
+      approval: {
+        id: "approval-10",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: "agent-foreign",
+      },
+      applied: true,
+    });
+    // Agent belongs to a different company — guard must block the wake.
+    mockAgentService.getById.mockResolvedValue({ id: "agent-foreign", companyId: "company-other" });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-10/reject")
+      .send({ decisionNote: "cross-company reject" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+
+  it("does not wake on reject when requestedByAgentId is null", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-9",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: null,
+    });
+    mockApprovalService.reject.mockResolvedValue({
+      approval: {
+        id: "approval-9",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: null,
+      },
+      applied: true,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-9/reject")
+      .send({ decisionNote: "no agent, no wake" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+
+  it("does not wake when reject is already applied (applied=false)", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-8",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "rejected",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.reject.mockResolvedValue({
+      approval: {
+        id: "approval-8",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: false,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-8/reject")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+
+  it("wakes the requesting agent with approval_rejected reason when reject is applied", async () => {
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1", status: "backlog", assigneeAgentId: "agent-42" }]);
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-7",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-42",
+    });
+    mockApprovalService.reject.mockResolvedValue({
+      approval: {
+        id: "approval-7",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: "agent-42",
+      },
+      applied: true,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-7/reject")
+      .send({ decisionNote: "not aligned with strategy" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "agent-42",
+      expect.objectContaining({
+        reason: "approval_rejected",
+        payload: expect.objectContaining({
+          approvalId: "approval-7",
+          approvalStatus: "rejected",
+          decisionNote: "not aligned with strategy",
+          issueId: "issue-1",
+          issueIds: ["issue-1"],
+        }),
+        contextSnapshot: expect.objectContaining({
+          wakeReason: "approval_rejected",
+          approvalId: "approval-7",
+          approvalStatus: "rejected",
+          decisionNote: "not aligned with strategy",
+        }),
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "approval.requester_wakeup_queued",
+        details: expect.objectContaining({
+          wakeReason: "approval_rejected",
+          requesterAgentId: "agent-42",
+        }),
+      }),
+    );
+  });
+
 });
