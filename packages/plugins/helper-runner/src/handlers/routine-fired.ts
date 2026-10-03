@@ -5,6 +5,7 @@ import { spawnHelper } from "../exec/spawn.js";
 import { interpolate, interpolateArray, interpolateRecord } from "../exec/interpolate.js";
 import { writeOutput, writeError, applyErrorPolicy } from "../exec/output.js";
 import { SemaphorePool } from "../util/concurrency.js";
+import { helperKey } from "../config/validate.js";
 
 type Vars = { issueId: string; issueIdentifier: string; routineId: string; routineRunId: string; companyId: string };
 
@@ -124,15 +125,3 @@ export class RoutineFiredHandler {
   }
 }
 
-function helperKey(helper: HelperConfig): string {
-  if (helper.trigger.kind === "routine") {
-    return `routine:${helper.trigger.routineId}:${helper.name}`;
-  }
-  if (helper.trigger.kind === "approval") {
-    return `approval:${helper.trigger.approvalType ?? "*"}:${helper.trigger.requireStatus ?? "approved"}:${helper.name}`;
-  }
-  // issue
-  return `issue:${helper.trigger.event ?? "updated"}:${helper.trigger.statusFilter ?? "*"}:${helper.trigger.assigneeAgentId ?? "*"}:${helper.name}`;
-}
-
-export { helperKey };

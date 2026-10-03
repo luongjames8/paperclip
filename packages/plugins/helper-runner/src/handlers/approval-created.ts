@@ -5,7 +5,7 @@ import { spawnHelper } from "../exec/spawn.js";
 import { interpolate, interpolateArray, interpolateRecord, type InterpolationVars } from "../exec/interpolate.js";
 import { writeOutput, writeError, applyErrorPolicy } from "../exec/output.js";
 import { SemaphorePool } from "../util/concurrency.js";
-import { helperKey } from "./routine-fired.js";
+import { helperKey } from "../config/validate.js";
 
 type Vars = {
   approvalId: string;

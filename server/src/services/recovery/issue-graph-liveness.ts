@@ -491,6 +491,8 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
   const agentsById = new Map(input.agents.map((agent) => [agent.id, agent]));
   const blockersByBlockedIssueId = new Map<string, IssueLivenessRelationInput[]>();
   const unresolvedBlockers = new Set<string>();
+  // Live blockers of ANY non-terminal dependent (blocked, todo, ...): not orphans.
+  const blockersWithLiveDependent = new Set<string>();
   const findings: IssueLivenessFinding[] = [];
   const activeRuns = input.activeRuns ?? [];
   const queuedWakeRequests = input.queuedWakeRequests ?? [];
@@ -505,6 +507,18 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
 
     const blocker = issuesById.get(relation.blockerIssueId);
     const blocked = issuesById.get(relation.blockedIssueId);
+    if (
+      blocker &&
+      blocked &&
+      blocker.companyId === relation.companyId &&
+      blocked.companyId === relation.companyId &&
+      blocker.status !== "done" &&
+      blocker.status !== "cancelled" &&
+      blocked.status !== "done" &&
+      blocked.status !== "cancelled"
+    ) {
+      blockersWithLiveDependent.add(blocker.id);
+    }
     if (
       blocker &&
       blocked &&
@@ -787,7 +801,7 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
       issue.status === "backlog" &&
       issue.assigneeAgentId &&
       !shouldInspectBlockedChain &&
-      !unresolvedBlockers.has(issue.id) &&
+      !blockersWithLiveDependent.has(issue.id) &&
       isStaleAssignedBacklogIssue(issue) &&
       !hasExplicitWaitingPath(issue)
     ) {

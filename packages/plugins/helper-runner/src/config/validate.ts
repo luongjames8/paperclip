@@ -12,21 +12,19 @@ export function isHelperSecretRef(value: unknown): value is HelperSecretRef {
   );
 }
 
+// Identity of a helper: its name + EVERY trigger field, so two helpers that differ in any
+// discriminator (approval event, titleContains, ...) are distinct. Also the semaphore key.
+export function helperKey(helper: HelperConfig): string {
+  return `${JSON.stringify(helper.trigger)}:${helper.name}`;
+}
+
 export function validateConfig(config: PluginConfig): void {
   const seen = new Set<string>();
   for (const helper of config.helpers) {
     validateHelper(helper);
-    const triggerKey =
-      helper.trigger.kind === "routine"
-        ? `routine:${helper.trigger.routineId}`
-        : helper.trigger.kind === "approval"
-        ? `approval:${helper.trigger.approvalType ?? "*"}:${helper.trigger.requireStatus ?? "approved"}`
-        : `issue:${helper.trigger.event ?? "updated"}:${helper.trigger.statusFilter ?? "*"}:${helper.trigger.assigneeAgentId ?? "*"}`;
-    const key = `${triggerKey}:${helper.name}`;
+    const key = helperKey(helper);
     if (seen.has(key)) {
-      throw new Error(
-        `Duplicate helper: name "${helper.name}" + trigger "${triggerKey}" appears more than once`
-      );
+      throw new Error(`Duplicate helper: name "${helper.name}" + trigger ${JSON.stringify(helper.trigger)} appears more than once`);
     }
     seen.add(key);
   }

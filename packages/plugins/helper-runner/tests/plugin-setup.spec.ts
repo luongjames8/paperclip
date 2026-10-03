@@ -158,3 +158,27 @@ describe("onConfigChanged hot-reload", () => {
     expect((ctx.issues.documents.upsert as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
 });
+
+describe("validateConfig duplicate detection", () => {
+  it("treats helpers that differ in any trigger field as distinct", () => {
+    const exec = { command: "/bin/true" };
+    expect(() =>
+      validateConfig({
+        helpers: [
+          { name: "h", trigger: { kind: "approval", event: "created" }, exec },
+          { name: "h", trigger: { kind: "approval", event: "decided" }, exec },
+          { name: "i", trigger: { kind: "issue", titleContains: "a" }, exec },
+          { name: "i", trigger: { kind: "issue", titleContains: "b" }, exec },
+        ],
+      } as PluginConfig),
+    ).not.toThrow();
+    expect(() =>
+      validateConfig({
+        helpers: [
+          { name: "h", trigger: { kind: "approval", event: "created" }, exec },
+          { name: "h", trigger: { kind: "approval", event: "created" }, exec },
+        ],
+      } as PluginConfig),
+    ).toThrow(/Duplicate helper/);
+  });
+});

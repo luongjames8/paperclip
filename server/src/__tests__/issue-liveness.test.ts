@@ -295,6 +295,31 @@ describe("issue graph liveness classifier", () => {
     expect(findings[0]?.state).toBe("blocked_by_assigned_backlog_issue");
   });
 
+  it("does not double-escalate a stale assigned backlog issue that blocks a live todo issue", () => {
+    const staleUpdatedAt = new Date(Date.now() - 8 * 60 * 60 * 1000);
+    const findings = classifyIssueGraphLiveness({
+      issues: [
+        issue({ status: "todo", updatedAt: staleUpdatedAt }),
+        issue({
+          id: blockerId,
+          identifier: "PAP-1704",
+          title: "Parked assigned unblock work",
+          status: "backlog",
+          assigneeAgentId: "blocker-agent",
+          updatedAt: staleUpdatedAt,
+        }),
+      ],
+      relations: blocks,
+      agents: [
+        agent(),
+        manager,
+        agent({ id: "blocker-agent", name: "Blocker Agent", reportsTo: managerId }),
+      ],
+    });
+
+    expect(findings.map((f) => f.state)).not.toContain("stale_assigned_backlog_issue");
+  });
+
   it("does not flag a stale assigned backlog issue that already has an explicit waiting path", () => {
     const staleUpdatedAt = new Date(Date.now() - 8 * 60 * 60 * 1000);
     const orphan = issue({
