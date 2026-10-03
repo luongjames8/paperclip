@@ -263,10 +263,17 @@ export async function handleApprovalRevisionModal(
     return;
   }
 
-  await removeFromPending(ctx, company.companyId, approvalId);
-
+  // Feedback first, bookkeeping best-effort — same rule as the approve/reject path above.
   await interaction.editReply({
     content:
       "✏️ Requested changes — the card creator has been woken with your note to revise and resubmit the **same** card.",
   });
+  try {
+    await removeFromPending(ctx, company.companyId, approvalId);
+  } catch (err) {
+    ctx.logger.warn("approval-revision-modal: pending-state cleanup failed (self-heals on next sweep)", {
+      approvalId,
+      err: String(err),
+    });
+  }
 }

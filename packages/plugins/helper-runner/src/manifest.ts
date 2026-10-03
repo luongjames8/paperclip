@@ -58,10 +58,9 @@ const manifest: PaperclipPluginManifestV1 = {
                 },
                 event: {
                   type: "string",
-                  enum: ["created", "decided"],
-                  default: "decided",
-                  title: "Approval lifecycle event",
-                  description: "When kind=approval: 'created' fires at request time (use for Discord cards/notifications); 'decided' fires when status flips (use for downstream actions).",
+                  enum: ["created", "decided", "updated"],
+                  title: "Lifecycle event",
+                  description: "When kind=approval (default 'decided'): 'created' fires at request time (use for Discord cards/notifications); 'decided' fires when status flips (use for downstream actions). When kind=issue: 'updated' (the default and only value).",
                 },
                 approvalType: {
                   type: "string",

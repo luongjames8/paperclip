@@ -147,7 +147,7 @@ while :; do
       exit 1
     fi
     if [[ -n "$status" ]]; then
-      returned_status="$(jq -r '.status // empty' <<<"$body" 2>/dev/null || true)"
+      returned_status="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status") or "")' <<<"$body" 2>/dev/null || true)"
       if [[ "$returned_status" != "$status" ]]; then
         printf 'Issue update FAILED: server echoed status %s instead of requested %s.\n' "${returned_status:-<none>}" "$status" >&2
         printf '%s\n' "$body" >&2
