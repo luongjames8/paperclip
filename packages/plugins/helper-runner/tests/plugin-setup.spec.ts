@@ -127,40 +127,23 @@ describe("onConfigChanged hot-reload", () => {
     };
   }
 
-  it("rebuildSemaphores completes without throw on valid config", () => {
-    const config: PluginConfig = {
-      helpers: [
-        { name: "h1", trigger: { kind: "routine", routineId: "r-1" }, exec: { command: "/bin/true" } },
-      ],
-    };
-    const handler = new RoutineFiredHandler(() => config, makeCtx());
-    expect(() => handler.rebuildSemaphores()).not.toThrow();
-  });
-
   it("config swap accepted — new routineId activates, old deactivates", async () => {
     let currentConfig: PluginConfig = {
       helpers: [
         { name: "h1", trigger: { kind: "routine", routineId: "r-old" }, exec: { command: "/bin/true" } },
       ],
     };
-    const handler = new RoutineFiredHandler(() => currentConfig, makeCtx());
-    handler.rebuildSemaphores();
-
     // Swap to new config
     currentConfig = {
       helpers: [
         { name: "h2", trigger: { kind: "routine", routineId: "r-new" }, exec: { command: "/bin/true" } },
       ],
     };
-    expect(() => {
-      validateConfig(currentConfig);
-      handler.rebuildSemaphores();
-    }).not.toThrow();
+    expect(() => validateConfig(currentConfig)).not.toThrow();
 
     // Old routineId event should now produce no match
     const ctx = makeCtx();
     const handler2 = new RoutineFiredHandler(() => currentConfig, ctx);
-    handler2.rebuildSemaphores();
     await handler2.handle({
       eventId: "e1",
       eventType: "issue.created",

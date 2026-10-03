@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Semaphore } from "../src/util/concurrency.js";
+import { Semaphore, SemaphorePool } from "../src/util/concurrency.js";
 
 describe("Semaphore", () => {
   it("allows up to max concurrent acquisitions", async () => {
@@ -56,5 +56,15 @@ describe("Semaphore", () => {
 
     await Promise.all([1, 2, 3, 4, 5, 6].map(work));
     expect(results.sort()).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+});
+
+describe("SemaphorePool", () => {
+  it("keys per company and resizes on a max change", () => {
+    const pool = new SemaphorePool();
+    const a = pool.get("co-a|h", 1);
+    expect(pool.get("co-a|h", 1)).toBe(a);
+    expect(pool.get("co-b|h", 1)).not.toBe(a);
+    expect(pool.get("co-a|h", 2)).not.toBe(a);
   });
 });

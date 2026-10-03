@@ -66,7 +66,6 @@ describe("RoutineFiredHandler routing", () => {
   it("handles matching routineId", async () => {
     const ctx = makeCtx();
     const handler = new RoutineFiredHandler(() => makeConfig(), ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent({ originKind: "routine_execution", originId: "routine-a", identifier: "HIN-1", originRunId: "run-1" }));
     expect((ctx.issues.documents.upsert as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0);
   });
@@ -75,7 +74,6 @@ describe("RoutineFiredHandler routing", () => {
     const ctx = makeCtx();
     const configs: Record<string, PluginConfig> = { "co-1": makeConfig(), "co-2": { helpers: [] } };
     const handler = new RoutineFiredHandler((companyId) => configs[companyId ?? ""] ?? { helpers: [] }, ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent({ originKind: "routine_execution", originId: "routine-a", companyId: "co-2" }));
     expect((ctx.issues.documents.upsert as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
@@ -83,7 +81,6 @@ describe("RoutineFiredHandler routing", () => {
   it("skips event with wrong originKind", async () => {
     const ctx = makeCtx();
     const handler = new RoutineFiredHandler(() => makeConfig(), ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent({ originKind: "manual", originId: "routine-a" }));
     expect((ctx.issues.documents.upsert as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
@@ -91,7 +88,6 @@ describe("RoutineFiredHandler routing", () => {
   it("skips event with unmatched routineId", async () => {
     const ctx = makeCtx();
     const handler = new RoutineFiredHandler(() => makeConfig(), ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent({ originKind: "routine_execution", originId: "routine-unknown" }));
     expect((ctx.issues.documents.upsert as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
@@ -99,7 +95,6 @@ describe("RoutineFiredHandler routing", () => {
   it("skips event missing originId in payload", async () => {
     const ctx = makeCtx();
     const handler = new RoutineFiredHandler(() => makeConfig(), ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent({ originKind: "routine_execution" }));
     expect((ctx.issues.documents.upsert as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
@@ -107,7 +102,6 @@ describe("RoutineFiredHandler routing", () => {
   it("skips event missing entityId (no issue to operate on)", async () => {
     const ctx = makeCtx();
     const handler = new RoutineFiredHandler(() => makeConfig(), ctx);
-    handler.rebuildSemaphores();
     const event = makeEvent({ originKind: "routine_execution", originId: "routine-a" });
     (event as unknown as Record<string, unknown>).entityId = undefined;
     await handler.handle(event);

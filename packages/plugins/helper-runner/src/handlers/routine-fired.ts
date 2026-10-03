@@ -4,13 +4,12 @@ import { PaperclipClient } from "../api/paperclip.js";
 import { spawnHelper } from "../exec/spawn.js";
 import { interpolate, interpolateArray, interpolateRecord } from "../exec/interpolate.js";
 import { writeOutput, writeError, applyErrorPolicy } from "../exec/output.js";
-import { Semaphore } from "../util/concurrency.js";
+import { SemaphorePool } from "../util/concurrency.js";
 
 type Vars = { issueId: string; issueIdentifier: string; routineId: string; routineRunId: string; companyId: string };
 
 export class RoutineFiredHandler {
-  private semaphores = new Map<string, Semaphore>();
-  private semaphoreMax = new Map<string, number>();
+  private semaphores = new SemaphorePool();
 
   constructor(
     // companyId given → that company's config; omitted → every company's helpers
@@ -19,24 +18,6 @@ export class RoutineFiredHandler {
     private ctx: Pick<PluginContext, "logger" | "issues" | "secrets">
   ) {}
 
-  rebuildSemaphores(): void {
-    const config = this.getConfig();
-    const newMap = new Map<string, Semaphore>();
-    const newMax = new Map<string, number>();
-    for (const helper of config.helpers) {
-      const key = helperKey(helper);
-      const max = helper.maxConcurrent ?? 4;
-      const existingMax = this.semaphoreMax.get(key);
-      if (this.semaphores.has(key) && existingMax === max) {
-        newMap.set(key, this.semaphores.get(key)!);
-      } else {
-        newMap.set(key, new Semaphore(max));
-      }
-      newMax.set(key, max);
-    }
-    this.semaphores = newMap;
-    this.semaphoreMax = newMax;
-  }
 
   async handle(event: PluginEvent): Promise<void> {
     const payload = event.payload as Record<string, unknown> | undefined;
@@ -83,13 +64,7 @@ export class RoutineFiredHandler {
   }
 
   private async runHelper(helper: HelperConfig, vars: Vars): Promise<void> {
-    const key = helperKey(helper);
-    if (!this.semaphores.has(key)) {
-      const max = helper.maxConcurrent ?? 4;
-      this.semaphores.set(key, new Semaphore(max));
-      this.semaphoreMax.set(key, max);
-    }
-    const sem = this.semaphores.get(key)!;
+    const sem = this.semaphores.get(`${vars.companyId}|${helperKey(helper)}`, helper.maxConcurrent ?? 4);
 
     await sem.acquire();
     try {

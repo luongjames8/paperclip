@@ -4,7 +4,7 @@ import { PaperclipClient } from "../api/paperclip.js";
 import { spawnHelper } from "../exec/spawn.js";
 import { interpolate, interpolateArray, interpolateRecord, type InterpolationVars } from "../exec/interpolate.js";
 import { writeOutput, writeError, applyErrorPolicy } from "../exec/output.js";
-import { Semaphore } from "../util/concurrency.js";
+import { SemaphorePool } from "../util/concurrency.js";
 import { helperKey } from "./routine-fired.js";
 
 type Vars = {
@@ -27,8 +27,7 @@ type Vars = {
  * (Use ApprovalDecidedHandler for post-decision actions like Metricool push.)
  */
 export class ApprovalCreatedHandler {
-  private semaphores = new Map<string, Semaphore>();
-  private semaphoreMax = new Map<string, number>();
+  private semaphores = new SemaphorePool();
 
   constructor(
     // companyId given → that company's config; omitted → every company's helpers
@@ -37,26 +36,6 @@ export class ApprovalCreatedHandler {
     private ctx: Pick<PluginContext, "logger" | "issues" | "secrets">
   ) {}
 
-  rebuildSemaphores(): void {
-    const config = this.getConfig();
-    const newMap = new Map<string, Semaphore>();
-    const newMax = new Map<string, number>();
-    for (const helper of config.helpers) {
-      if (helper.trigger.kind !== "approval") continue;
-      if ((helper.trigger.event ?? "decided") !== "created") continue;
-      const key = helperKey(helper);
-      const max = helper.maxConcurrent ?? 4;
-      const existingMax = this.semaphoreMax.get(key);
-      if (this.semaphores.has(key) && existingMax === max) {
-        newMap.set(key, this.semaphores.get(key)!);
-      } else {
-        newMap.set(key, new Semaphore(max));
-      }
-      newMax.set(key, max);
-    }
-    this.semaphores = newMap;
-    this.semaphoreMax = newMax;
-  }
 
   async handle(event: PluginEvent): Promise<void> {
     const payload = event.payload as Record<string, unknown> | undefined;
@@ -111,13 +90,7 @@ export class ApprovalCreatedHandler {
   }
 
   private async runHelper(helper: HelperConfig, vars: Vars): Promise<void> {
-    const key = helperKey(helper);
-    if (!this.semaphores.has(key)) {
-      const max = helper.maxConcurrent ?? 4;
-      this.semaphores.set(key, new Semaphore(max));
-      this.semaphoreMax.set(key, max);
-    }
-    const sem = this.semaphores.get(key)!;
+    const sem = this.semaphores.get(`${vars.companyId}|${helperKey(helper)}`, helper.maxConcurrent ?? 4);
     await sem.acquire();
     try {
       const command = await interpolate(helper.exec.command, vars as unknown as InterpolationVars, this.ctx);

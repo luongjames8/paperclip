@@ -4,7 +4,7 @@ import { PaperclipClient } from "../api/paperclip.js";
 import { spawnHelper } from "../exec/spawn.js";
 import { interpolate, interpolateArray, interpolateRecord, type InterpolationVars } from "../exec/interpolate.js";
 import { writeOutput, writeError, applyErrorPolicy } from "../exec/output.js";
-import { Semaphore } from "../util/concurrency.js";
+import { SemaphorePool } from "../util/concurrency.js";
 import { helperKey } from "./routine-fired.js";
 
 type Vars = {
@@ -29,8 +29,7 @@ type Vars = {
  * gap where downstream API plumbing keeps getting skipped.
  */
 export class IssueUpdatedHandler {
-  private semaphores = new Map<string, Semaphore>();
-  private semaphoreMax = new Map<string, number>();
+  private semaphores = new SemaphorePool();
 
   constructor(
     // companyId given → that company's config; omitted → every company's helpers
@@ -39,35 +38,24 @@ export class IssueUpdatedHandler {
     private ctx: Pick<PluginContext, "logger" | "issues" | "secrets">
   ) {}
 
-  rebuildSemaphores(): void {
-    const config = this.getConfig();
-    const newMap = new Map<string, Semaphore>();
-    const newMax = new Map<string, number>();
-    for (const helper of config.helpers) {
-      if (helper.trigger.kind !== "issue") continue;
-      const key = helperKey(helper);
-      const max = helper.maxConcurrent ?? 4;
-      const existingMax = this.semaphoreMax.get(key);
-      if (this.semaphores.has(key) && existingMax === max) {
-        newMap.set(key, this.semaphores.get(key)!);
-      } else {
-        newMap.set(key, new Semaphore(max));
-      }
-      newMax.set(key, max);
-    }
-    this.semaphores = newMap;
-    this.semaphoreMax = newMax;
-  }
 
   async handle(event: PluginEvent): Promise<void> {
     const payload = event.payload as Record<string, unknown> | undefined;
     const issueId = event.entityId ?? "";
     if (!issueId) return;
 
+    // statusFilter matches the payload (status is present only when this update changed it —
+    // "after X marks the issue done"). The payload carries only changed fields, so the
+    // assignee/title filters read the issue's current state.
     const status = (payload?.["status"] as string | undefined) ?? "";
-    const assigneeAgentId = (payload?.["assigneeAgentId"] as string | undefined) ?? "";
-    const title = (payload?.["title"] as string | undefined) ?? "";
-    const identifier = (payload?.["identifier"] as string | undefined) ?? "";
+    const config = this.getConfig(event.companyId);
+    const needsIssue = config.helpers.some(
+      (h) => h.trigger.kind === "issue" && (h.trigger.assigneeAgentId || h.trigger.titleContains),
+    );
+    const issue = needsIssue && event.companyId ? await this.ctx.issues.get(issueId, event.companyId) : null;
+    const assigneeAgentId = issue?.assigneeAgentId ?? (payload?.["assigneeAgentId"] as string | undefined) ?? "";
+    const title = issue?.title ?? (payload?.["title"] as string | undefined) ?? "";
+    const identifier = (payload?.["identifier"] as string | undefined) ?? issue?.identifier ?? "";
 
     this.ctx.logger.info("[issue-updated] handle entered", {
       issueId,
@@ -76,7 +64,6 @@ export class IssueUpdatedHandler {
       titleSnippet: title.slice(0, 60),
     });
 
-    const config = this.getConfig(event.companyId);
     const matching = config.helpers.filter((h) => {
       if (h.trigger.kind !== "issue") return false;
       const event = h.trigger.event ?? "updated";
@@ -109,13 +96,7 @@ export class IssueUpdatedHandler {
   }
 
   private async runHelper(helper: HelperConfig, vars: Vars): Promise<void> {
-    const key = helperKey(helper);
-    if (!this.semaphores.has(key)) {
-      const max = helper.maxConcurrent ?? 4;
-      this.semaphores.set(key, new Semaphore(max));
-      this.semaphoreMax.set(key, max);
-    }
-    const sem = this.semaphores.get(key)!;
+    const sem = this.semaphores.get(`${vars.companyId}|${helperKey(helper)}`, helper.maxConcurrent ?? 4);
     await sem.acquire();
     try {
       const command = await interpolate(helper.exec.command, vars as unknown as InterpolationVars, this.ctx);

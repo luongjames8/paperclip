@@ -23,12 +23,6 @@ function getConfig(companyId?: string): PluginConfig {
   return { helpers: [...configByCompany.values()].flatMap((config) => config.helpers) };
 }
 
-function rebuildAllSemaphores(): void {
-  routineHandler?.rebuildSemaphores();
-  approvalDecidedHandler?.rebuildSemaphores();
-  approvalCreatedHandler?.rebuildSemaphores();
-  issueUpdatedHandler?.rebuildSemaphores();
-}
 
 const plugin = definePlugin({
   multiCompanyConfig: true,
@@ -37,16 +31,12 @@ const plugin = definePlugin({
     savedLogger = ctx.logger;
 
     routineHandler = new RoutineFiredHandler(getConfig, ctx);
-    routineHandler.rebuildSemaphores();
 
     approvalDecidedHandler = new ApprovalDecidedHandler(getConfig, ctx);
-    approvalDecidedHandler.rebuildSemaphores();
 
     approvalCreatedHandler = new ApprovalCreatedHandler(getConfig, ctx);
-    approvalCreatedHandler.rebuildSemaphores();
 
     issueUpdatedHandler = new IssueUpdatedHandler(getConfig, ctx);
-    issueUpdatedHandler.rebuildSemaphores();
 
     ctx.events.on("issue.created", async (event) => {
       await routineHandler!.handle(event);
@@ -78,7 +68,6 @@ const plugin = definePlugin({
         err: err instanceof Error ? err.message : String(err),
       });
     }
-    rebuildAllSemaphores();
     const helpers = configByCompany.get(companyId)!.helpers;
     savedLogger?.info("helper-runner company config applied", {
       companyId,

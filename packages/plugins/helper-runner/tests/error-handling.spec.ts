@@ -63,7 +63,6 @@ describe("error handling — onFailure policies", () => {
     const ctx = makeCtx();
     const config = makeConfig({ errorHandling: { onFailure: "block_issue", onTimeout: "noop" } });
     const handler = new RoutineFiredHandler(() => config, ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent("r-uuid"));
     const updateMock = ctx.issues.update as ReturnType<typeof vi.fn>;
     const patchCall = updateMock.mock.calls.find((args: unknown[]) => (args[1] as { status?: string })?.status === "blocked");
@@ -74,7 +73,6 @@ describe("error handling — onFailure policies", () => {
     const ctx = makeCtx();
     const config = makeConfig({ errorHandling: { onFailure: "cancel_issue", onTimeout: "noop" } });
     const handler = new RoutineFiredHandler(() => config, ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent("r-uuid"));
     const updateMock = ctx.issues.update as ReturnType<typeof vi.fn>;
     const patchCall = updateMock.mock.calls.find((args: unknown[]) => (args[1] as { status?: string })?.status === "cancelled");
@@ -85,7 +83,6 @@ describe("error handling — onFailure policies", () => {
     const ctx = makeCtx();
     const config = makeConfig({ errorHandling: { onFailure: "noop", onTimeout: "noop" } });
     const handler = new RoutineFiredHandler(() => config, ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent("r-uuid"));
     const updateMock = ctx.issues.update as ReturnType<typeof vi.fn>;
     const patchCall = updateMock.mock.calls.find((args: unknown[]) => {
@@ -108,7 +105,6 @@ describe("error handling — onTimeout policies", () => {
       errorHandling: { onFailure: "noop", onTimeout: "block_issue" },
     });
     const handler = new RoutineFiredHandler(() => config, ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent("r-uuid"));
     const updateMock = ctx.issues.update as ReturnType<typeof vi.fn>;
     const patchCall = updateMock.mock.calls.find((args: unknown[]) => (args[1] as { status?: string })?.status === "blocked");
@@ -122,7 +118,6 @@ describe("error handling — onTimeout policies", () => {
       errorHandling: { onFailure: "noop", onTimeout: "cancel_issue" },
     });
     const handler = new RoutineFiredHandler(() => config, ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent("r-uuid"));
     const updateMock = ctx.issues.update as ReturnType<typeof vi.fn>;
     const patchCall = updateMock.mock.calls.find((args: unknown[]) => (args[1] as { status?: string })?.status === "cancelled");
@@ -136,7 +131,6 @@ describe("error handling — onTimeout policies", () => {
       errorHandling: { onFailure: "noop", onTimeout: "noop" },
     });
     const handler = new RoutineFiredHandler(() => config, ctx);
-    handler.rebuildSemaphores();
     await handler.handle(makeEvent("r-uuid"));
     const updateMock = ctx.issues.update as ReturnType<typeof vi.fn>;
     const patchCall = updateMock.mock.calls.find((args: unknown[]) => {
