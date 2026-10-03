@@ -14,7 +14,7 @@ export interface ApprovalTrigger {
   // Optional filter — if omitted, fires on any approval. e.g. "request_board_approval".
   approvalType?: string;
   // Optional status filter (only meaningful for event=decided). Default "approved".
-  requireStatus?: "approved" | "rejected" | "any";
+  requireStatus?: "approved" | "rejected" | "revision_requested" | "any";
 }
 
 export interface IssueTrigger {

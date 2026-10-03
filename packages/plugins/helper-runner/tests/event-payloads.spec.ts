@@ -48,6 +48,16 @@ describe("approval.decided payload", () => {
     await handler.handle(event("approval.decided", { activityAction: "approval.rejected", linkedIssueIds: ["iss-1"] }));
     expect(ctx.issues.documents.upsert).not.toHaveBeenCalled();
   });
+
+  it("fires a revision_requested helper only on a request-changes decision", async () => {
+    const ctx = makeCtx();
+    const cfg = helper({ kind: "approval", event: "decided", requireStatus: "revision_requested" });
+    const handler = new ApprovalDecidedHandler(() => cfg, ctx);
+    await handler.handle(event("approval.decided", { activityAction: "approval.approved", linkedIssueIds: ["iss-1"] }));
+    expect(ctx.issues.documents.upsert).not.toHaveBeenCalled();
+    await handler.handle(event("approval.decided", { activityAction: "approval.revision_requested", linkedIssueIds: ["iss-1"] }));
+    expect(ctx.issues.documents.upsert).toHaveBeenCalled();
+  });
 });
 
 describe("issue.updated payload", () => {

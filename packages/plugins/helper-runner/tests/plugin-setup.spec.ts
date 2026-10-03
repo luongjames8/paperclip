@@ -180,5 +180,13 @@ describe("validateConfig duplicate detection", () => {
         ],
       } as PluginConfig),
     ).toThrow(/Duplicate helper/);
+    expect(() =>
+      validateConfig({
+        helpers: [
+          { name: "h", trigger: { kind: "approval", event: "created" }, exec },
+          { name: "h", trigger: { event: "created", kind: "approval" }, exec },
+        ],
+      } as PluginConfig),
+    ).toThrow(/Duplicate helper/);
   });
 });

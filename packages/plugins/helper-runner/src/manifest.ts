@@ -69,7 +69,7 @@ const manifest: PaperclipPluginManifestV1 = {
                 },
                 requireStatus: {
                   type: "string",
-                  enum: ["approved", "rejected", "any"],
+                  enum: ["approved", "rejected", "revision_requested", "any"],
                   default: "approved",
                   title: "Required approval status",
                   description: "When kind=approval AND event=decided: fire only when approval transitions to this status. Ignored for event=created.",

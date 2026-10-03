@@ -2449,16 +2449,11 @@ export function routineService(
               strictMode: process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true",
               fieldPath: "env",
             });
+      // Only meaningful when provided; checked against the locked row in the transaction.
       const nextExecutionPolicy = patch.executionPolicy === undefined
-        ? existing.executionPolicy ?? null
+        ? null
         : await normalizeRoutineExecutionPolicyForPersistence(db, existing.companyId, patch.executionPolicy);
-      if (patch.executionPolicy !== undefined) {
-        assertActorMayChangeExecutionPolicy(actor, existing.executionPolicy, nextExecutionPolicy);
-      }
-      const nextApprovalKind = patch.approvalKind === undefined ? existing.approvalKind ?? null : patch.approvalKind ?? null;
-      if (patch.approvalKind !== undefined) {
-        assertActorMayChangeApprovalKind(actor, existing.approvalKind, nextApprovalKind);
-      }
+      const nextApprovalKind = patch.approvalKind ?? null;
       const requestedStatus = patch.status ?? existing.status;
       if (patch.status === "active") {
         assertRoutineCanEnable(patch.status, nextAssigneeAgentId);
@@ -2519,6 +2514,20 @@ export function routineService(
           });
         }
 
+        // Protected policy fields are re-derived from the LOCKED row: an omitted field keeps
+        // the locked value (never the pre-lock snapshot), and a provided one is re-checked
+        // against it, so a racing board change can't be silently reverted.
+        const lockedExecutionPolicy = patch.executionPolicy === undefined
+          ? locked.executionPolicy ?? null
+          : nextExecutionPolicy;
+        if (patch.executionPolicy !== undefined) {
+          assertActorMayChangeExecutionPolicy(actor, locked.executionPolicy, nextExecutionPolicy);
+        }
+        const lockedApprovalKind = patch.approvalKind === undefined ? locked.approvalKind ?? null : nextApprovalKind;
+        if (patch.approvalKind !== undefined) {
+          assertActorMayChangeApprovalKind(actor, locked.approvalKind, nextApprovalKind);
+        }
+
         const candidate: RoutineRow = {
           ...locked,
           projectId: nextProjectId,
@@ -2536,8 +2545,8 @@ export function routineService(
           activityGateScope: patch.activityGateScope ?? locked.activityGateScope,
           variables: nextVariables,
           env: nextEnv,
-          executionPolicy: nextExecutionPolicy,
-          approvalKind: nextApprovalKind,
+          executionPolicy: lockedExecutionPolicy,
+          approvalKind: lockedApprovalKind,
           responsibleUserId: locked.responsibleUserId ?? responsibleUserId,
           updatedByAgentId: actor.agentId ?? null,
           updatedByUserId: actor.userId ?? null,

@@ -14,8 +14,12 @@ export function isHelperSecretRef(value: unknown): value is HelperSecretRef {
 
 // Identity of a helper: its name + EVERY trigger field, so two helpers that differ in any
 // discriminator (approval event, titleContains, ...) are distinct. Also the semaphore key.
+// Fields sorted, so property order in the saved JSON never changes the key (trigger
+// values are all primitives, so a shallow sort is canonical).
 export function helperKey(helper: HelperConfig): string {
-  return `${JSON.stringify(helper.trigger)}:${helper.name}`;
+  const trigger = helper.trigger as unknown as Record<string, unknown>;
+  const fields = Object.keys(trigger).sort().map((key) => [key, trigger[key]]);
+  return `${JSON.stringify(fields)}:${helper.name}`;
 }
 
 export function validateConfig(config: PluginConfig): void {
