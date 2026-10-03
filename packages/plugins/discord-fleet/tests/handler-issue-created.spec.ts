@@ -91,6 +91,17 @@ describe("handleIssueCreated", () => {
     );
   });
 
+  it("plugin-operation issue (root, plugin:<key>:operation origin) → not posted", async () => {
+    const { handleIssueCreated } = await import("../src/handlers/issue-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const event = makeIssueCreatedEvent({ payload: { originKind: "plugin:acme.sync:operation" } });
+    await handleIssueCreated(harness.ctx, event, makeMockClient(), makeConfig());
+
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+  });
+
   it("child issue (parentId set) → posts to routed channel", async () => {
     const { handleIssueCreated } = await import("../src/handlers/issue-created.js");
     const { postToChannel } = await import("../src/discord/rest.js");

@@ -2170,7 +2170,7 @@ export function routineService(
       }
     }
 
-    if (run.status === "issue_created" && run.linkedIssueId) {
+    if (!reusedExistingRun && run.status === "issue_created" && run.linkedIssueId) {
       try {
         const spawned = await issueSvc.getById(run.linkedIssueId);
         if (spawned) {
@@ -2190,9 +2190,11 @@ export function routineService(
               title: spawned.title,
               projectId: spawned.projectId ?? null,
               parentId: spawned.parentId ?? null,
-              originKind: "routine_execution",
-              originId: input.routine.id,
-              originRunId: run.id,
+              // The stored origin (a managed plugin-operation routine's issue keeps its
+              // plugin origin), so consumers classify it exactly as the issue row does.
+              originKind: spawned.originKind ?? "routine_execution",
+              originId: spawned.originId ?? input.routine.id,
+              originRunId: spawned.originRunId ?? run.id,
             },
           });
         }

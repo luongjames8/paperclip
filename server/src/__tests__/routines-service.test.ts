@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -1219,6 +1219,20 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(serialized).not.toContain(rotated.secretMaterial.webhookSecret);
     expect(serialized).not.toContain(created.trigger.secretId!);
     expect(revisions[0]?.snapshot.triggers).toHaveLength(0);
+  });
+
+  it("emits issue.created once per spawned issue — an idempotent replay emits nothing", async () => {
+    const { routine, svc } = await seedFixture();
+
+    const first = await svc.runRoutine(routine.id, { source: "api", idempotencyKey: "emit-once" });
+    const replay = await svc.runRoutine(routine.id, { source: "api", idempotencyKey: "emit-once" });
+    expect(replay.id).toBe(first.id);
+
+    const emitted = await db
+      .select({ id: activityLog.id })
+      .from(activityLog)
+      .where(and(eq(activityLog.action, "issue.created"), eq(activityLog.entityId, first.linkedIssueId!)));
+    expect(emitted).toHaveLength(1);
   });
 
   it("wakes the assignee when a routine creates a fresh execution issue", async () => {

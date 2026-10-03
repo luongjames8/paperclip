@@ -40,6 +40,9 @@ export async function handleIssueCreated(
 
   const companyConfig = config.companies.find((c) => c.companyId === companyId);
   if (!companyConfig) return;
+  // Plugin-operation issues are intentionally hidden from human surfaces
+  // (mirrors @paperclipai/shared isPluginOperationIssueOriginKind).
+  if (typeof originKind === "string" && /^plugin:[^:]+:operation(?::|$)/.test(originKind)) return;
 
   const isSeed = originKind === "routine_execution" || !parentId;
 
