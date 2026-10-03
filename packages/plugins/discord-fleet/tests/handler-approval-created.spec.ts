@@ -527,6 +527,36 @@ describe("handleApprovalCreated — two-phase marker dedup guard", () => {
     expect(typeof posted).toBe("string");
   });
 
+  it("concurrent duplicate deliveries (both past the empty-marker read) post exactly one card", async () => {
+    const { handleApprovalCreated } = await import("../src/handlers/approval-created.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const config = makeConfig();
+    const client = makeMockClient();
+    const event = makeApprovalCreatedEvent();
+
+    // Delivery B's state writes land late (after A has confirmed its token): the
+    // token protocol alone lets B overwrite and confirm too, posting twice.
+    const slowWrites = {
+      ...harness.ctx,
+      state: {
+        ...harness.ctx.state,
+        set: async (...args: Parameters<typeof harness.ctx.state.set>) => {
+          await new Promise((r) => setTimeout(r, 200));
+          return harness.ctx.state.set(...args);
+        },
+      },
+    } as typeof harness.ctx;
+
+    await Promise.all([
+      handleApprovalCreated(harness.ctx, event, client, config),
+      handleApprovalCreated(slowWrites, event, client, config),
+    ]);
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+  });
+
   it("failed header send sets posting marker to 0 so a retried delivery can post (codex P2)", async () => {
     // On header-send failure the handler sets posting marker to 0 (not deletes it)
     // so the stale-marker check sees it as stale and retried deliveries proceed.

@@ -192,7 +192,33 @@ function chunkBySection(text: string): string[] {
   return chunks;
 }
 
+// One worker process receives every delivery for this plugin, so an in-process
+// keyed guard serializes duplicate deliveries of the same approval outright; the
+// state-marker protocol below still covers a send that spans a worker restart.
+const sendsInFlight = new Set<string>();
+
 export async function handleApprovalCreated(
+  ctx: PluginContext,
+  event: PluginEvent,
+  client: Client,
+  config: DiscordFleetConfig,
+): Promise<void> {
+  const payload = event.payload as ApprovalCreatedPayload;
+  const approvalId = (typeof payload.approvalId === "string" && payload.approvalId.trim()) || event.entityId || "";
+  const key = `${event.companyId}:${approvalId}`;
+  if (approvalId && sendsInFlight.has(key)) {
+    ctx.logger.info("approval-created: duplicate delivery while a send is in flight, skipping", { approvalId });
+    return;
+  }
+  sendsInFlight.add(key);
+  try {
+    await handleApprovalCreatedOnce(ctx, event, client, config);
+  } finally {
+    sendsInFlight.delete(key);
+  }
+}
+
+async function handleApprovalCreatedOnce(
   ctx: PluginContext,
   event: PluginEvent,
   client: Client,
@@ -254,11 +280,10 @@ export async function handleApprovalCreated(
     ctx.logger.info("approval-created: concurrent post in flight, skipping", { approvalId, companyId });
     return;
   }
-  // Ownership token: the state API has no compare-and-swap, so two deliveries
-  // racing between the get and set could both think they own the send. Write a
-  // unique token, wait a beat, and re-read — if another invocation overwrote it,
-  // IT owns the send and we abort. This closes the read-write race to the width
-  // of a single state write instead of the whole guard-to-send span.
+  // Ownership token: the state API has no compare-and-swap. Same-process
+  // duplicates are already serialized by sendsInFlight above; this token only
+  // narrows a cross-restart race (write a token, wait a beat, re-read — if
+  // another invocation overwrote it, IT owns the send and we abort).
   const ownershipToken = nowMs + Math.random();
   await ctx.state.set(postingKey, ownershipToken);
   await new Promise((r) => setTimeout(r, 150));
