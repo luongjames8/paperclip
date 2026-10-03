@@ -1068,6 +1068,7 @@ function resolveCodexTransientFallbackMode(
 const TRANSIENT_UPSTREAM_ERROR_CODES: ReadonlySet<string> = new Set([
   "codex_transient_upstream",
   "claude_transient_upstream",
+  "codex_harness_crash",
   "openclaw_gateway_wait_error",
   "openclaw_gateway_wait_timeout",
   // Live incident 2026-07-05 (hinomaru, 3 agents stranded in one night): the
@@ -1099,7 +1100,6 @@ const GATEWAY_ONLY_TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set([
   "timeout",
   "process_lost",
 ]);
-
 
 function readHeartbeatRunErrorFamily(
   run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
