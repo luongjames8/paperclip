@@ -13,6 +13,7 @@ import {
   buildCarouselAnchorEmbed,
 } from "../render/embeds.js";
 import { carouselArtifactHash } from "../render/carousel-batch.js";
+import { resolveSecret } from "../config/secrets.js";
 
 export type CarouselConfirmAction = "accept" | "reject";
 
@@ -260,7 +261,7 @@ export async function handleCarouselConfirmationButton(
     // detailsMarkdown means either a stale trailer from before a revision, or
     // an un-versioned pre-deploy trailer — either way, unverifiable, so refuse
     // before any accept API call.
-    const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
+    const apiKey = await resolveSecret(ctx, mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
     const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
     const isCurrent = await isCurrentVersion(paperclip, parsed.issueId, parsed.interactionId, parsed.hash8);
     if (!isCurrent) {
@@ -364,7 +365,7 @@ export async function handleCarouselConfirmationRejectModal(
     // have passed between the modal being shown and submitted, and a legacy
     // (no hash8) modal customId is unverifiable regardless — refuse before any
     // rejectInteraction API call.
-    const apiKey = await ctx.secrets.resolve(mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
+    const apiKey = await resolveSecret(ctx, mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef);
     const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
     const isCurrent = await isCurrentVersion(paperclip, parsed.issueId, parsed.interactionId, parsed.hash8);
     if (!isCurrent) {

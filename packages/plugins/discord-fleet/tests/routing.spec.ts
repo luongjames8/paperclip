@@ -5,7 +5,7 @@ import type { DiscordFleetConfig } from "../src/config/schema.js";
 
 function makeConfig(): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "discord/bot-token",
+    botTokenSecretRef: { type: "secret_ref", secretId: "discord/bot-token" },
     companies: [
       {
         companyId: "company-1",
@@ -14,7 +14,7 @@ function makeConfig(): DiscordFleetConfig {
         projectRouting: { "proj-1": "channel-monitor" },
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "paperclip/api-key",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "paperclip/api-key" },
         paperclipApiUrl: "http://localhost:3000",
         companyPrefix: "tc1",
       },
@@ -48,7 +48,7 @@ describe("routeIssue and validateConfig", () => {
 
   it("validateConfig throws on guild collision", () => {
     const config: DiscordFleetConfig = {
-      botTokenSecretRef: "discord/bot-token",
+      botTokenSecretRef: { type: "secret_ref", secretId: "discord/bot-token" },
       companies: [
         {
           companyId: "company-A",
@@ -57,7 +57,7 @@ describe("routeIssue and validateConfig", () => {
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "ref-a",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref-a" },
           paperclipApiUrl: "http://localhost:3000",
           companyPrefix: "tca",
         },
@@ -68,7 +68,7 @@ describe("routeIssue and validateConfig", () => {
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "ref-b",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref-b" },
           paperclipApiUrl: "http://localhost:3000",
           companyPrefix: "tcb",
         },
@@ -81,7 +81,7 @@ describe("routeIssue and validateConfig", () => {
 
   it("validateConfig does not throw when guilds are distinct", () => {
     const config: DiscordFleetConfig = {
-      botTokenSecretRef: "discord/bot-token",
+      botTokenSecretRef: { type: "secret_ref", secretId: "discord/bot-token" },
       companies: [
         {
           companyId: "company-A",
@@ -90,7 +90,7 @@ describe("routeIssue and validateConfig", () => {
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "ref-a",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref-a" },
           paperclipApiUrl: "http://localhost:3000",
           companyPrefix: "tca",
         },
@@ -101,7 +101,7 @@ describe("routeIssue and validateConfig", () => {
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "ref-b",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref-b" },
           paperclipApiUrl: "http://localhost:3000",
           companyPrefix: "tcb",
         },

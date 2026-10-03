@@ -31,7 +31,7 @@ vi.mock("../src/discord/rest.js", () => ({
 
 function makeConfig(overrides: { companyId?: string } = {}): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: overrides.companyId ?? "c1",
@@ -40,7 +40,7 @@ function makeConfig(overrides: { companyId?: string } = {}): DiscordFleetConfig 
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Tokyo" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
         paperclipApiUrl: "http://localhost:3000",
         companyPrefix: "tc1",
       },
@@ -50,7 +50,7 @@ function makeConfig(overrides: { companyId?: string } = {}): DiscordFleetConfig 
 
 function makeTwoCompanyConfig(): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -59,7 +59,7 @@ function makeTwoCompanyConfig(): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Tokyo" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
         paperclipApiUrl: "http://localhost:3000",
         companyPrefix: "tc1",
       },
@@ -70,7 +70,7 @@ function makeTwoCompanyConfig(): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Tokyo" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
         paperclipApiUrl: "http://localhost:3000",
         companyPrefix: "tc2",
       },

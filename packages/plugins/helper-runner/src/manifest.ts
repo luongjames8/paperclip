@@ -3,7 +3,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 const manifest: PaperclipPluginManifestV1 = {
   id: "openclaw.plugin-helper-runner",
   apiVersion: 1,
-  version: "0.4.0",
+  version: "0.5.0",
   displayName: "Helper Runner",
   description: "Runs deterministic helper scripts on Routine fires, Approval lifecycle events (created/decided), or Issue updates (status change). Three trigger kinds.",
   author: "openclaw",
@@ -83,7 +83,24 @@ const manifest: PaperclipPluginManifestV1 = {
                 command: { type: "string", title: "Absolute path to executable" },
                 args: { type: "array", items: { type: "string" } },
                 cwd: { type: "string" },
-                env: { type: "object", additionalProperties: { type: "string" } },
+                env: {
+                  type: "object",
+                  description: "Literal strings, or {type:\"secret_ref\",secretId} objects bound to this company's secrets.",
+                  additionalProperties: {
+                    anyOf: [
+                      { type: "string" },
+                      {
+                        type: "object",
+                        required: ["type", "secretId"],
+                        properties: {
+                          type: { type: "string", enum: ["secret_ref"] },
+                          secretId: { type: "string" },
+                          version: {},
+                        },
+                      },
+                    ],
+                  },
+                },
                 timeoutSec: { type: "number", default: 120, minimum: 1 },
               },
             },

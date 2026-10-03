@@ -1,7 +1,9 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import manifest, { JOB_KEYS } from "./manifest.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { DiscordFleetConfig } from "./config/schema.js";
-import { validateConfig } from "./config/validate.js";
+import { mergeCompanySlices, sliceCompanyConfig } from "./config/merge.js";
+import { resolveSecret } from "./config/secrets.js";
 import { createDiscordClient, connectDiscordClient, destroyDiscordClient } from "./discord/client.js";
 import { registerSlashCommands, setupInteractionHandler } from "./discord/slash.js";
 import { handleIssueCreated } from "./handlers/issue-created.js";
@@ -56,7 +58,19 @@ let tokenToClient: Map<string, Client> = new Map();
 // fault-isolation path) surfaces as "degraded" instead of being hidden.
 let configuredCompanyCount = 0;
 let savedCtx: PluginContext | null = null;
-let eventUnsubscribers: Array<() => void> = [];
+// Company-scoped config (paperclip >= v2026.720.0): one validated slice per
+// company row, merged into the effective config the handlers and jobs read.
+const sliceByCompany = new Map<string, DiscordFleetConfig>();
+// Runs fn in the async context captured in setup() — outside any host
+// invocation. configChanged arrives as an invocation scoped to ONE company;
+// Discord sockets opened inside it would inherit that (soon expired)
+// invocation id, so every later worker->host call from a Discord interaction
+// would be refused as an invalid scope. Outside an invocation the host admits
+// calls for any configured company (proactive scope).
+let runOutsideInvocation: <T>(fn: () => T) => T = (fn) => fn();
+// Serializes config applies (startup replay + operator saves) so two reloads
+// never race on the client maps.
+let applyChain: Promise<void> = Promise.resolve();
 const coalescer = new CoalesceBuffer(2000);
 
 // Module-level current config + factory (Finding 1: jobs read THESE, not setup's locals).
@@ -76,18 +90,11 @@ function makePaperclipFactory(
     if (cache.has(companyId)) return cache.get(companyId)!;
     const company = cfg.companies.find((c) => c.companyId === companyId);
     if (!company) throw new Error(`unknown company: ${companyId}`);
-    const apiKey = await ctx.secrets.resolve(company.paperclipApiKeySecretRef);
+    const apiKey = await resolveSecret(ctx, company.paperclipApiKeySecretRef);
     const client = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
     cache.set(companyId, client);
     return client;
   };
-}
-
-async function getConfig(ctx: PluginContext): Promise<DiscordFleetConfig> {
-  const raw = await ctx.config.get();
-  const cfg = raw as unknown as DiscordFleetConfig;
-  validateConfig(cfg);
-  return cfg;
 }
 
 // Returns the Client for a given companyId, or null if none is registered.
@@ -161,9 +168,9 @@ async function buildClientMaps(
     // accumulates one zombie per failing onConfigChanged cycle).
     let pendingClient: Client | null = null;
     try {
-      const token = company.botTokenSecretRef
-        ? await ctx.secrets.resolve(company.botTokenSecretRef)
-        : await ctx.secrets.resolve(cfg.botTokenSecretRef);
+      // Every effective company carries its own (or the row's root) token ref —
+      // stamped by sliceCompanyConfig.
+      const token = await resolveSecret(ctx, company.botTokenSecretRef!);
       tokenByCompanyId.set(company.companyId, token);
 
       let client = newByToken.get(token);
@@ -363,135 +370,143 @@ async function dispatchModal(
   await handleApprovalRevisionModal(ctx, interaction, config);
 }
 
-function bindEventHandlers(
-  ctx: PluginContext,
-  config: DiscordFleetConfig,
-): Array<() => void> {
-  return [
-    ctx.events.on("issue.created", async (event) => {
-      const client = getClientForCompany(event.companyId);
-      if (!client) return;
-      await handleIssueCreated(ctx, event, client, config);
-    }),
-    ctx.events.on("issue.updated", async (event) => {
-      const client = getClientForCompany(event.companyId);
-      if (!client) return;
-      await handleIssueUpdated(ctx, event, client, config, coalescer);
-    }),
-    ctx.events.on("approval.created", async (event) => {
-      const client = getClientForCompany(event.companyId);
-      if (!client) {
-        ctx.logger.error("discord-fleet: approval.created received for company with no connected client; dropping", {
-          companyId: event.companyId,
-          approvalId: (event.payload as { approvalId?: unknown })?.approvalId ?? event.entityId,
-        });
-        await postDeliveryFailureFallback(ctx, config, event, "no Discord client connected for this company (bot not in guild, or connect failed)");
-        return;
-      }
-      await handleApprovalCreated(ctx, event, client, config);
-    }),
-    ctx.events.on("issue.execution_stage.pending", async (event) => {
-      const client = getClientForCompany(event.companyId);
-      if (!client) {
-        // codex round 11: an agent-owned stage never renders a card in the
-        // first place (handleExecutionStagePending's own early return below)
-        // — firing the fallback for one anyway would post a misleading
-        // "could not deliver this card" comment for a card that was never
-        // supposed to exist. Same predicate as that early return, so the two
-        // decision points can't diverge again.
-        const payload = event.payload as { issueId?: unknown; participant?: { type?: "agent" | "user" } | null };
-        if (!isDiscordAddressableStageParticipant(payload.participant)) return;
-        ctx.logger.error("discord-fleet: issue.execution_stage.pending received for company with no connected client; posting fallback comment", {
-          companyId: event.companyId,
-          issueId: payload.issueId ?? event.entityId,
-        });
-        await postExecutionStageDeliveryFailureFallback(
-          ctx,
-          config,
-          event,
-          "no Discord client connected for this company (bot not in guild, or connect failed)",
-        );
-        return;
-      }
-      await handleExecutionStagePending(ctx, event, client, config);
-    }),
-  ];
+// Bound once in setup(); each handler reads the CURRENT effective config at
+// call time, so a config reload needs no re-subscription.
+function bindEventHandlers(ctx: PluginContext): void {
+  const config = () => currentConfig ?? { companies: [] };
+  ctx.events.on("issue.created", async (event) => {
+    const client = getClientForCompany(event.companyId);
+    if (!client) return;
+    await handleIssueCreated(ctx, event, client, config());
+  });
+  ctx.events.on("issue.updated", async (event) => {
+    const client = getClientForCompany(event.companyId);
+    if (!client) return;
+    await handleIssueUpdated(ctx, event, client, config(), coalescer);
+  });
+  ctx.events.on("approval.created", async (event) => {
+    const client = getClientForCompany(event.companyId);
+    if (!client) {
+      ctx.logger.error("discord-fleet: approval.created received for company with no connected client; dropping", {
+        companyId: event.companyId,
+        approvalId: (event.payload as { approvalId?: unknown })?.approvalId ?? event.entityId,
+      });
+      await postDeliveryFailureFallback(ctx, config(), event, "no Discord client connected for this company (bot not in guild, or connect failed)");
+      return;
+    }
+    await handleApprovalCreated(ctx, event, client, config());
+  });
+  ctx.events.on("issue.execution_stage.pending", async (event) => {
+    const client = getClientForCompany(event.companyId);
+    if (!client) {
+      // codex round 11: an agent-owned stage never renders a card in the
+      // first place (handleExecutionStagePending's own early return below)
+      // — firing the fallback for one anyway would post a misleading
+      // "could not deliver this card" comment for a card that was never
+      // supposed to exist. Same predicate as that early return, so the two
+      // decision points can't diverge again.
+      const payload = event.payload as { issueId?: unknown; participant?: { type?: "agent" | "user" } | null };
+      if (!isDiscordAddressableStageParticipant(payload.participant)) return;
+      ctx.logger.error("discord-fleet: issue.execution_stage.pending received for company with no connected client; posting fallback comment", {
+        companyId: event.companyId,
+        issueId: payload.issueId ?? event.entityId,
+      });
+      await postExecutionStageDeliveryFailureFallback(
+        ctx,
+        config(),
+        event,
+        "no Discord client connected for this company (bot not in guild, or connect failed)",
+      );
+      return;
+    }
+    await handleExecutionStagePending(ctx, event, client, config());
+  });
+}
+
+// Applies an effective config: (re)build the per-token clients (reusing any
+// whose token is unchanged), swap module state, destroy obsolete clients, and
+// (re)register slash commands + interaction handlers on every live client.
+async function applyConfig(ctx: PluginContext, cfg: DiscordFleetConfig): Promise<void> {
+  const { newByToken, byCompanyId, tokenByCompanyId, tokensToDestroy } =
+    await buildClientMaps(ctx, cfg, tokenToClient);
+
+  // Update module state before destroying obsolete clients so no window exists
+  // where a job or handler reads a stale/destroyed client reference.
+  clientByCompanyId = byCompanyId;
+  tokenToClient = newByToken;
+  configuredCompanyCount = cfg.companies.length;
+  currentConfig = cfg;
+  currentPaperclipFactory = makePaperclipFactory(ctx, cfg);
+
+  for (const [, client] of tokensToDestroy) {
+    try {
+      await destroyDiscordClient(client);
+    } catch {
+      /* best-effort: proceed even if a destroy hiccups */
+    }
+  }
+
+  // A newly added company / per-company bot has guild slash commands that were
+  // never registered — register for every connected company on each apply.
+  for (const company of cfg.companies) {
+    const client = byCompanyId.get(company.companyId);
+    if (!client) continue;
+    const appId = client.user?.id;
+    const token = tokenByCompanyId.get(company.companyId);
+    if (appId && token) {
+      await registerSlashCommands(token, appId, company.guildId).catch((err) => {
+        ctx.logger.warn("discord-fleet: slash command registration failed", { guildId: company.guildId, err: String(err) });
+      });
+    }
+  }
+
+  // Interaction handlers on each unique client, scoped to ONLY the companies
+  // that client serves (see scopeConfigToClient).
+  for (const client of newByToken.values()) {
+    const clientConfig = scopeConfigToClient(cfg, byCompanyId, client);
+    setupInteractionHandler(
+      client,
+      clientConfig,
+      async (interaction, companyId) => {
+        const companyConfig = clientConfig.companies.find((c) => c.companyId === companyId);
+        if (!companyConfig) return;
+        const apiKey = await resolveSecret(ctx, companyConfig.paperclipApiKeySecretRef);
+        const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
+        await handleStatusCommand(interaction, ctx, companyConfig, paperclip);
+      },
+      async (interaction) => {
+        await dispatchButton(ctx, interaction, clientConfig);
+      },
+      async (interaction) => {
+        await dispatchModal(ctx, interaction, clientConfig);
+      },
+    );
+  }
+
+  ctx.logger.info("discord-fleet: config applied", {
+    uniqueClients: newByToken.size,
+    companiesConnected: byCompanyId.size,
+    companiesConfigured: cfg.companies.length,
+  });
 }
 
 const plugin = definePlugin({
+  // One worker serves every company's config row (see sliceCompanyConfig).
+  multiCompanyConfig: true,
+
   async setup(ctx) {
-    const config = await getConfig(ctx);
     savedCtx = ctx;
-
-    // Set module-level current state (Finding 1: jobs read these, not captured locals).
-    currentConfig = config;
-    currentPaperclipFactory = makePaperclipFactory(ctx, config);
-
-    // Build per-company client maps (deduped by resolved token; per-company
-    // connect failures are isolated and skipped inside buildClientMaps).
-    // Pass empty existingByToken on first call — nothing to reuse yet.
-    const { newByToken, byCompanyId, tokenByCompanyId } = await buildClientMaps(
-      ctx,
-      config,
-      new Map(),
-    );
-    clientByCompanyId = byCompanyId;
-    tokenToClient = newByToken;
-    configuredCompanyCount = config.companies.length;
-    ctx.logger.info("discord-fleet: Discord gateway(s) connected", {
-      uniqueClients: newByToken.size,
-      companiesConnected: byCompanyId.size,
-      companiesConfigured: config.companies.length,
-    });
-
-    // Register slash commands for each company that actually connected, reusing
-    // the token buildClientMaps already resolved (single source of truth).
-    for (const company of config.companies) {
-      const client = byCompanyId.get(company.companyId);
-      if (!client) continue; // company was skipped (connect failed) — nothing to register
-      const appId = client.user?.id;
-      const token = tokenByCompanyId.get(company.companyId);
-      if (appId && token) {
-        await registerSlashCommands(token, appId, company.guildId).catch((err) => {
-          ctx.logger.warn("discord-fleet: slash command registration failed", { guildId: company.guildId, err: String(err) });
-        });
-      }
-    }
-
-    // Set up interaction handlers on EACH unique client, scoped to ONLY the
-    // companies that client serves (so a bot never services another company's
-    // guild it happens to be in — see scopeConfigToClient).
-    for (const client of newByToken.values()) {
-      const clientConfig = scopeConfigToClient(config, byCompanyId, client);
-      setupInteractionHandler(
-        client,
-        clientConfig,
-        async (interaction, companyId) => {
-          const companyConfig = clientConfig.companies.find((c) => c.companyId === companyId);
-          if (!companyConfig) return;
-          const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
-          const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
-          await handleStatusCommand(interaction, ctx, companyConfig, paperclip);
-        },
-        async (interaction) => {
-          await dispatchButton(ctx, interaction, clientConfig);
-        },
-        async (interaction) => {
-          await dispatchModal(ctx, interaction, clientConfig);
-        },
-      );
-    }
-
-    eventUnsubscribers = bindEventHandlers(ctx, config);
+    runOutsideInvocation = AsyncLocalStorage.snapshot();
+    currentConfig = { companies: [] };
+    currentPaperclipFactory = makePaperclipFactory(ctx, currentConfig);
+    bindEventHandlers(ctx);
 
     // Register job handlers. Jobs read module-level currentConfig + currentPaperclipFactory
-    // + clientByCompanyId (Finding 1) so a config reload via onConfigChanged updates what
-    // the jobs see without re-registering them. Each run SNAPSHOTS those three globals into
-    // locals at the start (codex): otherwise a reload mid-run would mix the old company list
-    // with a new client map/factory — skipping companies, posting via the wrong client, or
-    // throwing "unknown company" for one removed by the reload. onConfigChanged replaces the
-    // global references (it doesn't mutate the old maps), so a snapshot stays self-consistent
-    // for the whole run.
+    // + clientByCompanyId so a config apply updates what the jobs see without re-registering
+    // them. Each run SNAPSHOTS those three globals into locals at the start (codex): a reload
+    // mid-run must not mix the old company list with a new client map/factory. applyConfig
+    // replaces the global references (it doesn't mutate the old maps), so a snapshot stays
+    // self-consistent for the whole run.
     ctx.jobs.register(JOB_KEYS.digest, async () => {
       const cfg = currentConfig;
       const factory = currentPaperclipFactory;
@@ -549,103 +564,33 @@ const plugin = definePlugin({
       await runConfirmationSweep(ctx, (id) => clients.get(id) ?? null, cfg, async (id) => factory(id));
     });
 
-    ctx.logger.info("discord-fleet: setup complete", { companies: config.companies.length });
+    ctx.logger.info("discord-fleet: setup complete; awaiting company configs");
   },
 
-  async onConfigChanged(newConfig) {
-    const cfg = newConfig as unknown as DiscordFleetConfig;
+  async onConfigChanged(newConfig, context) {
+    const companyId = context?.companyId;
+    const ctx = savedCtx;
+    if (!companyId || !ctx) return;
+    const previous = sliceByCompany.get(companyId);
+    let merged: DiscordFleetConfig;
     try {
-      validateConfig(cfg);
+      sliceByCompany.set(companyId, sliceCompanyConfig(newConfig, companyId));
+      merged = mergeCompanySlices(sliceByCompany.values());
     } catch (err) {
-      console.error("discord-fleet: config change rejected:", err);
-      return;
+      // Fail closed for THIS company only: an invalid row (e.g. legacy string
+      // secret refs, or a guild already claimed by another company) drops the
+      // company instead of taking every other company's bot down with it.
+      sliceByCompany.delete(companyId);
+      ctx.logger.error("discord-fleet: company config rejected; company disabled", {
+        companyId,
+        hadPreviousConfig: Boolean(previous),
+        err: err instanceof Error ? err.message : String(err),
+      });
+      merged = mergeCompanySlices(sliceByCompany.values());
     }
-
-    if (!savedCtx) {
-      console.error("discord-fleet: onConfigChanged called before setup; cannot reconnect");
-      return;
-    }
-
-    for (const unsub of eventUnsubscribers) unsub();
-    eventUnsubscribers = [];
-
-    // Pass the current tokenToClient map so buildClientMaps can REUSE clients
-    // whose resolved token is unchanged (Finding 2). Only genuinely-new tokens
-    // get a new connect, and only obsolete tokens are destroyed. This means
-    // hinomaru's root-token client survives a reload that only adds a per-company
-    // bot for an unrelated company — no disconnect/IDENTIFY race for the root token.
-    const { newByToken, byCompanyId, tokenByCompanyId, tokensToDestroy } =
-      await buildClientMaps(savedCtx, cfg, tokenToClient);
-
-    // Update module state before destroying obsolete clients so no window exists
-    // where a job or handler reads a stale/destroyed client reference.
-    clientByCompanyId = byCompanyId;
-    tokenToClient = newByToken;
-    configuredCompanyCount = cfg.companies.length;
-
-    // Update module-level current config + factory (Finding 1: jobs read these).
-    currentConfig = cfg;
-    currentPaperclipFactory = makePaperclipFactory(savedCtx, cfg);
-
-    // Now safely destroy only the clients whose token is no longer used by any
-    // company in the new config. Reused clients (including hinomaru's root client
-    // when only a new per-company bot was added) are NOT destroyed here.
-    for (const [, client] of tokensToDestroy) {
-      try {
-        await destroyDiscordClient(client);
-      } catch {
-        /* best-effort: proceed even if a destroy hiccups */
-      }
-    }
-
-    // Re-register slash commands for each connected company. This MUST mirror
-    // setup() — config-reload (operator adds a company or a per-company bot) is
-    // the feature's primary activation path, and a new bot has a different appId
-    // whose guild slash commands were never registered. Without this, /status is
-    // missing in the new guild until a full plugin restart.
-    for (const company of cfg.companies) {
-      const client = byCompanyId.get(company.companyId);
-      if (!client) continue;
-      const appId = client.user?.id;
-      const token = tokenByCompanyId.get(company.companyId);
-      if (appId && token) {
-        await registerSlashCommands(token, appId, company.guildId).catch((err) => {
-          savedCtx?.logger.warn("discord-fleet: slash command registration failed", { guildId: company.guildId, err: String(err) });
-        });
-      }
-    }
-
-    // Re-register interaction handlers on the new clients, scoped to ONLY the
-    // companies each client serves (see scopeConfigToClient).
-    for (const client of newByToken.values()) {
-      const clientConfig = scopeConfigToClient(cfg, byCompanyId, client);
-      setupInteractionHandler(
-        client,
-        clientConfig,
-        async (interaction, companyId) => {
-          const companyConfig = clientConfig.companies.find((c) => c.companyId === companyId);
-          if (!companyConfig || !savedCtx) return;
-          const apiKey = await savedCtx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
-          const paperclip = new PaperclipClient(savedCtx, companyConfig.paperclipApiUrl, apiKey);
-          await handleStatusCommand(interaction, savedCtx, companyConfig, paperclip);
-        },
-        async (interaction) => {
-          if (!savedCtx) return;
-          await dispatchButton(savedCtx, interaction, clientConfig);
-        },
-        async (interaction) => {
-          if (!savedCtx) return;
-          await dispatchModal(savedCtx, interaction, clientConfig);
-        },
-      );
-    }
-
-    eventUnsubscribers = bindEventHandlers(savedCtx, cfg);
-
-    savedCtx.logger.info("discord-fleet: config updated and gateway(s) reconnected", {
-      uniqueClients: newByToken.size,
-      companies: cfg.companies.length,
-    });
+    const apply = applyChain.then(() => runOutsideInvocation(() => applyConfig(ctx, merged)));
+    applyChain = apply.catch(() => undefined);
+    await apply;
   },
 
   async onHealth() {

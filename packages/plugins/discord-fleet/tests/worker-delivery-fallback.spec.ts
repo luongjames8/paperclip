@@ -101,30 +101,30 @@ describe("worker.ts — no-connected-client branches (companyId c-fail never joi
 
   function makeMixedConfig(): DiscordFleetConfig {
     return {
-      botTokenSecretRef: "unused-root-token",
+      botTokenSecretRef: { type: "secret_ref", secretId: "unused-root-token" },
       companies: [
         {
           companyId: "c-fail",
           companyPrefix: "CF",
           guildId: "guild-fail",
-          botTokenSecretRef: "token-fail",
+          botTokenSecretRef: { type: "secret_ref", secretId: "token-fail" },
           channels: { digest: "d1", errors: "e1", orphan: "o1" },
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "paperclip/api-key",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "paperclip/api-key" },
           paperclipApiUrl: "http://100.98.95.12:3100",
         },
         {
           companyId: "c-ok",
           companyPrefix: "CO",
           guildId: "guild-ok",
-          botTokenSecretRef: "token-ok",
+          botTokenSecretRef: { type: "secret_ref", secretId: "token-ok" },
           channels: { digest: "d2", errors: "e2", orphan: "o2" },
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "paperclip/api-key",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "paperclip/api-key" },
           paperclipApiUrl: "http://100.98.95.12:3100",
         },
       ],
@@ -142,6 +142,13 @@ describe("worker.ts — no-connected-client branches (companyId c-fail never joi
     });
 
     await plugin.definition.setup(harness.ctx);
+    // Company-scoped config: the host replays each company's row after setup.
+    for (const company of makeMixedConfig().companies) {
+      await plugin.definition.onConfigChanged?.(
+        makeMixedConfig() as unknown as Record<string, unknown>,
+        { companyId: company.companyId },
+      );
+    }
 
     await harness.emit(
       "approval.created",
@@ -172,6 +179,13 @@ describe("worker.ts — no-connected-client branches (companyId c-fail never joi
     });
 
     await plugin.definition.setup(harness.ctx);
+    // Company-scoped config: the host replays each company's row after setup.
+    for (const company of makeMixedConfig().companies) {
+      await plugin.definition.onConfigChanged?.(
+        makeMixedConfig() as unknown as Record<string, unknown>,
+        { companyId: company.companyId },
+      );
+    }
     await harness.runJob(JOB_KEYS.approvalsReminder);
 
     const warnLog = harness.logs.find(
@@ -199,6 +213,13 @@ describe("worker.ts — no-connected-client branches (companyId c-fail never joi
     });
 
     await plugin.definition.setup(harness.ctx);
+    // Company-scoped config: the host replays each company's row after setup.
+    for (const company of makeMixedConfig().companies) {
+      await plugin.definition.onConfigChanged?.(
+        makeMixedConfig() as unknown as Record<string, unknown>,
+        { companyId: company.companyId },
+      );
+    }
 
     await harness.emit(
       "issue.execution_stage.pending",
@@ -245,6 +266,13 @@ describe("worker.ts — no-connected-client branches (companyId c-fail never joi
     });
 
     await plugin.definition.setup(harness.ctx);
+    // Company-scoped config: the host replays each company's row after setup.
+    for (const company of makeMixedConfig().companies) {
+      await plugin.definition.onConfigChanged?.(
+        makeMixedConfig() as unknown as Record<string, unknown>,
+        { companyId: company.companyId },
+      );
+    }
 
     await harness.emit(
       "issue.execution_stage.pending",
@@ -279,7 +307,7 @@ describe("postExecutionStageDeliveryFailureFallback", () => {
 
   function makeConfig(): DiscordFleetConfig {
     return {
-      botTokenSecretRef: "bot-ref",
+      botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
       companies: [
         {
           companyId: "c1",
@@ -289,7 +317,7 @@ describe("postExecutionStageDeliveryFailureFallback", () => {
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "paperclip/api-key",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "paperclip/api-key" },
           paperclipApiUrl: "http://100.98.95.12:3100",
         },
       ],
@@ -364,7 +392,7 @@ describe("postDeliveryFailureFallback — the fallback's own comment-post failin
 
   function makeConfig(): DiscordFleetConfig {
     return {
-      botTokenSecretRef: "bot-ref",
+      botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
       companies: [
         {
           companyId: "c1",
@@ -374,7 +402,7 @@ describe("postDeliveryFailureFallback — the fallback's own comment-post failin
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "paperclip/api-key",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "paperclip/api-key" },
           paperclipApiUrl: "http://100.98.95.12:3100",
         },
       ],

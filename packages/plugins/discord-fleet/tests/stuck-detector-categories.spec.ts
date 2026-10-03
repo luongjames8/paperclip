@@ -26,7 +26,7 @@ const STALE_ISO = "2026-07-01T00:00:00.000Z"; // 12h ago relative to NOW_ISO
 
 function makeConfig(stuckHours = 6): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -35,7 +35,7 @@ function makeConfig(stuckHours = 6): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: stuckHours,
-        paperclipApiKeySecretRef: "ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
         paperclipApiUrl: "http://localhost:3000",
         companyPrefix: "tc1",
       },

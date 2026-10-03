@@ -43,7 +43,7 @@ function makeCompanyConfig(): CompanyConfig {
     projectRouting: {},
     digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
     stuckIssueThresholdHours: 6,
-    paperclipApiKeySecretRef: "paperclip/api-key",
+    paperclipApiKeySecretRef: { type: "secret_ref", secretId: "paperclip/api-key" },
     paperclipApiUrl: "http://localhost:3000",
     companyPrefix: "tc1",
   };

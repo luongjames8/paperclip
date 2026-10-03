@@ -50,7 +50,7 @@ vi.mock("../src/discord/rest.js", () => ({
 
 function makeConfig(): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "discord/bot-token",
+    botTokenSecretRef: { type: "secret_ref", secretId: "discord/bot-token" },
     companies: [
       {
         companyId: "company-1",
@@ -60,7 +60,7 @@ function makeConfig(): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "paperclip/api-key",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "paperclip/api-key" },
         paperclipApiUrl: "http://100.98.95.12:3100",
       },
     ],
@@ -94,9 +94,11 @@ describe("plugin lifecycle — onConfigChanged must not silence event handlers (
 
     // Phase 1: normal startup — plugin connects, event handlers registered
     await plugin.definition.setup(harness.ctx);
+    // Company-scoped config: the host replays each company's row after setup.
+    await plugin.definition.onConfigChanged?.(makeConfig() as unknown as Record<string, unknown>, { companyId: "company-1" });
 
     // Phase 2: operator updates config at runtime (e.g. rotates API key)
-    await plugin.definition.onConfigChanged?.(makeConfig() as unknown as Record<string, unknown>);
+    await plugin.definition.onConfigChanged?.(makeConfig() as unknown as Record<string, unknown>, { companyId: "company-1" });
 
     // Phase 3: a Paperclip event arrives after the config change
     await harness.emit(

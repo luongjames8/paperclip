@@ -40,7 +40,7 @@ const NO_KEY_DISCORD_ID = "discord-user-nokey";
 
 function makeConfig(): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -49,7 +49,7 @@ function makeConfig(): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "my-api-key-ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "my-api-key-ref" },
         paperclipApiUrl: "http://paperclip:3100",
         companyPrefix: "tc1",
         userMappings: [
@@ -57,7 +57,7 @@ function makeConfig(): DiscordFleetConfig {
             discordUserId: ALICE_DISCORD_ID,
             paperclipUserId: "pc-user-alice",
             role: "operator",
-            boardApiKeySecretRef: "alice-personal-key-ref",
+            boardApiKeySecretRef: { type: "secret_ref", secretId: "alice-personal-key-ref" },
           },
           // No boardApiKeySecretRef — used by the "requires a personal key" tests.
           { discordUserId: NO_KEY_DISCORD_ID, paperclipUserId: "pc-user-nokey", role: "operator" },
@@ -175,7 +175,7 @@ describe("handleExecutionStageButton — approve happy path", () => {
     expect(mockUpdateIssueStatus).toHaveBeenCalledWith(ISSUE_ID, "done", expect.stringContaining("alice"), STAGE_ID, DECISION_TOKEN);
     // codex P2: must resolve the clicker's PERSONAL key, never fall back to
     // the company-wide key — the engine checks exact participant identity.
-    expect(resolveSecret).toHaveBeenCalledWith("alice-personal-key-ref");
+    expect(resolveSecret).toHaveBeenCalledWith(expect.objectContaining({ type: "secret_ref", secretId: "alice-personal-key-ref" }), expect.anything());
   });
 
   it("mapping has no personal boardApiKeySecretRef → ephemeral rejection, no API call (codex P2)", async () => {

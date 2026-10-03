@@ -23,7 +23,7 @@ vi.mock("../src/api/paperclip.js", () => ({
 
 function makeConfig(overrides: Partial<DiscordFleetConfig> = {}): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -32,7 +32,7 @@ function makeConfig(overrides: Partial<DiscordFleetConfig> = {}): DiscordFleetCo
         projectRouting: { "proj-1": "monitor-channel" },
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
         paperclipApiUrl: "http://paperclip:3100",
         companyPrefix: "tc1",
       },

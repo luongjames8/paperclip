@@ -47,7 +47,7 @@ function sha256(text: string): string {
 
 function makeConfig(rule: DiscordFleetConfig["confirmationSweep"] extends infer T ? T : never): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -56,7 +56,7 @@ function makeConfig(rule: DiscordFleetConfig["confirmationSweep"] extends infer 
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
         paperclipApiUrl: "http://localhost:3000",
         companyPrefix: "tc1",
       },

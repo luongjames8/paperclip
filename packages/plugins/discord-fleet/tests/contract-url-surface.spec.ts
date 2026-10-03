@@ -42,7 +42,7 @@ const BROKEN_ISSUE_URL_RE = /^https?:\/\/[^/]+\/issues\//;
 
 function makeConfig(companyId: string, companyPrefix: string): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId,
@@ -52,7 +52,7 @@ function makeConfig(companyId: string, companyPrefix: string): DiscordFleetConfi
         projectRouting: { "proj-1": "monitor-channel" },
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
         paperclipApiUrl: "http://100.98.95.12:3100",
       },
     ],
@@ -344,7 +344,7 @@ describe("issue URL — board canonical route contract", () => {
     const harness = createTestHarness({ manifest });
 
     const legacyConfig = {
-      botTokenSecretRef: "bot-ref",
+      botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
       companies: [
         {
           companyId: "c-legacy",
@@ -354,7 +354,7 @@ describe("issue URL — board canonical route contract", () => {
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "ref",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
           paperclipApiUrl: "http://100.98.95.12:3100",
         },
       ],

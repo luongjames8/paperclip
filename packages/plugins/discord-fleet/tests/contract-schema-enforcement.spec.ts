@@ -21,7 +21,7 @@ import type { DiscordFleetConfig } from "../src/config/schema.js";
 
 function makeFullConfig(companyPrefixOverride?: unknown): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -31,7 +31,7 @@ function makeFullConfig(companyPrefixOverride?: unknown): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
         paperclipApiUrl: "http://100.98.95.12:3100",
       },
     ],
@@ -47,10 +47,10 @@ function makeConfigMissingPrefix(): DiscordFleetConfig {
     projectRouting: {},
     digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
     stuckIssueThresholdHours: 6,
-    paperclipApiKeySecretRef: "ref",
+    paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
     paperclipApiUrl: "http://100.98.95.12:3100",
   };
-  return { botTokenSecretRef: "bot-ref", companies: [company] } as unknown as DiscordFleetConfig;
+  return { botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" }, companies: [company] } as unknown as DiscordFleetConfig;
 }
 
 // ── manifest JSON Schema enforcement (AC5) ───────────────────────────────────

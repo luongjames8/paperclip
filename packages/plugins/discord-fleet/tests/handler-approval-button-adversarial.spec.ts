@@ -19,7 +19,7 @@ const OPERATOR_DISCORD_ID = "discord-user-operator";
 
 function makeConfig(guildId = "g1"): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -28,7 +28,7 @@ function makeConfig(guildId = "g1"): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "apikey-ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "apikey-ref" },
         paperclipApiUrl: "http://localhost:3000",
         companyPrefix: "TC1",
         userMappings: [
@@ -43,7 +43,7 @@ function makeConfig(guildId = "g1"): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "apikey-ref-g2",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "apikey-ref-g2" },
         paperclipApiUrl: "http://localhost:4000",
         companyPrefix: "TC2",
         userMappings: [

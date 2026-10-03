@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { interpolate, interpolateArray, interpolateRecord } from "../src/exec/interpolate.js";
+import { normalizeConfig } from "../src/config/validate.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 
 const vars = {
@@ -9,15 +10,15 @@ const vars = {
   routineRunId: "run-uuid-789",
 };
 
-function makeCtx(resolveMap: Record<string, string> = {}): Pick<PluginContext, "secrets"> {
+function makeCtx(resolveMap: Record<string, string> = {}) {
   return {
     secrets: {
-      resolve: vi.fn(async (ref: string) => {
-        if (ref in resolveMap) return resolveMap[ref];
-        throw new Error(`Secret not found: ${ref}`);
+      resolve: vi.fn(async (ref: { secretId: string }) => {
+        if (ref.secretId in resolveMap) return resolveMap[ref.secretId];
+        throw new Error(`Secret not found: ${ref.secretId}`);
       }),
     },
-  };
+  } as unknown as Pick<PluginContext, "secrets"> & { secrets: { resolve: ReturnType<typeof vi.fn> } };
 }
 
 describe("interpolate", () => {
@@ -37,22 +38,9 @@ describe("interpolate", () => {
     expect(await interpolate("run=${routine.run.id}", vars, makeCtx())).toBe("run=run-uuid-789");
   });
 
-  it("resolves ${secret:UUID} via ctx.secrets.resolve", async () => {
-    const ctx = makeCtx({ "abc-123-uuid": "super-secret" });
-    expect(await interpolate("key=${secret:abc-123-uuid}", vars, ctx)).toBe("key=super-secret");
-    expect(ctx.secrets.resolve).toHaveBeenCalledWith("abc-123-uuid");
-  });
-
   it("throws on unknown variable", async () => {
     await expect(interpolate("${unknown.var}", vars, makeCtx())).rejects.toThrow(
       'Unknown interpolation variable: "${unknown.var}"'
-    );
-  });
-
-  it("throws when secret ref resolution fails, wrapping ref name in error", async () => {
-    const ctx = makeCtx({}); // no entries → resolve throws
-    await expect(interpolate("${secret:missing-uuid}", vars, ctx)).rejects.toThrow(
-      'Failed to resolve secret ref "missing-uuid"'
     );
   });
 
@@ -81,5 +69,45 @@ describe("interpolateRecord", () => {
       makeCtx()
     );
     expect(result).toEqual({ ISSUE_ID: "issue-uuid-123", ROUTINE: "routine-uuid-456" });
+  });
+});
+
+describe("company-scoped secret refs (paperclip >= v2026.720.0)", () => {
+  it("resolves an env secret_ref with the event company and its bound config path", async () => {
+    const ctx = makeCtx({ "abc-123-uuid": "super-secret" });
+    const env = await interpolateRecord(
+      { API_KEY: { type: "secret_ref", secretId: "abc-123-uuid", configPath: "helpers.0.exec.env.API_KEY" }, PLAIN: "${issue.id}" },
+      { ...vars, companyId: "company-1" },
+      ctx,
+    );
+    expect(env).toEqual({ API_KEY: "super-secret", PLAIN: "issue-uuid-123" });
+    expect(ctx.secrets.resolve).toHaveBeenCalledWith(
+      { type: "secret_ref", secretId: "abc-123-uuid" },
+      { companyId: "company-1", configPath: "helpers.0.exec.env.API_KEY" },
+    );
+  });
+
+  it("wraps a resolution failure with the secret id", async () => {
+    await expect(
+      interpolateRecord({ K: { type: "secret_ref", secretId: "missing-uuid" } }, vars, makeCtx()),
+    ).rejects.toThrow('Failed to resolve secret ref "missing-uuid"');
+  });
+
+  it("legacy ${secret:UUID} strings are rejected at config load (fail closed)", () => {
+    expect(() =>
+      normalizeConfig({
+        helpers: [{ name: "h", trigger: { kind: "routine", routineId: "r" }, exec: { command: "/bin/true", env: { K: "${secret:abc}" } } }],
+      }),
+    ).toThrow(/legacy/);
+  });
+
+  it("normalizeConfig stamps each env secret_ref with its config path", () => {
+    const config = normalizeConfig({
+      helpers: [
+        { name: "a", trigger: { kind: "routine", routineId: "r1" }, exec: { command: "/bin/true" } },
+        { name: "b", trigger: { kind: "routine", routineId: "r2" }, exec: { command: "/bin/true", env: { K: { type: "secret_ref", secretId: "s" } } } },
+      ],
+    });
+    expect(config.helpers[1]!.exec.env!.K).toMatchObject({ configPath: "helpers.1.exec.env.K" });
   });
 });

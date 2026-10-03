@@ -8,6 +8,7 @@ import {
   EXECUTION_STAGE_CHANGES_MODAL_PREFIX,
   EXECUTION_STAGE_CHANGES_NOTE_FIELD,
 } from "../render/embeds.js";
+import { resolveSecret } from "../config/secrets.js";
 
 export type ExecutionStageAction = "approve" | "changes";
 
@@ -177,7 +178,7 @@ async function runExecutionStageDecision(
 
   let result: { executionStageDecisionRecorded?: boolean };
   try {
-    const apiKey = await ctx.secrets.resolve(opts.mapping.boardApiKeySecretRef!);
+    const apiKey = await resolveSecret(ctx, opts.mapping.boardApiKeySecretRef!);
     const paperclip = new PaperclipClient(ctx, opts.company.paperclipApiUrl, apiKey);
     result = await paperclip.updateIssueStatus(
       opts.issueId,

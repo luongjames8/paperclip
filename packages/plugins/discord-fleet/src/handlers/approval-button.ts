@@ -9,6 +9,7 @@ import {
   APPROVAL_REVISION_NOTE_FIELD,
 } from "../render/embeds.js";
 import { PENDING_APPROVALS_KEY } from "./approval-created.js";
+import { resolveSecret } from "../config/secrets.js";
 
 export type ApprovalAction = "approve" | "reject" | "revision";
 
@@ -97,7 +98,8 @@ export async function handleApprovalButton(
   const note = `discord:${interaction.user.username}`;
 
   try {
-    const apiKey = await ctx.secrets.resolve(
+    const apiKey = await resolveSecret(
+      ctx,
       mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef,
     );
     const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);
@@ -244,7 +246,8 @@ export async function handleApprovalRevisionModal(
 
   await interaction.deferReply({ ephemeral: true });
   try {
-    const apiKey = await ctx.secrets.resolve(
+    const apiKey = await resolveSecret(
+      ctx,
       mapping.boardApiKeySecretRef ?? company.paperclipApiKeySecretRef,
     );
     const paperclip = new PaperclipClient(ctx, company.paperclipApiUrl, apiKey);

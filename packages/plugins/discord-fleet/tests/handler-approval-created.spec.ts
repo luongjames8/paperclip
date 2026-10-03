@@ -50,7 +50,7 @@ vi.mock("../src/render/embeds.js", async (importOriginal) => {
 
 function makeConfig(): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -59,7 +59,7 @@ function makeConfig(): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
         paperclipApiUrl: "http://localhost:3000",
         companyPrefix: "tc1",
       },
@@ -281,7 +281,7 @@ describe("handleApprovalCreated — approvalsChannelsByType + Bug 2.5", () => {
 
     const harness = createTestHarness({ manifest });
     const config: DiscordFleetConfig = {
-      botTokenSecretRef: "bot-ref",
+      botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
       companies: [
         {
           companyId: "c1",
@@ -290,7 +290,7 @@ describe("handleApprovalCreated — approvalsChannelsByType + Bug 2.5", () => {
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "ref1",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref1" },
           paperclipApiUrl: "http://localhost:3000",
           companyPrefix: "tc1",
           approvalFallbackChannelId: "c1-fallback",
@@ -302,7 +302,7 @@ describe("handleApprovalCreated — approvalsChannelsByType + Bug 2.5", () => {
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "ref2",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref2" },
           paperclipApiUrl: "http://localhost:3000",
           companyPrefix: "tc2",
           approvalFallbackChannelId: "c2-fallback",
@@ -1455,7 +1455,7 @@ describe("handleApprovalCreated — approvalKind routing", () => {
 
     const harness = createTestHarness({ manifest });
     const config: DiscordFleetConfig = {
-      botTokenSecretRef: "bot-ref",
+      botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
       companies: [
         {
           companyId: "c1",
@@ -1464,7 +1464,7 @@ describe("handleApprovalCreated — approvalKind routing", () => {
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "ref1",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref1" },
           paperclipApiUrl: "http://localhost:3000",
           companyPrefix: "tc1",
         },
@@ -1475,7 +1475,7 @@ describe("handleApprovalCreated — approvalKind routing", () => {
           projectRouting: {},
           digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
           stuckIssueThresholdHours: 6,
-          paperclipApiKeySecretRef: "ref2",
+          paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref2" },
           paperclipApiUrl: "http://localhost:3000",
           companyPrefix: "tc2",
         },

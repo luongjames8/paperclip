@@ -7,7 +7,7 @@ import type { DiscordFleetConfig } from "../src/config/schema.js";
 // configured — so each test only needs to add the field under test.
 function baseConfig(): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -17,7 +17,7 @@ function baseConfig(): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref" },
         paperclipApiUrl: "http://localhost:3000",
       },
     ],
@@ -89,7 +89,7 @@ describe("validateConfig — approvalKindChannels (fleet issue #687)", () => {
       projectRouting: {},
       digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
       stuckIssueThresholdHours: 6,
-      paperclipApiKeySecretRef: "ref2",
+      paperclipApiKeySecretRef: { type: "secret_ref", secretId: "ref2" },
       paperclipApiUrl: "http://localhost:3000",
     });
     config.approvalKindChannels = {

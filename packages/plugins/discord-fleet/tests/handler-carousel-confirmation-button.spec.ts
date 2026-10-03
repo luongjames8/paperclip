@@ -53,7 +53,7 @@ const STALE_HASH8 = sha256("some other, older artifact body").slice(0, CAROUSEL_
 
 function makeConfig(): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -62,7 +62,7 @@ function makeConfig(): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "my-api-key-ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "my-api-key-ref" },
         paperclipApiUrl: "http://paperclip:3100",
         companyPrefix: "tc1",
         userMappings: [
@@ -598,7 +598,7 @@ describe("handleCarouselConfirmationButton — authorization gate", () => {
     });
     await handleCarouselConfirmationButton(harness.ctx, interaction, makeConfig());
 
-    expect(resolveSecret).toHaveBeenCalledWith("my-api-key-ref");
+    expect(resolveSecret).toHaveBeenCalledWith(expect.objectContaining({ type: "secret_ref", secretId: "my-api-key-ref" }), expect.anything());
     expect(mockAcceptInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID);
   });
 
@@ -608,7 +608,7 @@ describe("handleCarouselConfirmationButton — authorization gate", () => {
     const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-per-user");
 
     const config = makeConfig();
-    config.companies[0].userMappings![0].boardApiKeySecretRef = "alice-personal-key-ref";
+    config.companies[0].userMappings![0].boardApiKeySecretRef = { type: "secret_ref", secretId: "alice-personal-key-ref" };
 
     const interaction = makeInteraction(`car-ok:${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`, {
       discordUserId: ALICE_DISCORD_ID,
@@ -616,7 +616,7 @@ describe("handleCarouselConfirmationButton — authorization gate", () => {
     });
     await handleCarouselConfirmationButton(harness.ctx, interaction, config);
 
-    expect(resolveSecret).toHaveBeenCalledWith("alice-personal-key-ref");
+    expect(resolveSecret).toHaveBeenCalledWith(expect.objectContaining({ type: "secret_ref", secretId: "alice-personal-key-ref" }), expect.anything());
     expect(mockAcceptInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID);
   });
 });
@@ -676,7 +676,7 @@ describe("handleCarouselConfirmationRejectModal", () => {
     const resolveSecret = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("tok-per-user");
 
     const config = makeConfig();
-    config.companies[0].userMappings![0].boardApiKeySecretRef = "alice-personal-key-ref";
+    config.companies[0].userMappings![0].boardApiKeySecretRef = { type: "secret_ref", secretId: "alice-personal-key-ref" };
 
     const interaction = makeInteraction(`${CAROUSEL_CONFIRM_REJECT_MODAL_PREFIX}${CURRENT_HASH8}:${ISSUE_ID}:${INTERACTION_ID}`, {
       discordUserId: ALICE_DISCORD_ID,
@@ -685,7 +685,7 @@ describe("handleCarouselConfirmationRejectModal", () => {
     });
     await handleCarouselConfirmationRejectModal(harness.ctx, interaction, config);
 
-    expect(resolveSecret).toHaveBeenCalledWith("alice-personal-key-ref");
+    expect(resolveSecret).toHaveBeenCalledWith(expect.objectContaining({ type: "secret_ref", secretId: "alice-personal-key-ref" }), expect.anything());
     expect(mockRejectInteraction).toHaveBeenCalledWith(ISSUE_ID, INTERACTION_ID, "Wrong week's slides");
   });
 

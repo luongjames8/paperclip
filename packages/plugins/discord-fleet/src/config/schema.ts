@@ -1,8 +1,20 @@
+// Company-scoped plugin secret ref (paperclip >= v2026.720.0). Stored in config
+// as {type, secretId, version?}; companyId + configPath are stamped in-memory
+// by sliceCompanyConfig (config/merge.ts) so resolution names the company the
+// secret is bound to and the exact config path of the binding.
+export interface SecretRef {
+  type: "secret_ref";
+  secretId: string;
+  version?: number | "latest";
+  companyId?: string;
+  configPath?: string;
+}
+
 export interface UserMapping {
   discordUserId: string;
   paperclipUserId: string;
   role: string;
-  boardApiKeySecretRef?: string;
+  boardApiKeySecretRef?: SecretRef;
 }
 
 export interface CompanyChannels {
@@ -26,14 +38,14 @@ export interface CompanyConfig {
   digest: DigestConfig;
   stuckIssueThresholdHours: number;
   costEventThresholdCents?: number;
-  paperclipApiKeySecretRef: string;
+  paperclipApiKeySecretRef: SecretRef;
   paperclipApiUrl: string;
   // Optional per-company Discord bot token. When set, this company uses its own
   // Discord bot instead of the root botTokenSecretRef. Multiple companies that
   // resolve to the same token share one Client (Discord rejects duplicate gateway
   // connections for the same token). When absent, falls back to the root token
   // for full backward compatibility.
-  botTokenSecretRef?: string;
+  botTokenSecretRef?: SecretRef;
   // Destination for approvals that don't match any approvalsChannelsByType
   // regex AND aren't co-locatable in an existing work-thread. Distinct from
   // channels.orphan (which is the issue-routing fallback). When absent, the
@@ -70,7 +82,10 @@ export interface ConfirmationSweepRule {
 }
 
 export interface DiscordFleetConfig {
-  botTokenSecretRef: string;
+  // Root bot token for companies without their own botTokenSecretRef. In the
+  // effective (merged) config every company entry carries its resolved ref, so
+  // this is only read from a company's raw row.
+  botTokenSecretRef?: SecretRef;
   companies: CompanyConfig[];
   // Per-content-surface routing for seed issues, keyed by companyId. The
   // plugin matches the issue's routine_slug / identifier / title against

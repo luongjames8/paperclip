@@ -13,7 +13,9 @@ export class RoutineFiredHandler {
   private semaphoreMax = new Map<string, number>();
 
   constructor(
-    private getConfig: () => PluginConfig,
+    // companyId given → that company's config; omitted → every company's helpers
+    // (semaphore sizing only).
+    private getConfig: (companyId?: string) => PluginConfig,
     private ctx: Pick<PluginContext, "logger" | "issues" | "secrets">
   ) {}
 
@@ -59,13 +61,13 @@ export class RoutineFiredHandler {
     const routineRunId = (payload?.["originRunId"] as string | undefined) ?? "";
     const companyId = event.companyId ?? "";
 
-    const config = this.getConfig();
+    const config = this.getConfig(event.companyId);
     const matchingHelpers = config.helpers.filter(
       (h) => h.trigger.kind === "routine" && h.trigger.routineId === routineId
     );
     this.ctx.logger.info("[debug] matching helpers", {
       routineId,
-      configRoutineIds: config.helpers.map(h => h.trigger.routineId),
+      configRoutineIds: config.helpers.map((h) => (h.trigger.kind === "routine" ? h.trigger.routineId : null)),
       matchCount: matchingHelpers.length,
     });
     if (matchingHelpers.length === 0) {

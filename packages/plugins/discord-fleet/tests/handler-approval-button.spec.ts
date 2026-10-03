@@ -29,7 +29,7 @@ const ALICE_DISCORD_ID = "discord-user-alice";
 
 function makeConfig(): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "bot-ref",
+    botTokenSecretRef: { type: "secret_ref", secretId: "bot-ref" },
     companies: [
       {
         companyId: "c1",
@@ -38,7 +38,7 @@ function makeConfig(): DiscordFleetConfig {
         projectRouting: {},
         digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
         stuckIssueThresholdHours: 6,
-        paperclipApiKeySecretRef: "my-api-key-ref",
+        paperclipApiKeySecretRef: { type: "secret_ref", secretId: "my-api-key-ref" },
         paperclipApiUrl: "http://paperclip:3100",
         companyPrefix: "tc1",
         userMappings: [
@@ -108,7 +108,7 @@ describe("handleApprovalButton — approve happy path", () => {
     const interaction = makeButtonInteraction("approval-approve:appr-foo");
     await handleApprovalButton(harness.ctx, interaction, makeConfig());
 
-    expect(resolveSecret).toHaveBeenCalledWith("my-api-key-ref");
+    expect(resolveSecret).toHaveBeenCalledWith(expect.objectContaining({ type: "secret_ref", secretId: "my-api-key-ref" }), expect.anything());
   });
 
   it("calls approveApproval with approvalId and discord:<username> note", async () => {

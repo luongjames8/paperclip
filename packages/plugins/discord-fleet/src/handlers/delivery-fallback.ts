@@ -1,6 +1,7 @@
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import type { DiscordFleetConfig } from "../config/schema.js";
 import { PaperclipClient } from "../api/paperclip.js";
+import { resolveSecret } from "../config/secrets.js";
 
 // Durable per-approval dedup marker so a persistently-failing delivery (bot
 // never in the guild, permanently-wrong destinationChannelId, ongoing Discord
@@ -59,7 +60,7 @@ export async function postDeliveryFailureFallback(
     });
   }
   try {
-    const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
+    const apiKey = await resolveSecret(ctx, companyConfig.paperclipApiKeySecretRef);
     const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
     await paperclip.addApprovalComment(
       approvalId,
@@ -125,7 +126,7 @@ export async function postExecutionStageDeliveryFailureFallback(
     });
   }
   try {
-    const apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
+    const apiKey = await resolveSecret(ctx, companyConfig.paperclipApiKeySecretRef);
     const paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
     await paperclip.addIssueComment(
       issueId,

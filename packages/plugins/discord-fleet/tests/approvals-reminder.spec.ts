@@ -23,7 +23,7 @@ function makeCompanyConfig(): CompanyConfig {
     projectRouting: {},
     digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
     stuckIssueThresholdHours: 6,
-    paperclipApiKeySecretRef: "paperclip/api-key",
+    paperclipApiKeySecretRef: { type: "secret_ref", secretId: "paperclip/api-key" },
     paperclipApiUrl: "http://localhost:3000",
     companyPrefix: "tc1",
   };
@@ -31,7 +31,7 @@ function makeCompanyConfig(): CompanyConfig {
 
 function makeFleetConfig(company: CompanyConfig): DiscordFleetConfig {
   return {
-    botTokenSecretRef: "paperclip-discord/bot-token",
+    botTokenSecretRef: { type: "secret_ref", secretId: "paperclip-discord/bot-token" },
     approvalsChannelsByType: {
       "company-1": [["content batch", "channel-batch"]],
     },

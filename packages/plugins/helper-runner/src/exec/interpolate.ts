@@ -1,10 +1,14 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
+import type { HelperSecretRef } from "../config/schema.js";
+import { isHelperSecretRef } from "../config/validate.js";
 
 export interface InterpolationVars {
   issueId: string;
   issueIdentifier: string;
   routineId: string;
   routineRunId: string;
+  // Company whose event fired the helper — secret refs resolve against it.
+  companyId?: string;
   // Approval-trigger fields (empty for routine-triggered helpers)
   approvalId?: string;
   approvalType?: string;
@@ -12,45 +16,14 @@ export interface InterpolationVars {
   approvalIssueIds?: string;
 }
 
-const SECRET_RE = /\$\{secret:([^}]+)\}/g;
 const VAR_RE = /\$\{([^}]+)\}/g;
 
 export async function interpolate(
   template: string,
   vars: InterpolationVars,
-  ctx: Pick<PluginContext, "secrets">
+  _ctx?: Pick<PluginContext, "secrets">
 ): Promise<string> {
-  // First pass: resolve ${secret:UUID} — these are async
-  const secretRefs: string[] = [];
-  let m: RegExpExecArray | null;
-  SECRET_RE.lastIndex = 0;
-  while ((m = SECRET_RE.exec(template)) !== null) {
-    secretRefs.push(m[1]);
-  }
-
-  const resolvedSecrets = new Map<string, string>();
-  await Promise.all(
-    secretRefs.map(async (ref) => {
-      let value: string;
-      try {
-        value = await ctx.secrets.resolve(ref);
-      } catch (err) {
-        throw new Error(`Failed to resolve secret ref "${ref}": ${(err as Error).message ?? String(err)}`);
-      }
-      resolvedSecrets.set(ref, value);
-    })
-  );
-
-  // Second pass: replace all variables
-  return template.replace(VAR_RE, (match, key: string) => {
-    if (key.startsWith("secret:")) {
-      const ref = key.slice("secret:".length);
-      const val = resolvedSecrets.get(ref);
-      if (val === undefined) {
-        throw new Error(`Secret ref not resolved: "${ref}"`);
-      }
-      return val;
-    }
+  return template.replace(VAR_RE, (_match, key: string) => {
     switch (key) {
       case "issue.id":
         return vars.issueId;
@@ -74,15 +47,28 @@ export async function interpolate(
   });
 }
 
+async function resolveSecretRef(
+  ref: HelperSecretRef,
+  vars: InterpolationVars,
+  ctx: Pick<PluginContext, "secrets">
+): Promise<string> {
+  const { configPath, ...secretRef } = ref;
+  try {
+    return await ctx.secrets.resolve(secretRef, { companyId: vars.companyId, configPath });
+  } catch (err) {
+    throw new Error(`Failed to resolve secret ref "${ref.secretId}": ${(err as Error).message ?? String(err)}`);
+  }
+}
+
 export async function interpolateRecord(
-  record: Record<string, string>,
+  record: Record<string, string | HelperSecretRef>,
   vars: InterpolationVars,
   ctx: Pick<PluginContext, "secrets">
 ): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
   await Promise.all(
     Object.entries(record).map(async ([k, v]) => {
-      result[k] = await interpolate(v, vars, ctx);
+      result[k] = isHelperSecretRef(v) ? await resolveSecretRef(v, vars, ctx) : await interpolate(v, vars, ctx);
     })
   );
   return result;

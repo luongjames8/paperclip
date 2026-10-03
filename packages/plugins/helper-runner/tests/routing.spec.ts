@@ -71,6 +71,15 @@ describe("RoutineFiredHandler routing", () => {
     expect((ctx.issues.documents.upsert as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0);
   });
 
+  it("reads only the event company's config — another company's helpers never fire", async () => {
+    const ctx = makeCtx();
+    const configs: Record<string, PluginConfig> = { "co-1": makeConfig(), "co-2": { helpers: [] } };
+    const handler = new RoutineFiredHandler((companyId) => configs[companyId ?? ""] ?? { helpers: [] }, ctx);
+    handler.rebuildSemaphores();
+    await handler.handle(makeEvent({ originKind: "routine_execution", originId: "routine-a", companyId: "co-2" }));
+    expect((ctx.issues.documents.upsert as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+  });
+
   it("skips event with wrong originKind", async () => {
     const ctx = makeCtx();
     const handler = new RoutineFiredHandler(() => makeConfig(), ctx);

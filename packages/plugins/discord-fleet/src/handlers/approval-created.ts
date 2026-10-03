@@ -21,6 +21,7 @@ import {
 } from "../render/posts-batch.js";
 import { PaperclipClient } from "../api/paperclip.js";
 import { postDeliveryFailureFallback } from "./delivery-fallback.js";
+import { resolveSecret } from "../config/secrets.js";
 
 interface ApprovalCreatedPayload {
   // Open-keyed: agents free-type payload field names (live 2026-07-04:
@@ -392,7 +393,7 @@ export async function handleApprovalCreated(
   let paperclip: InstanceType<typeof PaperclipClient> | null = null;
   let apiKey: string | null = null;
   try {
-    apiKey = await ctx.secrets.resolve(companyConfig.paperclipApiKeySecretRef);
+    apiKey = await resolveSecret(ctx, companyConfig.paperclipApiKeySecretRef);
     paperclip = new PaperclipClient(ctx, companyConfig.paperclipApiUrl, apiKey);
   } catch (err) {
     ctx.logger.warn("approval-created: failed to resolve API key; content fetch + issue docs unavailable", {

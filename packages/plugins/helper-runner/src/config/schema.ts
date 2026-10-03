@@ -31,11 +31,22 @@ export interface IssueTrigger {
 
 export type HelperTrigger = RoutineTrigger | ApprovalTrigger | IssueTrigger;
 
+// Company-scoped plugin secret ref (paperclip >= v2026.720.0). The host binds
+// it to the owning company at config-save time; the worker resolves it with
+// that companyId + the config path it was bound at. configPath is stamped
+// in-memory by the worker when the config is loaded (normalizeConfig).
+export interface HelperSecretRef {
+  type: "secret_ref";
+  secretId: string;
+  version?: number | "latest";
+  configPath?: string;
+}
+
 export interface HelperExec {
   command: string;
   args?: string[];
   cwd?: string;
-  env?: Record<string, string>;
+  env?: Record<string, string | HelperSecretRef>;
   timeoutSec?: number;
 }
 

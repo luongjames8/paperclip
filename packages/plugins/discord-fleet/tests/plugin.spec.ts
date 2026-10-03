@@ -42,7 +42,7 @@ describe("plugin worker", () => {
       manifest,
       capabilities: [...manifest.capabilities, "jobs.schedule"],
       config: {
-        botTokenSecretRef: "discord/bot-token",
+        botTokenSecretRef: { type: "secret_ref", secretId: "discord/bot-token" },
         companies: [
           {
             companyId: "company-1",
@@ -55,7 +55,7 @@ describe("plugin worker", () => {
             // around 23:00-23:15 UTC when the prior 7am Taipei slot was <15min old.)
             digest: { cronExpression: "0 0 29 2 *", timezone: "Asia/Taipei" },
             stuckIssueThresholdHours: 6,
-            paperclipApiKeySecretRef: "paperclip/api-key",
+            paperclipApiKeySecretRef: { type: "secret_ref", secretId: "paperclip/api-key" },
             paperclipApiUrl: "http://localhost:3000",
             companyPrefix: "tc1",
           },

@@ -2,7 +2,7 @@ import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import type { HelperConfig, PluginConfig } from "../config/schema.js";
 import { PaperclipClient } from "../api/paperclip.js";
 import { spawnHelper } from "../exec/spawn.js";
-import { interpolate, interpolateArray, interpolateRecord } from "../exec/interpolate.js";
+import { interpolate, interpolateArray, interpolateRecord, type InterpolationVars } from "../exec/interpolate.js";
 import { writeOutput, writeError, applyErrorPolicy } from "../exec/output.js";
 import { Semaphore } from "../util/concurrency.js";
 import { helperKey } from "./routine-fired.js";
@@ -43,7 +43,9 @@ export class ApprovalDecidedHandler {
   private semaphoreMax = new Map<string, number>();
 
   constructor(
-    private getConfig: () => PluginConfig,
+    // companyId given → that company's config; omitted → every company's helpers
+    // (semaphore sizing only).
+    private getConfig: (companyId?: string) => PluginConfig,
     private ctx: Pick<PluginContext, "logger" | "issues" | "secrets">
   ) {}
 
@@ -91,7 +93,7 @@ export class ApprovalDecidedHandler {
     const firstIssueId = issueIds[0] ?? linkedIssues[0]?.id ?? "";
     const firstIssueIdentifier = linkedIssues[0]?.identifier ?? "";
 
-    const config = this.getConfig();
+    const config = this.getConfig(event.companyId);
     const matching = config.helpers.filter((h) => {
       if (h.trigger.kind !== "approval") return false;
       const event = h.trigger.event ?? "decided";
@@ -135,13 +137,13 @@ export class ApprovalDecidedHandler {
     const sem = this.semaphores.get(key)!;
     await sem.acquire();
     try {
-      const command = await interpolate(helper.exec.command, vars as unknown as Record<string, string>, this.ctx);
-      const args = await interpolateArray(helper.exec.args ?? [], vars as unknown as Record<string, string>, this.ctx);
+      const command = await interpolate(helper.exec.command, vars as unknown as InterpolationVars, this.ctx);
+      const args = await interpolateArray(helper.exec.args ?? [], vars as unknown as InterpolationVars, this.ctx);
       const cwd = helper.exec.cwd
-        ? await interpolate(helper.exec.cwd, vars as unknown as Record<string, string>, this.ctx)
+        ? await interpolate(helper.exec.cwd, vars as unknown as InterpolationVars, this.ctx)
         : undefined;
       const env = helper.exec.env
-        ? await interpolateRecord(helper.exec.env, vars as unknown as Record<string, string>, this.ctx)
+        ? await interpolateRecord(helper.exec.env, vars as unknown as InterpolationVars, this.ctx)
         : undefined;
 
       this.ctx.logger.info("helper spawning (approval)", {

@@ -11,10 +11,24 @@ const JOB_KEYS = {
 
 export { JOB_KEYS };
 
+// Company-bound secret ref (paperclip >= v2026.720.0). format "secret-ref"
+// tells the host which paths hold refs; values must be the object form —
+// legacy UUID strings are rejected at save time.
+const SECRET_REF_SCHEMA = {
+  type: "object",
+  format: "secret-ref",
+  required: ["type", "secretId"],
+  properties: {
+    type: { type: "string", enum: ["secret_ref"] },
+    secretId: { type: "string" },
+    version: {},
+  },
+} as const;
+
 const manifest: PaperclipPluginManifestV1 = {
   id: "openclaw.discord-fleet",
   apiVersion: 1,
-  version: "0.2.0",
+  version: "0.3.0",
   displayName: "Discord Fleet",
   description: "Routes Paperclip issue and approval events to per-company Discord channels.",
   author: "openclaw",
@@ -30,13 +44,15 @@ const manifest: PaperclipPluginManifestV1 = {
   ],
   instanceConfigSchema: {
     type: "object",
-    required: ["botTokenSecretRef", "companies"],
+    // Company-scoped: each company's row configures only its own entry in
+    // `companies` (and its own keys in the per-company maps). A row for a
+    // company that does not use Discord can be {"companies": []}.
+    required: ["companies"],
     properties: {
       botTokenSecretRef: {
-        type: "string",
+        ...SECRET_REF_SCHEMA,
         title: "Bot Token Secret Ref",
-        description: "Paperclip secret reference for the Discord bot token (e.g. paperclip-discord/bot-token)",
-        default: "paperclip-discord/bot-token",
+        description: "Discord bot token for this company's entry when it sets no per-company botTokenSecretRef.",
       },
       issuesChannelsByType: {
         type: "object",
@@ -161,7 +177,7 @@ const manifest: PaperclipPluginManifestV1 = {
                   discordUserId: { type: "string" },
                   paperclipUserId: { type: "string" },
                   role: { type: "string" },
-                  boardApiKeySecretRef: { type: "string" },
+                  boardApiKeySecretRef: SECRET_REF_SCHEMA,
                 },
               },
             },
@@ -175,11 +191,11 @@ const manifest: PaperclipPluginManifestV1 = {
             stuckIssueThresholdHours: { type: "number", default: 6, minimum: 1 },
             costEventThresholdCents: { type: "number" },
             botTokenSecretRef: {
-              type: "string",
+              ...SECRET_REF_SCHEMA,
               title: "Discord Bot Token Secret Ref (per-company)",
               description: "Optional. Secret ref for THIS company's own Discord bot. When set, this company uses its own bot instead of the root botTokenSecretRef (companies sharing a token share one connection). Leave empty to use the root bot.",
             },
-            paperclipApiKeySecretRef: { type: "string", title: "Paperclip API Key Secret Ref" },
+            paperclipApiKeySecretRef: { ...SECRET_REF_SCHEMA, title: "Paperclip API Key Secret Ref" },
             paperclipApiUrl: { type: "string", title: "Paperclip API Base URL", default: "http://localhost:3000" },
             approvalFallbackChannelId: {
               type: "string",
