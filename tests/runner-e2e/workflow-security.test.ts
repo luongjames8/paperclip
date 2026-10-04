@@ -22,17 +22,19 @@ describe("public repository paid workflow security", () => {
     );
     const trustedWorkflowCalls = [
       ...ordinaryPrWorkflow.matchAll(
-        /^\s+uses:\s+(paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml)@([^\s#]+)$/gmu,
+        /^\s+uses:\s+((?:paperclipai|luongjames8)\/paperclip\/\.github\/workflows\/pr-trusted\.yml)@([^\s#]+)$/gmu,
       ),
     ];
 
     expect(trustedWorkflowCalls).toHaveLength(1);
-    expect(trustedWorkflowCalls[0]?.[1]).toBe(
-      "paperclipai/paperclip/.github/workflows/pr-trusted.yml",
-    );
-    expect(trustedWorkflowCalls[0]?.[2]).toBe(
-      ordinaryPrTrustedWorkflowRevision,
-    );
+    const [, caller, revision] = trustedWorkflowCalls[0] ?? [];
+    if (caller?.startsWith("luongjames8/")) {
+      // Fork carry: the fork's live, protected rebase-* branch — never a PR copy.
+      expect(revision).toMatch(/^rebase-[0-9]+$/u);
+    } else {
+      expect(caller).toBe("paperclipai/paperclip/.github/workflows/pr-trusted.yml");
+      expect(revision).toBe(ordinaryPrTrustedWorkflowRevision);
+    }
   });
 
   it("keeps pnpm bootstrap registry telemetry out of trusted workflow setup", async () => {

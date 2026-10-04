@@ -347,6 +347,14 @@ jobs:
           PAPERCLIP_RELEASE_BOOTSTRAP_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
             node ./scripts/check-release-package-bootstrap.mjs "${changed_paths[@]}"
 
+      # Fork carry: the inverse of the skipped "Block manual lockfile edits".
+      # The install lanes below repair a stale lockfile in their own workspace,
+      # so only this check proves the COMMITTED lockfile matches the manifests,
+      # as the fork's frozen-lockfile image build requires.
+      - name: Verify committed lockfile is current (fork)
+        if: github.repository == 'luongjames8/paperclip'
+        run: pnpm install --lockfile-only --frozen-lockfile --ignore-scripts
+
       # Each lane resolves a stale lockfile inline; this early check still
       # fails fast when the merge tree cannot resolve at all.
       - name: Validate dependency resolution
