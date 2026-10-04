@@ -284,7 +284,7 @@ describe("approval routes idempotent retries", () => {
       .send({ decidedByUserId: "forged-user", decisionNote: "ship it" });
 
     expect(res.status).toBe(200);
-    expect(mockApprovalService.approve).toHaveBeenCalledWith("approval-4", "user-1", "ship it");
+    expect(mockApprovalService.approve).toHaveBeenCalledWith("approval-4", "user-1", "ship it", undefined);
   });
 
   it("derives approval attribution from the authenticated actor on reject", async () => {
@@ -311,7 +311,7 @@ describe("approval routes idempotent retries", () => {
       .send({ decidedByUserId: "forged-user", decisionNote: "not now" });
 
     expect(res.status).toBe(200);
-    expect(mockApprovalService.reject).toHaveBeenCalledWith("approval-5", "user-1", "not now");
+    expect(mockApprovalService.reject).toHaveBeenCalledWith("approval-5", "user-1", "not now", undefined);
   });
 
   it("derives approval attribution from the authenticated actor on request revision", async () => {

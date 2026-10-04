@@ -30,7 +30,19 @@ export function spawnHelper(
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
       stdio: ["ignore", "pipe", "pipe"],
+      // Own process group, so a timeout reaches grandchildren (e.g. a shell
+      // script's subprocesses), not just the direct child.
+      detached: true,
     });
+
+    const killGroup = (sig: NodeJS.Signals) => {
+      if (child.pid === undefined) return;
+      try {
+        process.kill(-child.pid, sig);
+      } catch {
+        // ESRCH: the whole group already exited.
+      }
+    };
 
     let stdoutChunks: Buffer[] = [];
     let stderrChunks: Buffer[] = [];
@@ -62,10 +74,8 @@ export function spawnHelper(
 
     const timeout = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      sigkillTimer = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, SIGKILL_GRACE_MS);
+      killGroup("SIGTERM");
+      sigkillTimer = setTimeout(() => killGroup("SIGKILL"), SIGKILL_GRACE_MS);
     }, options.timeoutMs);
 
     // Handles ENOENT, EACCES, and other OS-level spawn failures.
@@ -91,7 +101,9 @@ export function spawnHelper(
       settled = true;
       clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
-      if (sigkillTimer) clearTimeout(sigkillTimer);
+      // After a timeout, let the KILL still fire: the direct child exiting on
+      // TERM does not mean a TERM-ignoring grandchild has.
+      if (sigkillTimer && !timedOut) clearTimeout(sigkillTimer);
 
       resolve({
         exitCode: code ?? 1,

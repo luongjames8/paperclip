@@ -18,6 +18,8 @@ vi.mock("../src/discord/rest.js", () => ({
 }));
 
 const NOW = new Date("2026-07-01T12:00:00.000Z");
+// Generation of the default fresh GET (80h old) — the reject must carry it.
+const FRESH_UPDATED_AT = new Date(NOW.getTime() - 80 * 3_600_000).toISOString();
 
 function makeCompanyConfig(): CompanyConfig {
   return {
@@ -55,7 +57,7 @@ function makePendingApproval(overrides: Partial<PaperclipApproval> = {}): Paperc
 function makePaperclip(
   pending: PaperclipApproval[],
   rejectFn = vi.fn().mockResolvedValue(undefined),
-  getApprovalByIdFn = vi.fn().mockResolvedValue({ id: "appr-1", status: "pending", createdAt: new Date(NOW.getTime() - 80 * 3_600_000).toISOString(), payload: { title: "Carousel week 27" } }),
+  getApprovalByIdFn = vi.fn().mockResolvedValue({ id: "appr-1", status: "pending", createdAt: FRESH_UPDATED_AT, updatedAt: FRESH_UPDATED_AT, payload: { title: "Carousel week 27" } }),
 ): PaperclipClient {
   return {
     getPendingApprovals: vi.fn().mockResolvedValue(pending),
@@ -93,6 +95,7 @@ describe("runApprovalsReminder — CHANGE 2: auto-expiry", () => {
     expect(rejectFn).toHaveBeenCalledWith(
       "appr-1",
       expect.stringContaining("auto-expiry after 72h"),
+      FRESH_UPDATED_AT,
     );
     // NOT re-posted as a reminder
     expect(postEmbedToChannel).not.toHaveBeenCalled();
@@ -163,7 +166,7 @@ describe("runApprovalsReminder — CHANGE 2: auto-expiry", () => {
     ).resolves.toBeUndefined();
 
     // Reject was attempted
-    expect(rejectFn).toHaveBeenCalledWith("appr-1", expect.stringContaining("auto-expiry after 72h"));
+    expect(rejectFn).toHaveBeenCalledWith("appr-1", expect.stringContaining("auto-expiry after 72h"), FRESH_UPDATED_AT);
     // Because reject failed, the reminder card MUST still be posted so the card
     // does not go permanently silent.
     expect(postEmbedToChannel).toHaveBeenCalled();
@@ -274,7 +277,7 @@ describe("runApprovalsReminder — CHANGE 2: auto-expiry", () => {
       runApprovalsReminder(harness.ctx, "c1", {} as Client, company, fleet, paperclip, NOW),
     ).resolves.toBeUndefined();
 
-    expect(rejectFn).toHaveBeenCalledWith("appr-1", expect.stringContaining("auto-expiry after 72h"));
+    expect(rejectFn).toHaveBeenCalledWith("appr-1", expect.stringContaining("auto-expiry after 72h"), FRESH_UPDATED_AT);
     // lost-race branch: continue → no reminder posted
     expect(postEmbedToChannel).not.toHaveBeenCalled();
   });
@@ -314,5 +317,54 @@ describe("runApprovalsReminder — CHANGE 2: auto-expiry", () => {
     // appr-1 must be pruned; appr-2 must remain
     expect(remaining).not.toContain("appr-1");
     expect(remaining).toContain("appr-2");
+  });
+
+  it("resubmitted between list and re-fetch → eligibility from the FRESH record: no reject, no stale nag", async () => {
+    // The listed snapshot is 80h old, but a request-changes + resubmit cycle
+    // completed before the re-fetch: the fresh record is pending again with a
+    // just-refreshed updatedAt. The stale snapshot's age must not expire it.
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const rejectFn = vi.fn().mockResolvedValue(undefined);
+    const resubmittedAt = new Date(NOW.getTime() - 10 * 60_000).toISOString();
+    const paperclip = makePaperclip(
+      [makePendingApproval({ createdAt: FRESH_UPDATED_AT, updatedAt: FRESH_UPDATED_AT })],
+      rejectFn,
+      vi.fn().mockResolvedValue(
+        makePendingApproval({ createdAt: FRESH_UPDATED_AT, updatedAt: resubmittedAt }),
+      ),
+    );
+    const fleet = makeFleetConfig(company, {
+      approvalExpiry: { c1: [{ titleRegex: "Carousel", maxAgeHours: 72 }] },
+    });
+
+    await runApprovalsReminder(harness.ctx, "c1", {} as Client, company, fleet, paperclip, NOW);
+
+    expect(rejectFn).not.toHaveBeenCalled();
+    // 10 minutes since resubmit < REMIND_AFTER_MS — not nagged either.
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+  });
+
+  it("fresh record without updatedAt → no generation to pin → no reject (fail closed)", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const rejectFn = vi.fn().mockResolvedValue(undefined);
+    const paperclip = makePaperclip(
+      [makePendingApproval({ createdAt: FRESH_UPDATED_AT })],
+      rejectFn,
+      vi.fn().mockResolvedValue(makePendingApproval({ createdAt: FRESH_UPDATED_AT })),
+    );
+    const fleet = makeFleetConfig(company, {
+      approvalExpiry: { c1: [{ titleRegex: "Carousel", maxAgeHours: 72 }] },
+    });
+
+    await runApprovalsReminder(harness.ctx, "c1", {} as Client, company, fleet, paperclip, NOW);
+
+    expect(rejectFn).not.toHaveBeenCalled();
   });
 });

@@ -90,4 +90,49 @@ describe("spawnHelper", () => {
     expect(result.signal).toBeNull();
     expect(result.spawnError).toMatch(/ENOENT/);
   });
+
+  // A grandchild with its stdio detached from our pipes: the direct child
+  // exiting must not let the timeout "succeed" while the grandchild lives on.
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it("timeout signals the whole process group, not just the direct child", async () => {
+    const result = await spawnHelper(
+      "/bin/sh",
+      ["-c", "sleep 30 >/dev/null 2>&1 & echo $!; wait"],
+      { timeoutMs: 300 }
+    );
+    const grandchild = Number(result.stdout.trim());
+    try {
+      expect(result.timedOut).toBe(true);
+      expect(grandchild).toBeGreaterThan(0);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(alive(grandchild)).toBe(false);
+    } finally {
+      if (grandchild > 0) try { process.kill(grandchild, "SIGKILL"); } catch {}
+    }
+  });
+
+  it("SIGKILLs a TERM-ignoring grandchild even after the direct child exits", async () => {
+    const result = await spawnHelper(
+      "/bin/sh",
+      ["-c", "(trap '' TERM; exec sleep 30) >/dev/null 2>&1 & echo $!; wait"],
+      { timeoutMs: 300 }
+    );
+    const grandchild = Number(result.stdout.trim());
+    try {
+      expect(result.timedOut).toBe(true);
+      expect(alive(grandchild)).toBe(true); // survived TERM
+      await new Promise((r) => setTimeout(r, 2500)); // SIGKILL grace
+      expect(alive(grandchild)).toBe(false);
+    } finally {
+      if (grandchild > 0) try { process.kill(grandchild, "SIGKILL"); } catch {}
+    }
+  }, 10000);
 });

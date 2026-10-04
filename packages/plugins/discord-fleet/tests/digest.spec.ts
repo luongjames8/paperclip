@@ -100,4 +100,25 @@ describe("runDigest", () => {
     });
     expect(remaining).toEqual([]);
   });
+
+  it("clears only the approvals it reported — an id added while the digest posts survives", async () => {
+    const { runDigest } = await import("../src/jobs/digest.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+    const { updatePendingApprovals } = await import("../src/handlers/approval-created.js");
+
+    const harness = createTestHarness({ manifest });
+    const key = { scopeKind: "company" as const, scopeId: "company-1", stateKey: "pending-approvals" };
+    await harness.ctx.state.set(key, ["approval-old"]);
+    (postToChannel as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      await updatePendingApprovals(harness.ctx, "company-1", (ids) => [...ids, "approval-new"]);
+      return "msg-id-123";
+    });
+    const mockPaperclip = {
+      getErrorsLast24h: vi.fn().mockResolvedValue([]),
+    } as unknown as PaperclipClient;
+
+    await runDigest(harness.ctx, "company-1", makeMockClient(), makeCompanyConfig(), mockPaperclip, NOW_AT_0701_TAIPEI);
+
+    expect(await harness.ctx.state.get(key)).toEqual(["approval-new"]);
+  });
 });

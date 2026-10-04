@@ -133,6 +133,24 @@ describe("PaperclipClient.rejectApproval", () => {
     expect(JSON.parse(opts?.body as string)).toEqual({ decisionNote: "discord:bob" });
   });
 
+  it("sends expectedUpdatedAt (generation precondition) when provided", async () => {
+    const harness = createTestHarness({ manifest });
+    const fetchSpy = vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({
+      status: 200,
+      json: async () => ({}),
+      text: async () => "",
+    } as any);
+
+    const client = makeClient(harness);
+    await client.rejectApproval("appr-002", "expired", "2026-07-01T12:00:00.000Z");
+
+    const [, opts] = fetchSpy.mock.calls[0];
+    expect(JSON.parse(opts?.body as string)).toEqual({
+      decisionNote: "expired",
+      expectedUpdatedAt: "2026-07-01T12:00:00.000Z",
+    });
+  });
+
   it("resolves without throwing on 204 response", async () => {
     const harness = createTestHarness({ manifest });
     vi.spyOn(harness.ctx.http, "fetch").mockResolvedValue({

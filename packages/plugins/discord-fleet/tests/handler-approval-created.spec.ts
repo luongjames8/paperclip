@@ -500,6 +500,31 @@ describe("handleApprovalCreated — two-phase marker dedup guard", () => {
     expect(pending).toEqual(["appr-001"]);
   });
 
+  it("concurrent deliveries for DIFFERENT approvals both land in PENDING_APPROVALS_KEY (no lost update)", async () => {
+    const { handleApprovalCreated, PENDING_APPROVALS_KEY } = await import("../src/handlers/approval-created.js");
+
+    const harness = createTestHarness({ manifest });
+    // A slow return from the shared-list read widens the read-modify-write
+    // window: unserialized, both writers read [] and the last write drops the
+    // other's id.
+    const realGet = harness.ctx.state.get.bind(harness.ctx.state);
+    harness.ctx.state.get = async (key) => {
+      const value = await realGet(key);
+      if (key.stateKey === PENDING_APPROVALS_KEY) await new Promise((r) => setTimeout(r, 30));
+      return value;
+    };
+    const event = (id: string) =>
+      makeApprovalCreatedEvent({ approvalId: id }, { entityId: id, eventId: `evt-${id}` });
+
+    await Promise.all([
+      handleApprovalCreated(harness.ctx, event("appr-a"), makeMockClient(), makeConfig()),
+      handleApprovalCreated(harness.ctx, event("appr-b"), makeMockClient(), makeConfig()),
+    ]);
+
+    const pending = await realGet({ scopeKind: "company", scopeId: "c1", stateKey: PENDING_APPROVALS_KEY });
+    expect([...(pending as string[])].sort()).toEqual(["appr-a", "appr-b"]);
+  });
+
   it("duplicate delivery with inter-event gap: second invocation after guard is written posts nothing (live 2026-07-02 bug)", async () => {
     // The live incident: two approval.created events for the same approvalId
     // 500 ms apart. Fix: posted marker is written only after Discord confirms the

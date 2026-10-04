@@ -1,7 +1,7 @@
 import type { Client } from "discord.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { CompanyConfig, DiscordFleetConfig } from "../config/schema.js";
-import type { PaperclipClient } from "../api/paperclip.js";
+import type { PaperclipApproval, PaperclipClient } from "../api/paperclip.js";
 import { postEmbedToChannel, postEmbedsToChannel, postToChannel } from "../discord/rest.js";
 import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
 import { truncate } from "../render/plain.js";
@@ -12,7 +12,7 @@ import {
   resolveApprovalContent,
   resolveApprovalGuidance,
   postUnroutedApprovalWarning,
-  PENDING_APPROVALS_KEY,
+  updatePendingApprovals,
 } from "../handlers/approval-created.js";
 import {
   parsePostsBatchPayload,
@@ -101,23 +101,23 @@ export async function runApprovalsReminder(
   // Auto-expiry rules for this company (CHANGE 2).
   const expiryRules = fleetConfig.approvalExpiry?.[companyId] ?? [];
 
-  for (const approval of pending) {
-    try {
+  // Expiry eligibility + age, derived from ONE record. Run on the listed
+  // snapshot as a cheap pre-filter, then again on the fresh record before the
+  // irreversible reject (the snapshot can be a stale generation).
+  const assess = (a: PaperclipApproval) => {
     // Age from the LATEST activity, not creation: the request-changes cycle
     // resubmits the SAME approval row (server refreshes updatedAt, keeps
     // createdAt) — a card the editor just resubmitted after operator feedback
     // must not be instantly auto-expired for being "old", nor nagged as stale.
-    const freshMs = safeParseMs(approval.updatedAt) ?? safeParseMs(approval.createdAt);
-    if (freshMs === null) continue;
+    const freshMs = safeParseMs(a.updatedAt) ?? safeParseMs(a.createdAt);
+    if (freshMs === null) return null;
     // Clamp future timestamps (clock skew / bogus server value) to age 0: the
     // approval is treated as just-active — reminded after the normal window,
     // never permanently suppressed and never instantly expired.
     const ageMs = Math.max(0, nowMs - freshMs);
     const ageHours = Math.floor(ageMs / 3_600_000);
-    const titleRaw = approval.payload?.title;
+    const titleRaw = a.payload?.title;
     const title = typeof titleRaw === "string" ? titleRaw : "";
-
-    // CHANGE 2: check auto-expiry rules before posting a reminder.
     // Regexes are compiled+screened at config load (validateConfig). Bound the
     // tested input so even a pathological pattern cannot blow up backtracking
     // on an adversarially long title.
@@ -129,18 +129,37 @@ export async function runApprovalsReminder(
         return false;
       }
     });
-    if (matchedExpiry && ageHours >= matchedExpiry.maxAgeHours) {
+    const expired = matchedExpiry !== undefined && ageHours >= matchedExpiry.maxAgeHours;
+    return { ageMs, ageHours, title, matchedExpiry, expired };
+  };
+
+  for (let approval of pending) {
+    try {
+    let assessed = assess(approval);
+    if (!assessed) continue;
+
+    // CHANGE 2: check auto-expiry rules before posting a reminder.
+    if (assessed.expired) {
       // FAIL-CLOSED TOCTOU GUARD: a human may have decided this approval
       // between the pending-list fetch and now. Re-check immediately before the
       // irreversible reject; if the re-fetch fails or shows anything but
       // "pending", DO NOT reject (auto-expiry must never override a human).
-      let stillPending = false;
+      // A request-changes + resubmit cycle in that window shows "pending"
+      // again, so eligibility is recomputed from the FRESH record, and the
+      // reject is conditional on its generation (expectedUpdatedAt).
+      let freshPending = false;
       try {
         const fresh = await paperclip.getApprovalById(approval.id);
-        stillPending = fresh?.status === "pending";
         if (fresh && fresh.status !== "pending") {
           // Decided while we were sweeping — nothing to remind either.
           continue;
+        }
+        if (fresh) {
+          const reassessed = assess(fresh);
+          if (!reassessed) continue;
+          approval = fresh;
+          assessed = reassessed;
+          freshPending = true;
         }
       } catch (err) {
         ctx.logger.warn("approvals-reminder: pre-expiry re-fetch failed — skipping expiry this sweep (fail closed)", {
@@ -149,21 +168,24 @@ export async function runApprovalsReminder(
         });
       }
       let rejectSucceeded = false;
-      if (stillPending) {
+      const { matchedExpiry } = assessed;
+      // No updatedAt = no generation to pin the reject to: fail closed.
+      if (freshPending && matchedExpiry && assessed.expired && approval.updatedAt) {
         const decisionNote = `expired — time-sensitive card aged out (auto-expiry after ${matchedExpiry.maxAgeHours}h)`;
         try {
-          await paperclip.rejectApproval(approval.id, decisionNote);
+          await paperclip.rejectApproval(approval.id, decisionNote, approval.updatedAt);
           rejectSucceeded = true;
           ctx.logger.info("approvals-reminder: auto-expired approval", {
             approvalId: approval.id,
-            ageHours,
+            ageHours: assessed.ageHours,
             maxAgeHours: matchedExpiry.maxAgeHours,
             titleRegex: matchedExpiry.titleRegex,
           });
         } catch (err) {
-          // Already decided (race lost to a human) — human decision stands;
-          // nothing to remind. The server answers a stale transition with 422
-          // (resolveApproval's unprocessable); 409 kept for older servers.
+          // Already decided, or resubmitted since our read (race lost to a
+          // human) — human decision stands; skip this sweep. The server answers
+          // a stale transition / generation with 422 (resolveApproval's
+          // unprocessable); 409 kept for older servers.
           if (err instanceof PaperclipApiError && (err.status === 409 || err.status === 422)) {
             ctx.logger.info("approvals-reminder: expiry skipped — approval already decided", { approvalId: approval.id, status: err.status });
             continue;
@@ -181,9 +203,7 @@ export async function runApprovalsReminder(
         // Keep the daily digest coherent: drop the expired approval from the
         // shared PENDING list the same way the button handler does on decide.
         try {
-          const pendingKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: PENDING_APPROVALS_KEY };
-          const pendingList = ((await ctx.state.get(pendingKey)) as string[] | null) ?? [];
-          await ctx.state.set(pendingKey, pendingList.filter((id) => id !== approval.id));
+          await updatePendingApprovals(ctx, companyId, (ids) => ids.filter((id) => id !== approval.id));
         } catch (err) {
           ctx.logger.warn("approvals-reminder: failed to prune expired approval from pending list", {
             approvalId: approval.id,
@@ -195,6 +215,7 @@ export async function runApprovalsReminder(
       }
     }
 
+    const { ageMs, ageHours, title } = assessed;
     if (ageMs < REMIND_AFTER_MS) continue;
 
     // safeParseMs: a corrupted stored timestamp becomes null ("never reminded")
