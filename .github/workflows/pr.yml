@@ -10,8 +10,9 @@ permissions:
 
 jobs:
   ci:
-    # Fork (luongjames8/paperclip): run this branch's own pr-trusted.yml, not
-    # upstream master's, so fork-only CI carries (lockfile exemption below)
-    # apply. The fork has no AWS runner group; the gate already falls back to
-    # GitHub-hosted runners off paperclipai/paperclip.
-    uses: ./.github/workflows/pr-trusted.yml
+    # Fork (luongjames8/paperclip): call the trusted workflow from the fork's
+    # live branch, not upstream master's, so fork-only CI carries (the lockfile
+    # exemption in pr-trusted.yml) apply — while still never resolving it from
+    # the PR's own, contributor-controlled commit. The fork has no AWS runner
+    # group; the gate falls back to GitHub-hosted runners off paperclipai.
+    uses: luongjames8/paperclip/.github/workflows/pr-trusted.yml@rebase-1001
