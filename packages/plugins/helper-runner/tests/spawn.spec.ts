@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
 import { spawnHelper } from "../src/exec/spawn.js";
 
 describe("spawnHelper", () => {
@@ -93,12 +94,22 @@ describe("spawnHelper", () => {
 
   // A grandchild with its stdio detached from our pipes: the direct child
   // exiting must not let the timeout "succeed" while the grandchild lives on.
+  // A killed orphan can linger as a zombie when PID 1 doesn't reap (e.g. a
+  // container without an init) — kill(pid, 0) still succeeds on it, so
+  // count a zombie as exited.
   const alive = (pid: number) => {
     try {
       process.kill(pid, 0);
-      return true;
     } catch {
       return false;
+    }
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z";
+    } catch (err) {
+      // ENOENT: exited between the probes. No procfs at all (e.g. macOS):
+      // the kill(0) probe is all we have.
+      return existsSync("/proc/self/stat") ? (err as NodeJS.ErrnoException).code !== "ENOENT" : true;
     }
   };
 
