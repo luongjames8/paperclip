@@ -23,9 +23,18 @@ GitHub Actions owns `pnpm-lock.yaml`.
 - Pull request CI validates dependency resolution when manifests change.
 - Pushes to `master` regenerate `pnpm-lock.yaml` with `pnpm install --lockfile-only --no-frozen-lockfile`, commit it back if needed, and then run verification with `--frozen-lockfile`.
 
+> **Fork (`luongjames8/paperclip`):** no lockfile bot runs on the fork's live
+> `rebase-*` branch, and the deployed image installs with `--frozen-lockfile`.
+> So a PR that changes a manifest **must** commit the matching
+> `pnpm-lock.yaml` update. `pr-trusted.yml`'s lockfile block skips this repo.
+
 ## Trusted PR Workflow
 
 The PR caller uses `paperclipai/paperclip/.github/workflows/pr-trusted.yml@master`.
+On the fork, the caller is
+`luongjames8/paperclip/.github/workflows/pr-trusted.yml@<live rebase-* branch>`
+(currently `@rebase-1001`). Move it to the new branch when the fork rebases.
+It is never the PR's own `./` copy.
 The AWS runner group `paperclip-public-pr` must allow
 `paperclipai/paperclip/.github/workflows/pr-trusted.yml@refs/heads/master`.
 New workflow versions merged into master then receive runner access without a

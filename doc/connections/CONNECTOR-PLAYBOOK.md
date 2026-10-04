@@ -1056,6 +1056,8 @@ unrelated worktree change, or temporary evidence file is staged.
 1. Keep commits scoped. A typical split is definition/branding, generic runtime
    capability, and tests/docs. Do not split generated output from its source.
 2. Do not commit `pnpm-lock.yaml`; GitHub Actions owns it in this repository.
+   (Fork `luongjames8/paperclip`: the opposite — commit the lockfile update;
+   see `doc/DEVELOPING.md`.)
 3. Read `.github/PULL_REQUEST_TEMPLATE.md` immediately before writing the PR
    body.
 4. Fill every required section:
