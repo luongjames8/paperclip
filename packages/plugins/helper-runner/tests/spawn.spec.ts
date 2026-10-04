@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { spawnHelper } from "../src/exec/spawn.js";
 
 describe("spawnHelper", () => {
@@ -135,4 +135,23 @@ describe("spawnHelper", () => {
       if (grandchild > 0) try { process.kill(grandchild, "SIGKILL"); } catch {}
     }
   }, 10000);
+
+  it("on Windows, signals the direct child (no negative-pid group kill)", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const killSpy = vi.spyOn(process, "kill");
+    try {
+      vi.resetModules();
+      const { spawnHelper: spawnOnWindows } = await import("../src/exec/spawn.js");
+      const result = await spawnOnWindows("/bin/sleep", ["60"], { timeoutMs: 300 });
+      expect(result.timedOut).toBe(true);
+      expect(result.signal).toBe("SIGTERM");
+      expect(killSpy.mock.calls.some(([pid]) => typeof pid === "number" && pid < 0)).toBe(false);
+    } finally {
+      killSpy.mockRestore();
+      Object.defineProperty(process, "platform", platform);
+      vi.resetModules();
+    }
+  });
 });
+

@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 const STDOUT_MAX = 1 * 1024 * 1024; // 1 MB
 const STDERR_MAX = 256 * 1024; // 256 KB
 const SIGKILL_GRACE_MS = 2000;
+const IS_WINDOWS = process.platform === "win32";
 
 export interface SpawnResult {
   exitCode: number;
@@ -31,17 +32,22 @@ export function spawnHelper(
       env: { ...process.env, ...options.env },
       stdio: ["ignore", "pipe", "pipe"],
       // Own process group, so a timeout reaches grandchildren (e.g. a shell
-      // script's subprocesses), not just the direct child.
-      detached: true,
+      // script's subprocesses), not just the direct child. Windows has no
+      // process groups addressable by negative pid.
+      detached: !IS_WINDOWS,
     });
 
+    // Mirrors adapter-utils' signalRunningProcess (not a helper-runner dep).
     const killGroup = (sig: NodeJS.Signals) => {
-      if (child.pid === undefined) return;
-      try {
-        process.kill(-child.pid, sig);
-      } catch {
-        // ESRCH: the whole group already exited.
+      if (!IS_WINDOWS && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, sig);
+          return;
+        } catch {
+          // ESRCH (group already gone) or unsupported — fall back below.
+        }
       }
+      child.kill(sig);
     };
 
     let stdoutChunks: Buffer[] = [];
