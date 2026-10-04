@@ -265,8 +265,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # Fork carry: luongjames8/paperclip commits pnpm-lock.yaml in PRs. Its
+      # deployed image is built with `pnpm install --frozen-lockfile`, and no
+      # refresh-lockfile bot runs here, so a manifest change must ship its
+      # lockfile update in the same PR or the image build breaks.
       - name: Block manual lockfile edits
         if: >-
+          github.repository != 'luongjames8/paperclip' &&
           github.head_ref != 'chore/refresh-lockfile' &&
           github.event.pull_request.user.login != 'dependabot[bot]'
         run: |
