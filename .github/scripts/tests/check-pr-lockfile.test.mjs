@@ -31,3 +31,13 @@ test('fails when lockfile changed by bot on wrong branch', () => {
   );
   assert.equal(result.passed, false);
 });
+
+test('passes any lockfile edit on the lockfile-owning fork', () => {
+  const result = checkLockfile(makeFiles(['pnpm-lock.yaml']), 'someuser', 'fix/bug', 'luongjames8/paperclip');
+  assert.equal(result.passed, true);
+});
+
+test('still fails a regular lockfile edit upstream', () => {
+  const result = checkLockfile(makeFiles(['pnpm-lock.yaml']), 'someuser', 'fix/bug', 'paperclipai/paperclip');
+  assert.equal(result.passed, false);
+});

@@ -64,7 +64,9 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
     -o) output_file="$2"; shift 2 ;;
-    -w|-H|-F|--data-binary) shift 2 ;;
+    -H) [[ "$2" == X-Paperclip-Run-Id:* ]] && printf '%s\n' "$2" >>"$FAKE_CURL_STATE_DIR/run-headers"; shift 2 ;;
+    --data-binary) printf '%s\n' "$2" >>"$FAKE_CURL_STATE_DIR/bodies"; shift 2 ;;
+    -w|-F) shift 2 ;;
     -sS) shift ;;
     http://*|https://*) url="$1"; shift ;;
     *) shift ;;
@@ -490,6 +492,19 @@ describe("paperclip skill utils", () => {
       "GET http://paperclip.invalid/api/issues/issue-1/attachments",
     );
     expect(requestLog).not.toContain("/api/api/");
+  });
+
+  it("sends no run attribution when there is no heartbeat run (chat/manual wakes)", async () => {
+    const harness = await makeArtifactHelperHarness(cleanupDirs);
+    harness.env.PAPERCLIP_RUN_ID = ""; // unset in practice; empty keeps the fake curl (set -u) happy
+
+    await harness.run();
+
+    await expect(fs.readFile(path.join(harness.stateDir, "run-headers"), "utf8")).rejects.toThrow();
+    const bodies = (await fs.readFile(path.join(harness.stateDir, "bodies"), "utf8")).trim().split("\n");
+    const workProduct = bodies.map((line) => JSON.parse(line)).find((body) => body.type === "artifact");
+    expect(workProduct).toBeDefined();
+    expect(workProduct.createdByRunId).toBeNull();
   });
 
   it("does not describe an ordinary artifact upload as prepared for provider delivery", async () => {

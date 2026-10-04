@@ -486,6 +486,33 @@ describe("agent auth middleware", () => {
     });
   });
 
+  // Fleet carry (2026-07-11 live incident): a malformed run-id header (e.g. a
+  // chat-wake "manual-<ts>" fallback) can never name a run; passed through it
+  // 500s any route that queries a uuid column with it.
+  it("drops a malformed run-id header for agent-key actors and keeps a uuid one", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const token = "pcp_test_agent_key_runid";
+    const { db } = createDbState({
+      agent: { id: agentId, companyId },
+      agentKey: { id: randomUUID(), agentId, companyId, keyHash: hashToken(token), responsibleUserId: "user-key" },
+    });
+
+    const malformed = await request(createApp(db))
+      .get("/actor")
+      .set("Authorization", `Bearer ${token}`)
+      .set("X-Paperclip-Run-Id", "manual-20260703T000000Z-123");
+    expect(malformed.status).toBe(200);
+    expect(malformed.body.runId).toBeUndefined();
+
+    const runId = randomUUID();
+    const valid = await request(createApp(db))
+      .get("/actor")
+      .set("Authorization", `Bearer ${token}`)
+      .set("X-Paperclip-Run-Id", runId);
+    expect(valid.body.runId).toBe(runId);
+  });
+
   it("rejects agent keys that lack a responsible user binding and audits the denial", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

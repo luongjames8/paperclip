@@ -9,7 +9,17 @@ export type IssueLivenessState =
   | "blocked_by_uninvokable_assignee"
   | "blocked_by_cancelled_issue"
   | "invalid_review_participant"
-  | "in_review_without_action_path";
+  | "in_review_without_action_path"
+  | "stale_assigned_backlog_issue";
+
+/**
+ * Fleet carry (#36): how long an issue may sit assigned + `backlog` with no
+ * dependent, waiting path, or blocker chain before it is treated as a stale
+ * orphan rather than deliberate parking (doc/execution-semantics.md,
+ * "Agent-assigned backlog"). The finding surfaces in the board's blocked inbox
+ * ("Move to todo"); upstream no longer auto-escalates graph-liveness findings.
+ */
+export const ASSIGNED_BACKLOG_STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
 
 export interface IssueLivenessIssueInput {
   conversationAgentId?: string | null;
@@ -31,6 +41,7 @@ export interface IssueLivenessIssueInput {
   executionState?: Record<string, unknown> | null;
   monitorNextCheckAt?: Date | string | null;
   monitorAttemptCount?: number | null;
+  updatedAt?: Date | string | null;
 }
 
 export interface IssueLivenessRelationInput {
@@ -480,6 +491,8 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
   const agentsById = new Map(input.agents.map((agent) => [agent.id, agent]));
   const blockersByBlockedIssueId = new Map<string, IssueLivenessRelationInput[]>();
   const unresolvedBlockers = new Set<string>();
+  // Live blockers of ANY non-terminal dependent (blocked, todo, ...): not orphans.
+  const blockersWithLiveDependent = new Set<string>();
   const findings: IssueLivenessFinding[] = [];
   const activeRuns = input.activeRuns ?? [];
   const queuedWakeRequests = input.queuedWakeRequests ?? [];
@@ -501,8 +514,24 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
       blocked.companyId === relation.companyId &&
       blocker.status !== "done" &&
       blocker.status !== "cancelled" &&
+      blocked.status !== "done" &&
+      blocked.status !== "cancelled"
+    ) {
+      blockersWithLiveDependent.add(blocker.id);
+    }
+    if (
+      blocker &&
+      blocked &&
+      blocker.companyId === relation.companyId &&
+      blocked.companyId === relation.companyId &&
+      blocker.status !== "done" &&
+      blocker.status !== "cancelled" &&
       blocked.status === "blocked"
     ) {
+      // A backlog blocker recorded here is already reachable via the blocked-chain
+      // walk below (blockedFindingForLeaf), so the standalone orphan scan (which
+      // only ever looks at backlog-status issues) must skip anything in this set
+      // to avoid raising a second, duplicate escalation for the same issue.
       unresolvedBlockers.add(blocker.id);
     }
   }
@@ -710,6 +739,34 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
     return null;
   }
 
+  function isStaleAssignedBacklogIssue(issue: IssueLivenessIssueInput) {
+    const updatedAtMs = readDateMs(issue.updatedAt);
+    if (updatedAtMs === null) return false;
+    return nowMs - updatedAtMs >= ASSIGNED_BACKLOG_STALE_THRESHOLD_MS;
+  }
+
+  function staleAssignedBacklogFinding(issue: IssueLivenessIssueInput): IssueLivenessFinding {
+    const ownerCandidates = ownerCandidatesForRecoveryIssue(issue, input.agents, agentsById, {
+      includeStalledAssignee: true,
+    });
+
+    return finding({
+      issue,
+      state: "stale_assigned_backlog_issue",
+      reason:
+        `${issueLabel(issue)} has been assigned and parked in backlog with no wake, active run, ` +
+        "human owner, interaction, approval, monitor, or recovery issue owning the next action, " +
+        "and nothing else is blocked on it to otherwise surface the incident.",
+      dependencyPath: [issue],
+      recoveryIssue: issue,
+      recommendedOwnerCandidateAgentIds: ownerCandidates.map((candidate) => candidate.agentId),
+      recommendedOwnerCandidates: ownerCandidates,
+      recommendedAction:
+        `Review ${issueLabel(issue)} and either move it to todo so the assignee wakes, assign a ` +
+        "human owner or interaction if it is intentionally parked, or cancel it if the work is no longer required.",
+    });
+  }
+
   for (const issue of input.issues) {
     const hasUnresolvedBlockerEdge = (blockersByBlockedIssueId.get(issue.id) ?? []).some((relation) => {
       if (relation.companyId !== issue.companyId) return false;
@@ -733,6 +790,22 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
     if (issue.status === "in_review" && !chainFinding && !unresolvedBlockers.has(issue.id)) {
       const review = reviewFinding(issue, issue, [issue]);
       if (review) findings.push(review);
+    }
+
+    // Fleet carry (#36): an assigned backlog issue with no dependent and no
+    // live blocker chain is otherwise a black hole once stale. An issue that
+    // has unresolved blocker edges was already walked above (upstream inspects
+    // every assigned non-terminal issue's own blocker chain), so only the
+    // blocker-free orphan needs the standalone finding.
+    if (
+      issue.status === "backlog" &&
+      issue.assigneeAgentId &&
+      !shouldInspectBlockedChain &&
+      !blockersWithLiveDependent.has(issue.id) &&
+      isStaleAssignedBacklogIssue(issue) &&
+      !hasExplicitWaitingPath(issue)
+    ) {
+      findings.push(staleAssignedBacklogFinding(issue));
     }
   }
 

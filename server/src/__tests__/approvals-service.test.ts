@@ -93,6 +93,19 @@ describe("approvalService resolution idempotency", () => {
     expect(mockAgentService.terminate).not.toHaveBeenCalled();
   });
 
+  it("lets only one of two overlapping request-revision calls apply", async () => {
+    // Both read `pending`; the loser's conditional update matches no row.
+    const winner = createDbStub([[createApproval("pending")]], [createApproval("revision_requested")]);
+    const loser = createDbStub([[createApproval("pending")]], []);
+
+    await expect(approvalService(winner.db as any).requestRevision("approval-1", "board", "fix")).resolves.toMatchObject({
+      status: "revision_requested",
+    });
+    await expect(approvalService(loser.db as any).requestRevision("approval-1", "board", "fix")).rejects.toThrow(
+      /Only pending approvals can request revision/,
+    );
+  });
+
   it("still performs side effects when the resolution update is newly applied", async () => {
     const approved = createApproval("approved");
     const dbStub = createDbStub([[createApproval("pending")]], [approved]);

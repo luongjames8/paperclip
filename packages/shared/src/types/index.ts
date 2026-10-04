@@ -858,6 +858,9 @@ export type {
 export type {
   Routine,
   RoutineEnvConfig,
+  RoutineExecutionPolicy,
+  RoutineExecutionPolicyStage,
+  RoutineExecutionPolicyParticipant,
   RoutineManagedByPlugin,
   RoutineDescriptionDocument,
   RoutineVariable,
@@ -1012,6 +1015,7 @@ export type {
   CompanyPortabilityPreviewResult,
   CompanyPortabilityAdapterOverride,
   CompanyPortabilityImportRequest,
+  CompanyPortabilityImportPendingSteps,
   CompanyPortabilityImportResult,
   CompanyPortabilityExportRequest,
 } from "./company-portability.js";

@@ -1,6 +1,17 @@
 import { z } from "zod";
-import { APPROVAL_TYPES } from "../constants.js";
+import { APPROVAL_KIND_PATTERN, APPROVAL_TYPES } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
+
+// Shared by routine/issue authoring (config-carried, config/schema.ts
+// docs/agents/issue-tracker.md — never accepted as approval-creation input;
+// see createApprovalSchema below, which deliberately has no approvalKind
+// field: the server always derives it from the linked issue chain).
+export const approvalKindSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(new RegExp(APPROVAL_KIND_PATTERN), "approvalKind must be a lowercase snake_case identifier (e.g. content_batch_approval)");
 
 export const createApprovalSchema = z.object({
   type: z.enum(APPROVAL_TYPES),
@@ -13,6 +24,11 @@ export type CreateApproval = z.infer<typeof createApprovalSchema>;
 
 export const resolveApprovalSchema = z.object({
   decisionNote: multilineTextSchema.optional().nullable(),
+  // Fleet carry: optional compare-and-set on the approval's generation. When
+  // set, the resolution only applies if the row's updatedAt still matches —
+  // so an automated decision taken from a read can't land on a later
+  // resubmission of the same approval (resubmit bumps updatedAt).
+  expectedUpdatedAt: z.string().datetime({ offset: true }).optional(),
 });
 
 export type ResolveApproval = z.infer<typeof resolveApprovalSchema>;

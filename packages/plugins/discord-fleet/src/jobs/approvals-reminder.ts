@@ -1,0 +1,476 @@
+import type { Client } from "discord.js";
+import type { PluginContext } from "@paperclipai/plugin-sdk";
+import type { CompanyConfig, DiscordFleetConfig } from "../config/schema.js";
+import type { PaperclipApproval, PaperclipClient } from "../api/paperclip.js";
+import { postEmbedToChannel, postEmbedsToChannel, postToChannel } from "../discord/rest.js";
+import { buildApprovalActionRow, buildApprovalReminderEmbed } from "../render/embeds.js";
+import { truncate } from "../render/plain.js";
+import { stripSecrets } from "../render/secrets.js";
+import { matchChannelByExactKey, matchChannelByKind, matchChannelByType } from "../routing/route.js";
+import { getThreadForAncestors } from "../routing/thread-state.js";
+import {
+  resolveApprovalContent,
+  resolveApprovalGuidance,
+  postUnroutedApprovalWarning,
+  updatePendingApprovals,
+} from "../handlers/approval-created.js";
+import {
+  parsePostsBatchPayload,
+  chunkPostsBatchForDiscord,
+  renderOverflowMessages,
+  buildPartialDeliveryWarning,
+} from "../render/posts-batch.js";
+import { PaperclipApiError } from "../api/paperclip.js";
+import { safeParseMs } from "../util/safe.js";
+
+export const APPROVAL_REMINDERS_KEY = "approval-reminders";
+
+// A fresh approval already has its approval.created card; only start reminding
+// once it has sat undecided for a while.
+const REMIND_AFTER_MS = 60 * 60 * 1000;
+// Re-post at most this often per approval so the channel isn't spammed.
+const REMIND_EVERY_MS = 6 * 60 * 60 * 1000;
+
+const CONTENT_CHUNK_MAX = 1900;
+
+function chunkBySection(text: string): string[] {
+  const raw = text.split(/(?=^## )/m).filter((s) => s.trim());
+  const chunks: string[] = [];
+  for (const section of raw) {
+    if (section.length <= CONTENT_CHUNK_MAX) {
+      chunks.push(section);
+    } else {
+      let remaining = section;
+      while (remaining.length > CONTENT_CHUNK_MAX) {
+        const cut = remaining.lastIndexOf("\n\n", CONTENT_CHUNK_MAX);
+        const end = cut > 0 ? cut : CONTENT_CHUNK_MAX;
+        chunks.push(remaining.slice(0, end));
+        remaining = remaining.slice(end).trimStart();
+      }
+      if (remaining) chunks.push(remaining);
+    }
+  }
+  return chunks;
+}
+
+/**
+ * Re-surface pending approvals until they are decided.
+ *
+ * The approval.created card is a one-shot message that scrolls away in busy
+ * channels (and historically could be lost entirely). This job treats the
+ * Paperclip API — not plugin state — as the source of truth for what is
+ * pending, and keeps re-posting actionable cards (with working buttons) on an
+ * interval until the operator decides. Decided approvals are pruned from the
+ * reminder state automatically.
+ *
+ * CHANGE 2: If `fleetConfig.approvalExpiry` has rules for this company, any
+ * pending approval whose title matches a rule's `titleRegex` and whose age
+ * exceeds `maxAgeHours` is auto-rejected before the reminder is posted. Expired
+ * approvals are NOT re-posted as reminders in the same sweep.
+ */
+export async function runApprovalsReminder(
+  ctx: PluginContext,
+  companyId: string,
+  client: Client,
+  config: CompanyConfig,
+  fleetConfig: DiscordFleetConfig,
+  paperclip: PaperclipClient,
+  now = new Date(),
+): Promise<void> {
+  let pending;
+  try {
+    pending = await paperclip.getPendingApprovals(companyId);
+  } catch (err) {
+    ctx.logger.warn("approvals-reminder: failed to list pending approvals", {
+      companyId,
+      error: String(err),
+    });
+    return;
+  }
+
+  const nowMs = now.getTime();
+  const stateKey = { scopeKind: "company" as const, scopeId: companyId, stateKey: APPROVAL_REMINDERS_KEY };
+  const reminders = ((await ctx.state.get(stateKey)) as Record<string, string> | null) ?? {};
+
+  // Prune decided approvals so reminder state cannot grow unbounded.
+  const pendingIds = new Set(pending.map((a) => a.id));
+  for (const id of Object.keys(reminders)) {
+    if (!pendingIds.has(id)) delete reminders[id];
+  }
+
+  // Auto-expiry rules for this company (CHANGE 2).
+  const expiryRules = fleetConfig.approvalExpiry?.[companyId] ?? [];
+
+  // Expiry eligibility + age, derived from ONE record. Run on the listed
+  // snapshot as a cheap pre-filter, then again on the fresh record before the
+  // irreversible reject (the snapshot can be a stale generation).
+  const assess = (a: PaperclipApproval) => {
+    // Age from the LATEST activity, not creation: the request-changes cycle
+    // resubmits the SAME approval row (server refreshes updatedAt, keeps
+    // createdAt) — a card the editor just resubmitted after operator feedback
+    // must not be instantly auto-expired for being "old", nor nagged as stale.
+    const freshMs = safeParseMs(a.updatedAt) ?? safeParseMs(a.createdAt);
+    if (freshMs === null) return null;
+    // Clamp future timestamps (clock skew / bogus server value) to age 0: the
+    // approval is treated as just-active — reminded after the normal window,
+    // never permanently suppressed and never instantly expired.
+    const ageMs = Math.max(0, nowMs - freshMs);
+    const ageHours = Math.floor(ageMs / 3_600_000);
+    const titleRaw = a.payload?.title;
+    const title = typeof titleRaw === "string" ? titleRaw : "";
+    // Regexes are compiled+screened at config load (validateConfig). Bound the
+    // tested input so even a pathological pattern cannot blow up backtracking
+    // on an adversarially long title.
+    const boundedTitle = title.slice(0, 512);
+    const matchedExpiry = expiryRules.find((rule) => {
+      try {
+        return new RegExp(rule.titleRegex).test(boundedTitle);
+      } catch {
+        return false;
+      }
+    });
+    const expired = matchedExpiry !== undefined && ageHours >= matchedExpiry.maxAgeHours;
+    return { ageMs, ageHours, title, matchedExpiry, expired };
+  };
+
+  for (let approval of pending) {
+    try {
+    let assessed = assess(approval);
+    if (!assessed) continue;
+
+    // CHANGE 2: check auto-expiry rules before posting a reminder.
+    if (assessed.expired) {
+      // FAIL-CLOSED TOCTOU GUARD: a human may have decided this approval
+      // between the pending-list fetch and now. Re-check immediately before the
+      // irreversible reject; if the re-fetch fails or shows anything but
+      // "pending", DO NOT reject (auto-expiry must never override a human).
+      // A request-changes + resubmit cycle in that window shows "pending"
+      // again, so eligibility is recomputed from the FRESH record, and the
+      // reject is conditional on its generation (expectedUpdatedAt).
+      let freshPending = false;
+      try {
+        const fresh = await paperclip.getApprovalById(approval.id);
+        if (fresh && fresh.status !== "pending") {
+          // Decided while we were sweeping — nothing to remind either.
+          continue;
+        }
+        if (fresh) {
+          const reassessed = assess(fresh);
+          if (!reassessed) continue;
+          approval = fresh;
+          assessed = reassessed;
+          freshPending = true;
+        }
+      } catch (err) {
+        ctx.logger.warn("approvals-reminder: pre-expiry re-fetch failed — skipping expiry this sweep (fail closed)", {
+          approvalId: approval.id,
+          error: String(err),
+        });
+      }
+      let rejectSucceeded = false;
+      const { matchedExpiry } = assessed;
+      // No updatedAt = no generation to pin the reject to: fail closed.
+      if (freshPending && matchedExpiry && assessed.expired && approval.updatedAt) {
+        const decisionNote = `expired — time-sensitive card aged out (auto-expiry after ${matchedExpiry.maxAgeHours}h)`;
+        try {
+          await paperclip.rejectApproval(approval.id, decisionNote, approval.updatedAt);
+          rejectSucceeded = true;
+          ctx.logger.info("approvals-reminder: auto-expired approval", {
+            approvalId: approval.id,
+            ageHours: assessed.ageHours,
+            maxAgeHours: matchedExpiry.maxAgeHours,
+            titleRegex: matchedExpiry.titleRegex,
+          });
+        } catch (err) {
+          // Already decided, or resubmitted since our read (race lost to a
+          // human) — human decision stands; skip this sweep. The server answers
+          // a stale transition / generation with 422 (resolveApproval's
+          // unprocessable); 409 kept for older servers.
+          if (err instanceof PaperclipApiError && (err.status === 409 || err.status === 422)) {
+            ctx.logger.info("approvals-reminder: expiry skipped — approval already decided", { approvalId: approval.id, status: err.status });
+            continue;
+          }
+          // 403 = not a board key; log clearly as instructed. Fall through so
+          // the normal reminder is still posted and the card does not go
+          // permanently silent.
+          ctx.logger.warn("approvals-reminder: auto-expiry reject failed (403 = not a board key?)", {
+            approvalId: approval.id,
+            error: String(err),
+          });
+        }
+      }
+      if (rejectSucceeded) {
+        // Keep the daily digest coherent: drop the expired approval from the
+        // shared PENDING list the same way the button handler does on decide.
+        try {
+          await updatePendingApprovals(ctx, companyId, (ids) => ids.filter((id) => id !== approval.id));
+        } catch (err) {
+          ctx.logger.warn("approvals-reminder: failed to prune expired approval from pending list", {
+            approvalId: approval.id,
+            error: String(err),
+          });
+        }
+        // Expiry reject succeeded; do NOT post a reminder in this sweep.
+        continue;
+      }
+    }
+
+    const { ageMs, ageHours, title } = assessed;
+    if (ageMs < REMIND_AFTER_MS) continue;
+
+    // safeParseMs: a corrupted stored timestamp becomes null ("never reminded")
+    // instead of NaN silently bypassing the throttle and spamming every sweep.
+    const lastReminded = safeParseMs(reminders[approval.id]);
+    if (lastReminded !== null && nowMs - lastReminded < REMIND_EVERY_MS) continue;
+
+    const url = `${config.paperclipApiUrl}/${config.companyPrefix}/approvals/${approval.id}`;
+    // Mirror handleApprovalCreated's routing tiers exactly (fleet issue #687)
+    // so a reminder never lands somewhere different from the original card:
+    // approvalKind exact map, then the legacy approvalsChannelsByType ladder
+    // (deprecated but still tried for companies that haven't migrated), then
+    // the linked issue's work thread, then the per-company fallback/orphan
+    // channel. This job reads the FULL approval record, so approval.approvalKind
+    // is directly available (no event-payload round trip needed).
+    const kindDestinationChannelId = matchChannelByKind(fleetConfig.approvalKindChannels, companyId, approval.approvalKind ?? "");
+    // Candidates mirror the handler too (codex P2, PR #26): the stable
+    // payload.approvalType discriminator first — this job reads the FULL
+    // approval record, so the field is directly available — then the
+    // LLM-authored title. Without this, a discriminator-routed card's
+    // REMINDER would fall to the work thread/fallback while the original
+    // card sat in the right channel.
+    const reminderRoutingKeyRaw = approval.payload?.approvalType;
+    const reminderRoutingKey =
+      typeof reminderRoutingKeyRaw === "string" ? reminderRoutingKeyRaw : "";
+    // Candidate-major, mirroring handleApprovalCreated: discriminator across
+    // the whole table first, title only as a separate second pass — so config
+    // row ordering can never let a broad title rule steal a keyed card.
+    let destinationChannelId =
+      kindDestinationChannelId ??
+      matchChannelByExactKey(fleetConfig.approvalsChannelsByType?.[companyId], reminderRoutingKey) ??
+      matchChannelByType(fleetConfig.approvalsChannelsByType?.[companyId], [title]);
+    // True only when neither the kind map, the legacy ladder, nor co-location
+    // resolves a destination below — mirrors handleApprovalCreated's
+    // `unrouted` (fleet issue #687). Reminders are the backstop for a card the
+    // operator missed, so a silent reminder-time fallback defeats the whole
+    // "silent fallback abolished" guarantee just as badly as a silent
+    // original card would.
+    let unrouted = false;
+    if (!destinationChannelId) {
+      try {
+        const issues = await paperclip.getApprovalIssues(approval.id);
+        const thread = issues.length
+          ? await getThreadForAncestors(ctx, companyId, issues.map((i) => i.id))
+          : null;
+        destinationChannelId = thread?.threadId ?? null;
+      } catch (err) {
+        ctx.logger.warn("approvals-reminder: work-thread lookup failed, using fallback channel", {
+          approvalId: approval.id,
+          error: String(err),
+        });
+      }
+      if (!destinationChannelId) unrouted = true;
+    }
+    destinationChannelId ??= config.approvalFallbackChannelId ?? config.channels.orphan;
+    if (unrouted) {
+      ctx.logger.warn("approvals-reminder: unrouted — no approvalKind/legacy match and no co-locatable thread, delivering reminder to fallback channel", {
+        approvalId: approval.id,
+        companyId,
+        approvalKind: approval.approvalKind ?? null,
+        destinationChannelId,
+      });
+    }
+
+    const embed = buildApprovalReminderEmbed({
+      approvalId: approval.id,
+      approvalType: approval.type,
+      title: title || undefined,
+      issueUrl: url,
+      ageHours,
+      now,
+    });
+    const actionRow = buildApprovalActionRow({ approvalId: approval.id, issueUrl: url });
+
+    try {
+      const messageId = await postEmbedToChannel(client, destinationChannelId, embed, [actionRow]);
+      reminders[approval.id] = now.toISOString();
+      // Persist per-post (not only at the end of the loop): a crash mid-run
+      // must not forget which approvals were already reminded, or the next run
+      // re-posts every one of them.
+      await ctx.state.set(stateKey, { ...reminders });
+      ctx.logger.info("approvals-reminder: re-posted pending approval", {
+        approvalId: approval.id,
+        destinationChannelId,
+        messageId,
+        ageHours,
+      });
+      if (unrouted) {
+        await postUnroutedApprovalWarning(ctx, client, destinationChannelId, approval.approvalKind ?? "", {
+          source: "approvals-reminder",
+          approvalId: approval.id,
+        });
+      }
+    } catch (err) {
+      // Not marked reminded — the next run retries, which is the whole point.
+      ctx.logger.warn("approvals-reminder: failed to post reminder", {
+        approvalId: approval.id,
+        destinationChannelId,
+        error: String(err),
+      });
+      continue;
+    }
+
+    // CHANGE 1 (reminder path): also post the reviewable content so old blank
+    // cards become readable on the next reminder cycle.
+    // approval.payload is typed as { title?: string } | null but runtime shape
+    // is z.record(z.unknown()) — index as unknown to satisfy the string guard.
+    const approvalPayloadUnknown = approval.payload as Record<string, unknown> | null | undefined;
+    // Full payload, not a hand-picked subset — the resolver's header fields
+    // (summary/recommendedAction/risks) and render-everything backstop only
+    // work if they SEE the payload (2026-07-04: content in payload.note was
+    // invisible here because only three fields were forwarded).
+    let reviewableContent = resolveApprovalContent(approvalPayloadUnknown ?? {});
+    // postsBatch structured render (GH #501) — mirrors handleApprovalCreated's
+    // detection: same contract, same degrade-to-plaintext-on-miss semantics.
+    const postsBatch = parsePostsBatchPayload(approvalPayloadUnknown?.postsBatch);
+    // postsBatchGuidance (codex P2): summary/recommendedAction/risks — the
+    // structured embeds only carry per-post fields, so without this,
+    // guidance set alongside postsBatch would disappear from the reminder.
+    // approval.payload is already the FULL stored payload (unlike
+    // handleApprovalCreated's partial event), so no separate fetch needed.
+    const postsBatchGuidance = resolveApprovalGuidance(approvalPayloadUnknown ?? {});
+    // Issue-digest fallback — same agent-independent floor as approval-created:
+    // the linked issue's comment trail is runtime-guaranteed; compose from it
+    // when the payload yields nothing.
+    if (!reviewableContent) {
+      try {
+        const linked = await paperclip.getApprovalIssues(approval.id);
+        const primary = linked[0];
+        if (primary) {
+          const comments = await paperclip.listIssueComments(primary.id);
+          // Newest-first API default (codex P2) — sort, newest 3, display oldest→newest.
+          const latest = comments
+            .filter((c) => typeof c.body === "string" && c.body.trim())
+            .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")))
+            .slice(-3);
+          const issueUrl = `${config.paperclipApiUrl}/${config.companyPrefix}/issues/${primary.identifier}`;
+          reviewableContent = [
+            `**${primary.identifier ?? primary.id} — ${primary.title ?? "linked issue"}** (${primary.status ?? "?"})`,
+            ...latest.map((c) => truncate((c.body as string).trim(), 900)),
+            `Full history: ${issueUrl}`,
+          ].join("\n\n");
+          ctx.logger.info("approvals-reminder: content derived from linked-issue digest", {
+            approvalId: approval.id,
+            issueId: primary.id,
+          });
+        }
+      } catch (err) {
+        ctx.logger.warn("approvals-reminder: linked-issue digest failed; reminder is header-only", {
+          approvalId: approval.id,
+          error: String(err),
+        });
+      }
+    }
+    // DELIVERY-COMPLETENESS (codex P2, round 6) — mirrors handleApprovalCreated's
+    // fix exactly (see that function's comment for the full rationale): PER-UNIT
+    // tracking (deliveredSlugs/missingSlugs) instead of one boolean that a
+    // single successful group could flip true while later groups silently
+    // failed. Any residual failure after one retry is always surfaced via an
+    // unsuppressable partial-delivery warning naming exactly what's missing.
+    const deliveredSlugs = new Set<string>();
+    const missingSlugs: string[] = [];
+    const postSendWithRetry = async (send: () => Promise<unknown>, label: string, logFields: Record<string, unknown>): Promise<boolean> => {
+      try {
+        await send();
+        return true;
+      } catch (err) {
+        ctx.logger.warn(`approvals-reminder: ${label} post failed; retrying once`, { ...logFields, error: String(err) });
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          await send();
+          return true;
+        } catch (err2) {
+          ctx.logger.warn(`approvals-reminder: ${label} post failed after retry`, { ...logFields, error: String(err2) });
+          return false;
+        }
+      }
+    };
+    if (postsBatch) {
+      // Guidance posts BEFORE the per-post embeds, regardless of whether the
+      // embeds themselves succeed below (codex P2 — see handleApprovalCreated).
+      // Routed through postSendWithRetry + missingSlugs (DELIVERY-COMPLETENESS,
+      // round 6 — see handleApprovalCreated's comment for the full rationale).
+      if (postsBatchGuidance) {
+        const ok = await postSendWithRetry(
+          () => postToChannel(client, destinationChannelId, truncate(stripSecrets(postsBatchGuidance), CONTENT_CHUNK_MAX)),
+          "postsBatch guidance",
+          { approvalId: approval.id, destinationChannelId },
+        );
+        if (!ok) missingSlugs.push("guidance (summary/recommendedAction/risks)");
+      }
+      const { groups, overflow } = chunkPostsBatchForDiscord(postsBatch);
+      for (const group of groups) {
+        const ok = await postSendWithRetry(
+          () => postEmbedsToChannel(client, destinationChannelId, group.embeds),
+          "postsBatch embed group",
+          { approvalId: approval.id, destinationChannelId, slugs: group.slugs },
+        );
+        if (ok) for (const slug of group.slugs) deliveredSlugs.add(slug);
+        else missingSlugs.push(...group.slugs);
+      }
+      // Platform copy longer than Discord's 1024-char embed field limit
+      // (codex P2) — post the FULL text as a plaintext follow-up (mirrors
+      // handleApprovalCreated). renderOverflowMessages reserves header budget
+      // BEFORE chunking (codex P2, round 2) — see that function's doc.
+      for (const item of overflow) {
+        const messages = renderOverflowMessages(item, CONTENT_CHUNK_MAX);
+        for (let i = 0; i < messages.length; i++) {
+          const message = messages[i];
+          const label = `postsBatch platform-copy overflow (${item.itemSlug}/${item.platformLabel} ${i + 1}/${messages.length})`;
+          const ok = await postSendWithRetry(
+            () => postToChannel(client, destinationChannelId, stripSecrets(message)),
+            label,
+            { approvalId: approval.id, destinationChannelId, itemSlug: item.itemSlug, platformLabel: item.platformLabel },
+          );
+          if (!ok) missingSlugs.push(`${item.itemSlug} (${item.platformLabel} full text ${i + 1}/${messages.length})`);
+        }
+      }
+      // Unsuppressable: posts on ANY residual failure, regardless of how many
+      // groups/overflow messages succeeded around it.
+      if (missingSlugs.length > 0) {
+        try {
+          await postToChannel(client, destinationChannelId, buildPartialDeliveryWarning(missingSlugs, url));
+        } catch (err) {
+          ctx.logger.error("approvals-reminder: partial-delivery warning post failed — reminder may look complete but is missing content", {
+            approvalId: approval.id,
+            destinationChannelId,
+            missingSlugs,
+            error: String(err),
+          });
+        }
+      }
+    }
+    const postsBatchDelivered = deliveredSlugs.size > 0;
+    if (!postsBatchDelivered && reviewableContent) {
+      const chunks = chunkBySection(stripSecrets(reviewableContent));
+      for (const chunk of chunks) {
+        try {
+          await postToChannel(client, destinationChannelId, truncate(chunk, CONTENT_CHUNK_MAX));
+        } catch (err) {
+          ctx.logger.warn("approvals-reminder: content chunk post failed", {
+            approvalId: approval.id,
+            destinationChannelId,
+            error: String(err),
+          });
+        }
+      }
+    }
+    } catch (err) {
+      ctx.logger.warn("approvals-reminder: unexpected error processing approval; skipping", {
+        approvalId: approval.id,
+        error: String(err),
+      });
+    }
+  }
+
+  await ctx.state.set(stateKey, reminders);
+}

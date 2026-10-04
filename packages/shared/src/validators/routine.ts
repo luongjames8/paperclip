@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  ISSUE_EXECUTION_POLICY_MODES,
   ISSUE_PRIORITIES,
   ROUTINE_ACTIVITY_GATE_POLICIES,
   ROUTINE_ACTIVITY_GATE_SCOPES,
@@ -12,8 +13,10 @@ import {
 } from "../constants.js";
 import {
   ISSUE_EXECUTION_WORKSPACE_PREFERENCES,
+  issueExecutionStageSchema,
   issueExecutionWorkspaceSettingsSchema,
 } from "./issue.js";
+import { approvalKindSchema } from "./approval.js";
 import { envConfigSchema } from "./secret.js";
 import { isValidRoutineDateString } from "../routine-variables.js";
 import { objectWithoutDefaults } from "./partial.js";
@@ -62,6 +65,31 @@ export const routineVariableSchema = z.object({
   }
 });
 
+// Routine-level execution policy template, stamped onto every execution issue the
+// routine spawns. Deliberately narrower than issueExecutionPolicySchema: stages+mode
+// only, and .strict() so monitor/reviewPreset/authorizationPolicy (per-issue runtime
+// state, not template config) are rejected rather than silently carried.
+export const routineExecutionPolicySchema = z.object({
+  mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional().default("normal"),
+  stages: z.array(
+    issueExecutionStageSchema.refine(
+      (stage) => stage.participants.length > 0,
+      { message: "Each execution policy stage needs at least one participant" },
+    ),
+  ).min(1)
+    // Per-issue stage state tracks completedStageIds by id: two stages sharing a
+    // caller-supplied id would both be marked complete when one approves,
+    // silently skipping the other's gate.
+    .refine(
+      (stages) => {
+        const ids = stages.map((stage) => stage.id).filter((id): id is string => Boolean(id));
+        return new Set(ids).size === ids.length;
+      },
+      { message: "Execution policy stage ids must be unique" },
+    ),
+}).strict();
+export type RoutineExecutionPolicyInput = z.infer<typeof routineExecutionPolicySchema>;
+
 export const createRoutineSchema = z.object({
   projectId: z.string().guid().optional().nullable(),
   folderId: z.string().guid().optional().nullable(),
@@ -78,6 +106,12 @@ export const createRoutineSchema = z.object({
   activityGateScope: z.enum(ROUTINE_ACTIVITY_GATE_SCOPES).optional(),
   variables: z.array(routineVariableSchema).optional().default([]),
   env: envConfigSchema.optional().nullable(),
+  executionPolicy: routineExecutionPolicySchema.optional().nullable(),
+  // Config-carried approval routing tag, stamped onto every execution issue the
+  // routine spawns (and inherited down that issue's subissue chain) — see
+  // approvalKindSchema. Board-governed the same way executionPolicy is: an
+  // agent actor may never set/change this (routes/routines.ts, services/routines.ts).
+  approvalKind: approvalKindSchema.optional().nullable(),
 });
 
 export type CreateRoutine = z.infer<typeof createRoutineSchema>;
@@ -105,6 +139,8 @@ export const routineRevisionSnapshotRoutineV1Schema = z.object({
   activityGateScope: z.enum(ROUTINE_ACTIVITY_GATE_SCOPES).default("company"),
   variables: z.array(routineVariableSchema),
   env: envConfigSchema.nullable().default(null),
+  executionPolicy: routineExecutionPolicySchema.nullable().default(null),
+  approvalKind: approvalKindSchema.nullable().default(null),
   responsibleUserId: z.string().nullable().default(null),
 }).strict();
 

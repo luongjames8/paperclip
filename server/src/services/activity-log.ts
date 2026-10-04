@@ -10,6 +10,7 @@ import { sanitizeRecord } from "../redaction.js";
 import { logger } from "../middleware/logger.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { resolveVerifiedRunId } from "./run-id-trust.js";
 
 const PLUGIN_EVENT_SET: ReadonlySet<string> = new Set(PLUGIN_EVENT_TYPES);
 const ACTIVITY_ACTION_TO_PLUGIN_EVENT: Readonly<Record<string, PluginEventType>> = {
@@ -160,6 +161,14 @@ export function publishActivity(publication: ActivityPublication) {
 export async function persistActivity(db: Db, input: LogActivityInput) {
   const redactedDetails = await redactActivityDetails(db, input.details ?? null);
   const responsibleUserId = await resolveResponsibleUserIdForActivity(db, input);
+  // Fleet carry (2026-07-11 live incident): runId comes straight from the
+  // caller-supplied X-Paperclip-Run-Id header. activity_log.run_id is a uuid
+  // column AND a foreign key into heartbeat_runs, so a malformed or stale value
+  // 500s the ENTIRE mutation this row records. Drop it to null instead.
+  const safeRunId = await resolveVerifiedRunId(db, input.runId);
+  if (input.runId && !safeRunId) {
+    logger.warn({ runId: input.runId, action: input.action }, "logActivity: runId is not a valid/known heartbeat run — dropping to null instead of crashing the mutation");
+  }
   const [activity] = await db.insert(activityLog).values({
     companyId: input.companyId,
     actorType: input.actorType,
@@ -168,7 +177,7 @@ export async function persistActivity(db: Db, input: LogActivityInput) {
     entityType: input.entityType,
     entityId: input.entityId,
     agentId: input.agentId ?? null,
-    runId: input.runId ?? null,
+    runId: safeRunId,
     responsibleUserId,
     details: redactedDetails,
   }).returning({ id: activityLog.id });
@@ -180,7 +189,7 @@ export async function persistActivity(db: Db, input: LogActivityInput) {
     entityType: input.entityType,
     entityId: input.entityId,
     agentId: input.agentId ?? null,
-    runId: input.runId ?? null,
+    runId: safeRunId,
     responsibleUserId,
     details: redactedDetails,
   };
@@ -197,8 +206,9 @@ export async function persistActivity(db: Db, input: LogActivityInput) {
         companyId: input.companyId,
         payload: {
           ...redactedDetails,
+          activityAction: input.action,
           agentId: input.agentId ?? null,
-          runId: input.runId ?? null,
+          runId: safeRunId,
           responsibleUserId,
         },
       }

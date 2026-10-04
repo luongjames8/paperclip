@@ -1,0 +1,408 @@
+{
+  "weekOf": "2026-05-11",
+  "gbp": {
+    "variant": "layover",
+    "url": "https://hinomaru.one/private-tours/layover-tour",
+    "mainImage": "https://hinomaru.one/images/layover-tour-hero.webp",
+    "publicationDate": "2026-05-11T00:00:00",
+    "timezone": "Asia/Taipei",
+    "text": "Flying through Tokyo? Turn a long layover into a mini-adventure. Our 6-hour private tour picks you up from Haneda or Narita, shows you the highlights, and gets you back in time for your connection. No stress, no navigating trains—just a local guide who knows exactly how to maximize your time.\n\n→ https://hinomaru.one/private-tours/layover-tour"
+  },
+  "posts": [
+    {
+      "slot": {
+        "day": "Mon",
+        "publicationDate": "2026-05-11T12:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "roppongi",
+      "url": "https://hinomaru.one/tokyo-travel-guide/roppongi",
+      "mainImage": "https://hinomaru.one/images/be40704ca83c.jpg",
+      "platforms": {
+        "threads": {
+          "main": "Most people know Roppongi for its nightlife and art museums. Fewer know that a US Army heliport still operates in the middle of it all.\n\nThe Akasaka Press Center, tucked between Roppongi Hills and Aoyama Park, has been there since 1945. Helicopters fly low over one of Tokyo's priciest neighborhoods—and there's nothing residents can do about it.\n\nIt's a strange piece of postwar history hiding in plain sight.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/roppongi"
+          ]
+        },
+        "x": {
+          "main": "Roppongi's nightlife is famous. Less famous: the US Army heliport still operating in the middle of it all. 🚁\n\nSince 1945, the Akasaka Press Center has occupied prime Tokyo real estate. Helicopters fly over Roppongi Hills regularly.",
+          "descendants": [
+            "1. Locals have protested for decades",
+            "2. It's Tokyo's only US military base in the 23 wards",
+            "3. See what else is nearby → https://hinomaru.one/tokyo-travel-guide/roppongi"
+          ]
+        },
+        "facebook": {
+          "text": "Roppongi is famous for art museums, skyscrapers, and nightlife. But tucked between Roppongi Hills and Aoyama Park sits something unexpected: a US Army heliport that's been there since 1945.\n\nThe Akasaka Press Center is Tokyo's only US military base inside the 23 wards. Helicopters regularly fly over one of the city's most expensive neighborhoods—a strange reminder of postwar history that's still visible today.",
+          "media": [
+            "https://hinomaru.one/images/be40704ca83c.jpg"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Tue",
+        "publicationDate": "2026-05-12T00:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "kiyosumi-shirakawa",
+      "url": "https://hinomaru.one/tokyo-travel-guide/kiyosumi-shirakawa",
+      "mainImage": "https://hinomaru.one/images/kiyosumi-shirakawa-tokyo.webp",
+      "platforms": {
+        "threads": {
+          "main": "Blue Bottle could have opened its first Japan location anywhere. Shibuya. Harajuku. Roppongi.\n\nInstead, they picked a quiet warehouse district east of the Sumida River. Kiyosumi-Shirakawa had no major transit hub, no shopping crowds—just old buildings, wide streets, and light.\n\nThat was 2015. Now the neighborhood is synonymous with specialty coffee in Tokyo.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/kiyosumi-shirakawa"
+          ]
+        },
+        "x": {
+          "main": "Blue Bottle's first Japan location wasn't in Shibuya or Harajuku.\n\nIt was in Kiyosumi-Shirakawa—a quiet warehouse district east of the Sumida River. Old buildings, wide streets, great light.\n\nThat 2015 choice transformed the neighborhood into Tokyo's specialty coffee capital.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/kiyosumi-shirakawa"
+          ]
+        },
+        "facebook": {
+          "text": "When Blue Bottle Coffee opened its first Japan location, they skipped the obvious choices. No Shibuya, no Harajuku, no Roppongi.\n\nInstead, they chose Kiyosumi-Shirakawa—a quiet warehouse district east of the Sumida River with old buildings, wide streets, and beautiful natural light. That 2015 decision helped transform the area into Tokyo's specialty coffee destination.",
+          "media": [
+            "https://hinomaru.one/images/kiyosumi-shirakawa-tokyo.webp"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Tue",
+        "publicationDate": "2026-05-12T12:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "neighborhoods",
+      "url": "https://hinomaru.one/tokyo-travel-guide/neighborhoods",
+      "mainImage": "https://hinomaru.one/images/691fd0efff60.jpg",
+      "platforms": {
+        "threads": {
+          "main": "Shinjuku Station isn't just busy. It holds the Guinness World Record for busiest train station on Earth.\n\n2.7 to 3.6 million passengers pass through every single day. That's more people than the entire population of Chicago—every 24 hours.\n\nOver 200 exits. 51 platforms. If you feel lost, you're not alone.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/neighborhoods"
+          ]
+        },
+        "x": {
+          "main": "Shinjuku Station: 2.7–3.6 million passengers per day. 🚉\n\nThat's the entire population of Chicago passing through one station every 24 hours.",
+          "descendants": [
+            "1. Guinness World Record holder",
+            "2. 200+ exits",
+            "3. 51 platforms across multiple lines",
+            "→ https://hinomaru.one/tokyo-travel-guide/neighborhoods"
+          ]
+        },
+        "facebook": {
+          "text": "Shinjuku Station holds a Guinness World Record—but probably not one you'd want to navigate during rush hour.\n\nBetween 2.7 and 3.6 million passengers pass through daily. That's more people than the entire population of Chicago moving through a single station complex every 24 hours. With over 200 exits and 51 platforms, getting lost is practically guaranteed.",
+          "media": [
+            "https://hinomaru.one/images/691fd0efff60.jpg"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Wed",
+        "publicationDate": "2026-05-13T00:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "ochanomizu",
+      "url": "https://hinomaru.one/tokyo-travel-guide/ochanomizu",
+      "mainImage": "https://hinomaru.one/images/ochanomizu-tokyo-hero.webp",
+      "platforms": {
+        "threads": {
+          "main": "Ochanomizu means \"tea water.\" The name comes from a well that once supplied tea water for the shogun's family during the Edo period.\n\nToday the neighborhood is known for musical instrument shops, sports gear, and Kanda Myojin Shrine perched above the train tracks.\n\nThe well is long gone, but the name remains.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/ochanomizu"
+          ]
+        },
+        "x": {
+          "main": "Ochanomizu literally means \"tea water.\"\n\nDuring the Edo period, a well here supplied water for the shogun's tea ceremonies. The well is gone, but the name stuck.\n\nToday: instrument shops, sports stores, and a shrine overlooking the tracks.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/ochanomizu"
+          ]
+        },
+        "facebook": {
+          "text": "Ochanomizu's name has a poetic origin. During the Edo period, a well in the area supplied water for the shogun's tea ceremonies—hence \"tea water\" (ocha-no-mizu).\n\nThe well is long gone, but the neighborhood has found new identities: rows of musical instrument shops, sports equipment stores, and Kanda Myojin Shrine perched above the train tracks.",
+          "media": [
+            "https://hinomaru.one/images/ochanomizu-tokyo-hero.webp"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Wed",
+        "publicationDate": "2026-05-13T12:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "hiroo",
+      "url": "https://hinomaru.one/tokyo-travel-guide/hiroo",
+      "mainImage": "https://hinomaru.one/images/hiroo-tokyo.webp",
+      "platforms": {
+        "threads": {
+          "main": "Hiroo is what happens when a neighborhood avoids the spotlight.\n\nTwo stops from Roppongi on the Hibiya Line. Walking distance to Ebisu and Hiroo Garden Hills. But somehow it stays quiet—tree-lined streets, small restaurants, no tourist crowds.\n\nIf Roppongi is the party, Hiroo is the morning-after coffee.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/hiroo"
+          ]
+        },
+        "x": {
+          "main": "Hiroo is two stops from Roppongi. Walking distance to Ebisu.\n\nYet somehow it stays quiet. Tree-lined streets, small restaurants, almost no tourists.\n\nIf Roppongi is the party, Hiroo is the calm after.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/hiroo"
+          ]
+        },
+        "facebook": {
+          "text": "Hiroo has a strange advantage: it's close to everything, yet somehow stays under the radar.\n\nTwo stops from Roppongi on the Hibiya Line. Walking distance to Ebisu and Hiroo Garden Hills. But instead of crowds and noise, you get tree-lined streets, low-key restaurants, and an almost residential calm. It's central Tokyo without the chaos.",
+          "media": [
+            "https://hinomaru.one/images/hiroo-tokyo.webp"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Thu",
+        "publicationDate": "2026-05-14T00:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "nakano-broadway-guide",
+      "url": "https://hinomaru.one/tokyo-travel-guide/nakano-broadway-guide",
+      "mainImage": "https://hinomaru.one/images/aa3da52ae0bc.webp",
+      "platforms": {
+        "threads": {
+          "main": "In 2018, the Tokyo Metropolitan Government added Nakano Broadway to its list of buildings at high risk of collapse during a strong earthquake.\n\nBuilt in 1966 under older seismic standards, the building is now over 50 years old. Complex ownership makes renovations difficult.\n\nMandarake and the otaku shops remain—for now.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/nakano-broadway-guide"
+          ]
+        },
+        "x": {
+          "main": "Nakano Broadway: a otaku paradise with a problem.\n\nIn 2018, Tokyo flagged it as at-risk for collapse during a major earthquake. Built in 1966, pre-modern seismic codes.\n\nComplex ownership makes retrofitting difficult. The future is uncertain.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/nakano-broadway-guide"
+          ]
+        },
+        "facebook": {
+          "text": "Nakano Broadway has been an otaku destination since the 1980s. But in 2018, the Tokyo Metropolitan Government added it to a list of buildings at high risk of collapse during a major earthquake.\n\nBuilt in 1966 under older seismic standards, the building's complex ownership structure makes major renovations difficult. For now, Mandarake and hundreds of shops remain—but the long-term future is unclear.",
+          "media": [
+            "https://hinomaru.one/images/aa3da52ae0bc.webp"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Thu",
+        "publicationDate": "2026-05-14T12:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "ikebukuro",
+      "url": "https://hinomaru.one/tokyo-travel-guide/ikebukuro",
+      "mainImage": "https://hinomaru.one/images/8aff044b3545.jpg",
+      "platforms": {
+        "threads": {
+          "main": "Ikebukuro Station has two major department stores attached—and they're owned by rival railway companies.\n\nSeibu runs from the East Exit. Tobu from the West. For decades, they've competed for passengers, shoppers, and dominance.\n\nIf you exit on the wrong side, you might end up at the wrong mall.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/ikebukuro"
+          ]
+        },
+        "x": {
+          "main": "Ikebukuro Station has two department stores. Owned by rival railways.\n\nSeibu: East Exit. Tobu: West Exit.\n\nExit on the wrong side and you're at the wrong mall. A decades-old rivalry built into the station itself.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/ikebukuro"
+          ]
+        },
+        "facebook": {
+          "text": "Ikebukuro Station is built around a rivalry. Two major department stores, each owned by a different railway company. Seibu operates from the East Exit. Tobu dominates the West.\n\nFor decades, they've competed for passengers and shoppers. Exit on the wrong side and you'll find yourself at the \"wrong\" mall—a mistake that's easy to make in one of Tokyo's busiest stations.",
+          "media": [
+            "https://hinomaru.one/images/8aff044b3545.jpg"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Fri",
+        "publicationDate": "2026-05-15T00:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "nightlife",
+      "url": "https://hinomaru.one/tokyo-travel-guide/nightlife",
+      "mainImage": "https://hinomaru.one/images/57525a1320e8.webp",
+      "platforms": {
+        "threads": {
+          "main": "Golden Gai looks like a free discovery. Tiny bars, narrow alleys, local atmosphere.\n\nBut most bars here charge a cover charge—often ¥500–¥1000—on top of your drinks. Some locals consider it a tourist tax.\n\nStill worth it for the atmosphere. But don't walk in expecting a regular Shinjuku bar.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/nightlife"
+          ]
+        },
+        "x": {
+          "main": "Golden Gai: tiny bars, narrow alleys, authentic atmosphere.\n\nBut most bars charge cover. ¥500–¥1000 on top of drinks.\n\nSome call it a tourist tax. Still worth it—but walk in knowing the rules.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/nightlife"
+          ]
+        },
+        "facebook": {
+          "text": "Golden Gai's narrow alleys and tiny bars look like a hidden gem waiting to be discovered. But most first-time visitors are surprised when the bartender asks for a cover charge.\n\n¥500–¥1000 is typical, on top of drink prices. Some locals call it a tourist tax. It's still one of Tokyo's most atmospheric nightlife spots—but don't walk in expecting a regular Shinjuku drinking experience.",
+          "media": [
+            "https://hinomaru.one/images/57525a1320e8.webp"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Fri",
+        "publicationDate": "2026-05-15T12:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "sumida-hokusai-museum",
+      "url": "https://hinomaru.one/tokyo-travel-guide/sumida-hokusai-museum",
+      "mainImage": "https://hinomaru.one/images/sumida-hokusai-museum-hero.webp",
+      "platforms": {
+        "threads": {
+          "main": "Katsushika Hokusai, creator of The Great Wave, reportedly moved houses 93 times during his life.\n\nHe changed his art name at least 30 times. He called himself \"the old man mad about drawing\" at 76.\n\nThe Sumida Hokusai Museum sits in his birthplace ward—a fitting tribute to an artist who never stayed still.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/sumida-hokusai-museum"
+          ]
+        },
+        "x": {
+          "main": "Hokusai moved houses 93 times.\n\nThe Great Wave's creator changed addresses constantly throughout his life. He also changed his art name at least 30 times.\n\nAt 76, he called himself \"the old man mad about drawing.\"",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/sumida-hokusai-museum"
+          ]
+        },
+        "facebook": {
+          "text": "Katsushika Hokusai created The Great Wave—but he couldn't stay in one place. The artist reportedly moved houses 93 times during his life and changed his professional name at least 30 times.\n\nAt age 76, he signed his work \"Gwakyō Rōjin Manji\"—\"the old man mad about drawing.\" The Sumida Hokusai Museum now stands in the ward where he was born, honoring an artist who was never still.",
+          "media": [
+            "https://hinomaru.one/images/sumida-hokusai-museum-hero.webp"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Sat",
+        "publicationDate": "2026-05-16T00:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "tsukiji-honganji",
+      "url": "https://hinomaru.one/tokyo-travel-guide/tsukiji-honganji",
+      "mainImage": "https://hinomaru.one/images/tsukiji-honganji-hero.webp",
+      "platforms": {
+        "threads": {
+          "main": "Most Japanese Buddhist temples are built from wood. Tsukiji Honganji is built from stone.\n\nAfter repeated fires destroyed earlier wooden structures, the temple was rebuilt in 1934 using reinforced concrete and stone—designed to survive earthquakes and flames.\n\nThe architecture is Indian-inspired, unusual in Japan. The material is practical.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/tsukiji-honganji"
+          ]
+        },
+        "x": {
+          "main": "Tsukiji Honganji looks ancient. But it's built from stone and reinforced concrete.\n\nAfter fires kept destroying the wooden structure, they rebuilt it in 1934 to survive both flames and earthquakes.\n\nThe Indian-inspired architecture is rare in Japan.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/tsukiji-honganji"
+          ]
+        },
+        "facebook": {
+          "text": "Japanese Buddhist temples are almost always built from wood. Tsukiji Honganji is an exception—built from stone and reinforced concrete in 1934.\n\nRepeated fires had destroyed earlier wooden structures on the site. The unusual building material was a practical choice: earthquake-resistant and fireproof. The Indian-inspired architecture makes it one of Tokyo's most distinctive temples.",
+          "media": [
+            "https://hinomaru.one/images/tsukiji-honganji-hero.webp"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Sat",
+        "publicationDate": "2026-05-16T12:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "sumo-museum",
+      "url": "https://hinomaru.one/tokyo-travel-guide/sumo-museum",
+      "mainImage": "https://hinomaru.one/images/sumo-museum-hero.webp",
+      "platforms": {
+        "threads": {
+          "main": "According to Japanese mythology, sumo began when the god Takemikazuchi wrestled a rival deity for control of the Japanese islands.\n\nHe won. The islands were claimed for Japan.\n\nWhether or not you believe the myth, it explains why sumo is more than sport—it's ritual, religion, and national identity.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/sumo-museum"
+          ]
+        },
+        "x": {
+          "main": "Sumo's origin story is literal mythology.\n\nThe god Takemikazuchi wrestled a rival deity for control of Japan. He won, and the islands were claimed.\n\nThat's why sumo is still sacred—ritual, religion, and sport combined.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/sumo-museum"
+          ]
+        },
+        "facebook": {
+          "text": "Sumo isn't just Japan's national sport—its origin is mythological. According to legend, the god Takemikazuchi wrestled a rival deity for control of the Japanese islands. When Takemikazuchi won, the land was claimed for Japan.\n\nThis divine origin explains why sumo remains deeply connected to Shinto ritual. It's not just sport—it's ceremony, religion, and national identity on display.",
+          "media": [
+            "https://hinomaru.one/images/sumo-museum-hero.webp"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Sun",
+        "publicationDate": "2026-05-17T00:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "oedo-antique-market",
+      "url": "https://hinomaru.one/tokyo-travel-guide/oedo-antique-market",
+      "mainImage": "https://hinomaru.one/images/oedo-antique-market-hero.webp",
+      "platforms": {
+        "threads": {
+          "main": "The Oedo Antique Market splits into two sections: Japanese antiques and international goods.\n\nOne side has kimono, ceramics, woodblock prints, and furniture. The other side has European silver, Chinese jade, and Southeast Asian textiles.\n\nYou can walk through one market and cross continents.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/oedo-antique-market"
+          ]
+        },
+        "x": {
+          "main": "Oedo Antique Market: two sections, two worlds.\n\nJapanese side: kimono, ceramics, woodblock prints.\n\nInternational side: European silver, Chinese jade, Southeast Asian textiles.\n\nOne market, multiple continents.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/oedo-antique-market"
+          ]
+        },
+        "facebook": {
+          "text": "The Oedo Antique Market is actually two markets in one. The Japanese section offers kimono, ceramics, woodblock prints, and antique furniture. The international section brings in European silver, Chinese jade, Southeast Asian textiles, and more.\n\nIt's a rare chance to browse antiques from multiple continents in a single morning—all at Tokyo's largest outdoor antique market.",
+          "media": [
+            "https://hinomaru.one/images/oedo-antique-market-hero.webp"
+          ]
+        }
+      }
+    },
+    {
+      "slot": {
+        "day": "Sun",
+        "publicationDate": "2026-05-17T12:00:00",
+        "timezone": "Asia/Taipei"
+      },
+      "slug": "hie-shrine",
+      "url": "https://hinomaru.one/tokyo-travel-guide/hie-shrine",
+      "mainImage": "https://hinomaru.one/images/hie-shrine-hero.webp",
+      "platforms": {
+        "threads": {
+          "main": "Hie Shrine's most photographed feature isn't the main hall—it's the torii tunnel.\n\nAbout 90 meters of bright red torii gates wind up the hillside, creating a striking corridor that's become an Instagram favorite.\n\nIt's a smaller, quieter version of Kyoto's Fushimi Inari—without the crowds.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/hie-shrine"
+          ]
+        },
+        "x": {
+          "main": "Hie Shrine has a torii tunnel.\n\n90 meters of bright red gates winding up the hillside. Smaller than Fushimi Inari, much quieter, still spectacular.\n\nOne of Tokyo's most photogenic spots—without the Kyoto crowds.",
+          "descendants": [
+            "→ https://hinomaru.one/tokyo-travel-guide/hie-shrine"
+          ]
+        },
+        "facebook": {
+          "text": "Hie Shrine's signature feature is a 90-meter tunnel of bright red torii gates winding up the hillside. It's become one of Tokyo's most photographed spots—a smaller, quieter alternative to Kyoto's famous Fushimi Inari.\n\nYou get the striking vermillion corridor without the tourist crowds. Just uphill from Akasaka, it's an easy detour from central Tokyo.",
+          "media": [
+            "https://hinomaru.one/images/hie-shrine-hero.webp"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -209,4 +209,49 @@ describe("ApprovalPayloadRenderer", () => {
       root.unmount();
     });
   });
+
+  // Fleet carry (#22 / GH #501): agent-composed cards carry their reviewable
+  // content in proposedComment / details / description / body.
+  function renderBoardApproval(payload: Record<string, unknown>) {
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <ThemeProvider>
+          <ApprovalPayloadRenderer type="request_board_approval" payload={payload} />
+        </ThemeProvider>,
+      );
+    });
+    return root;
+  }
+
+  it("renders proposedComment as markdown, not a raw <pre> block", () => {
+    const root = renderBoardApproval({ title: "Weekly posts batch", proposedComment: "## Section heading\n**Bold field**" });
+    const pres = Array.from(container.querySelectorAll("pre"));
+    expect(pres.some((el) => el.textContent?.includes("Section heading"))).toBe(false);
+    expect(container.querySelector(".paperclip-markdown strong")?.textContent).toBe("Bold field");
+    act(() => root.unmount());
+  });
+
+  it("renders details, description and body, suppressing duplicates", () => {
+    const root = renderBoardApproval({
+      title: "Card",
+      summary: "same as description",
+      details: "The **details**",
+      description: "same as description",
+      body: "The body text",
+    });
+    expect(container.textContent).toContain("Details");
+    expect(container.textContent).toContain("Body");
+    expect(container.textContent).not.toContain("Description");
+    act(() => root.unmount());
+  });
+
+  it("surfaces unrecognized payload keys under Additional fields only when present", () => {
+    let root = renderBoardApproval({ title: "Card", summary: "Known keys only" });
+    expect(container.textContent).not.toContain("Additional fields");
+    act(() => root.unmount());
+    root = renderBoardApproval({ title: "Card", approvalType: "posts_batch_approval" });
+    expect(container.textContent).toContain("Additional fields");
+    act(() => root.unmount());
+  });
 });

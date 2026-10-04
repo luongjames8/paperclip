@@ -1181,6 +1181,8 @@ function routineRevisionSnapshotRoutine(routine: typeof routines.$inferSelect): 
     originId: routine.originId,
     variables: routine.variables ?? [],
     env: routine.env ?? null,
+    executionPolicy: routine.executionPolicy ?? null,
+    approvalKind: routine.approvalKind ?? null,
     responsibleUserId: routine.responsibleUserId ?? null,
   };
 }

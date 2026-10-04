@@ -239,7 +239,15 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
-    const runIdHeader = req.header("x-paperclip-run-id");
+    const rawRunIdHeader = req.header("x-paperclip-run-id");
+    // Fleet carry (2026-07-11 live incident): run ids are uuids. A malformed
+    // header (e.g. a chat-wake "manual-<ts>" fallback) can never name a run, and
+    // passed through it reaches eq() on uuid columns all over the server and
+    // 500s the request. Drop it here — the one choke point — so it resolves
+    // exactly like "no run". The agent-JWT path below still compares the raw
+    // header against its signed run_id.
+    const runIdHeader =
+      rawRunIdHeader && isUuidLike(rawRunIdHeader.trim()) ? rawRunIdHeader.trim() : undefined;
 
     const authHeader = req.header("authorization");
     const hasBearerCredentials = /^bearer(?:\s|$)/i.test(authHeader ?? "");
@@ -370,7 +378,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
-      const normalizedRunIdHeader = normalizeOptionalString(runIdHeader);
+      const normalizedRunIdHeader = normalizeOptionalString(rawRunIdHeader);
       if (normalizedRunIdHeader && normalizedRunIdHeader !== claims.run_id) {
         await auditAgentJwtRunHeaderMismatch(db, {
           companyId: claims.company_id,

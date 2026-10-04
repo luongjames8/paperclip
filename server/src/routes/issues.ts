@@ -223,6 +223,9 @@ import {
   unprocessable,
 } from "../errors.js";
 import { privateJsonEtag } from "../middleware/private-json-etag.js";
+import { publishPluginDomainEvent } from "../services/activity-log.js";
+import type { PluginEvent } from "@paperclipai/plugin-sdk";
+import { resolveVerifiedRunId } from "../services/run-id-trust.js";
 import { createRequestPromiseMemo } from "../lib/request-promise-memo.js";
 import {
   assertBoard,
@@ -852,6 +855,13 @@ function readPlanConfirmationTargetForIssue(payload: unknown, issueId: string) {
     revisionNumber:
       typeof target.revisionNumber === "number" ? target.revisionNumber : null,
   };
+}
+
+// Fleet carry (#35): a user comment superseded a pending confirmation/question
+// before it was answered (as opposed to a stale-target or sweep expiry).
+function isInteractionResultSupersededByComment(result: unknown): boolean {
+  const parsed = readObject(result);
+  return parsed.outcome === "superseded_by_comment" || parsed.expirationReason === "superseded_by_comment";
 }
 
 function readConfirmationResultForWake(result: unknown) {
@@ -2541,7 +2551,10 @@ function buildRequestItemVerdictsWakeIdempotencyKey(args: {
   return `request_item_verdicts:${args.issueId}:${args.interactionId}:${bucket}`;
 }
 
-async function queueResolvedInteractionContinuationWakeup(input: {
+// Fleet carry (#35): pure-ish builder so comment routes can merge an
+// interaction continuation into their per-request wake dedupe map instead
+// of firing a second, competing heartbeat.wakeup().
+type ResolvedInteractionContinuationInput = {
   db: Db;
   heartbeat: ReturnType<typeof heartbeatService>;
   issue: {
@@ -2566,9 +2579,11 @@ async function queueResolvedInteractionContinuationWakeup(input: {
   workspaceRefreshReason?: string | null;
   newlyResolvedItemIds?: string[];
   idempotencyKey?: string | null;
-}) {
+};
+
+async function buildResolvedInteractionContinuationWakeup(input: ResolvedInteractionContinuationInput) {
   if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status))
-    return;
+    return null;
 
   const reviewPathLost =
     input.issue.status === "in_review" &&
@@ -2607,8 +2622,16 @@ async function queueResolvedInteractionContinuationWakeup(input: {
     !rejectedPlanNeedsRevision &&
     !reviewPathLost
   )
-    return;
-  if (input.interaction.status === "expired" && !reviewPathLost) return;
+    return null;
+  // Fleet carry (#35): a silent stale-target / sweep expiry never got a real
+  // resolution to continue from, but an expiry caused by the operator
+  // commenting IS a live signal ("redo it") and must reach the assignee with
+  // the interaction context, not only the context-blind generic comment wake.
+  if (
+    input.interaction.status === "expired" &&
+    !reviewPathLost &&
+    !isInteractionResultSupersededByComment(input.interaction.result)
+  ) return null;
   // A normal interaction continuation is itself the durable recovery path.
   // Do not contaminate that wake with the fallback "review path lost"
   // instruction merely because the just-consumed interaction now appears
@@ -2703,8 +2726,9 @@ async function queueResolvedInteractionContinuationWakeup(input: {
       publication.idempotencyKey ===
       `interaction:${input.interaction.id}:${publication.endpointId}`,
   );
-  await input.heartbeat
-    .wakeup(input.issue.assigneeAgentId, {
+  return {
+    agentId: input.issue.assigneeAgentId,
+    wakeup: {
       source: "automation",
       triggerDetail: "system",
       reason: "issue_commented",
@@ -2715,6 +2739,10 @@ async function queueResolvedInteractionContinuationWakeup(input: {
         interactionStatus: input.interaction.status,
         sourceCommentId: input.interaction.sourceCommentId ?? null,
         sourceRunId: input.interaction.sourceRunId ?? null,
+        // Fleet carry (#35): the comment that RESOLVED the interaction (e.g. the
+        // operator's superseding "redo it"); heartbeat derives
+        // PAPERCLIP_WAKE_COMMENT_ID from payload.commentId.
+        ...(interactionResult?.commentId ? { commentId: interactionResult.commentId } : {}),
         ...(planReviewInteraction ? { planReviewInteraction } : {}),
         ...(nativeCompletionReview ? { nativeCompletionReview } : {}),
         ...(checkboxSelection ? { checkboxSelection } : {}),
@@ -2741,6 +2769,9 @@ async function queueResolvedInteractionContinuationWakeup(input: {
         interactionStatus: input.interaction.status,
         sourceCommentId: input.interaction.sourceCommentId ?? null,
         sourceRunId: input.interaction.sourceRunId ?? null,
+        ...(interactionResult?.commentId
+          ? { commentId: interactionResult.commentId, wakeCommentId: interactionResult.commentId }
+          : {}),
         ...(planReviewInteraction ? { planReviewInteraction } : {}),
         ...(nativeCompletionReview ? { nativeCompletionReview } : {}),
         ...(checkboxSelection ? { checkboxSelection } : {}),
@@ -2756,14 +2787,22 @@ async function queueResolvedInteractionContinuationWakeup(input: {
         ...(forceFreshSession ? { forceFreshSession: true } : {}),
         ...(workspaceRefreshReason ? { workspaceRefreshReason } : {}),
       },
-    })
+    } as NonNullable<Parameters<typeof input.heartbeat.wakeup>[1]>,
+  };
+}
+
+async function queueResolvedInteractionContinuationWakeup(input: ResolvedInteractionContinuationInput) {
+  const built = await buildResolvedInteractionContinuationWakeup(input);
+  if (!built?.agentId) return;
+  await input.heartbeat
+    .wakeup(built.agentId, built.wakeup)
     .catch((err) =>
       logger.warn(
         {
           err,
           issueId: input.issue.id,
           interactionId: input.interaction.id,
-          agentId: input.issue.assigneeAgentId,
+          agentId: built.agentId,
         },
         "failed to wake assignee on issue interaction resolution",
       ),
@@ -2857,6 +2896,96 @@ function diffExecutionParticipants(
   };
 }
 
+// Shared "did a review/approval stage NEWLY become pending" predicate, used by
+// both buildExecutionStageWakeup (agent participants) and the fleet
+// issue.execution_stage.pending plugin event (every participant type) so the
+// two can never drift.
+function executionStagePendingChanged(
+  previousState: ParsedExecutionState | null,
+  nextState: ParsedExecutionState,
+): boolean {
+  return (
+    previousState?.status !== "pending" ||
+    previousState?.currentStageId !== nextState.currentStageId ||
+    !executionPrincipalsEqual(
+      previousState?.currentParticipant ?? null,
+      nextState.currentParticipant ?? null,
+    )
+  );
+}
+
+// Fleet carry (#37 / fleet #631): a review/approval stage that just became
+// pending has no approvals row and no interaction, so without this event it
+// never reaches Discord as a clickable card. Fires for every participant type;
+// the plugin decides whether a participant needs a card. stageId +
+// lastDecisionId let a click against a superseded card be refused (see
+// expectedExecutionStageId / expectedLastDecisionToken).
+function publishExecutionStagePendingEventIfChanged(input: {
+  issue: {
+    id: string;
+    companyId: string;
+    identifier?: string | null;
+    title?: string | null;
+    projectId?: string | null;
+  };
+  previousState: ParsedExecutionState | null;
+  nextState: ParsedExecutionState | null;
+  actor: { actorType: "user" | "agent"; actorId: string };
+}): void {
+  const { issue, previousState, nextState, actor } = input;
+  if (!nextState || nextState.status !== "pending") return;
+  if (!executionStagePendingChanged(previousState, nextState)) return;
+  const event: PluginEvent = {
+    eventId: randomUUID(),
+    eventType: "issue.execution_stage.pending",
+    occurredAt: new Date().toISOString(),
+    actorType: actor.actorType,
+    actorId: actor.actorId,
+    entityId: issue.id,
+    entityType: "issue",
+    companyId: issue.companyId,
+    payload: {
+      issueId: issue.id,
+      identifier: issue.identifier ?? null,
+      title: issue.title ?? null,
+      projectId: issue.projectId ?? null,
+      stageId: nextState.currentStageId,
+      stageType: nextState.currentStageType,
+      lastDecisionId: nextState.lastDecisionId,
+      participant: nextState.currentParticipant,
+    },
+  };
+  publishPluginDomainEvent(event);
+}
+
+// Fleet carry (#37): closes the CAS TOCTOU — applyIssueExecutionPolicyTransition
+// checks expectedExecutionStageId against a row read BEFORE the decision
+// transaction opens. Under the row lock, the ENTIRE executionPolicy +
+// executionState must still equal what the transition was computed from;
+// any drift means the decision is stale and the client must retry.
+async function assertExecutionStageStillPendingForUpdate(
+  tx: Pick<Db, "select">,
+  issueId: string,
+  expectedExecutionStageId: string | null | undefined,
+  preTransactionSnapshot: { executionPolicy: unknown; executionState: unknown },
+): Promise<void> {
+  if (expectedExecutionStageId === undefined || expectedExecutionStageId === null) return;
+  const locked = await tx
+    .select({ executionState: issueRows.executionState, executionPolicy: issueRows.executionPolicy })
+    .from(issueRows)
+    .where(eq(issueRows.id, issueId))
+    .for("update")
+    .then((rows) => rows[0] ?? null);
+  const unchanged =
+    JSON.stringify(locked?.executionPolicy ?? null) === JSON.stringify(preTransactionSnapshot.executionPolicy ?? null) &&
+    JSON.stringify(locked?.executionState ?? null) === JSON.stringify(preTransactionSnapshot.executionState ?? null);
+  if (!unchanged) {
+    throw conflict(
+      "This execution stage is no longer pending — it may have already been decided, reassigned, had its policy edited, or a newer version was posted after changes were requested and resubmitted.",
+    );
+  }
+}
+
 function buildExecutionStageWakeup(input: {
   issueId: string;
   previousState: ParsedExecutionState | null;
@@ -2873,13 +3002,7 @@ function buildExecutionStageWakeup(input: {
       nextState.currentParticipant?.type === "agent"
         ? (nextState.currentParticipant.agentId ?? null)
         : null;
-    const stageChanged =
-      previousState?.status !== "pending" ||
-      previousState?.currentStageId !== nextState.currentStageId ||
-      !executionPrincipalsEqual(
-        previousState?.currentParticipant ?? null,
-        nextState.currentParticipant ?? null,
-      );
+    const stageChanged = executionStagePendingChanged(previousState, nextState);
     if (!agentId || !stageChanged) return null;
 
     const reason =
@@ -9442,7 +9565,7 @@ export function issueRoutes(
                 actorUserId: actor.actorType === "user" ? actor.actorId : null,
                 outcome: transition.decision.outcome,
                 body: transition.decision.body,
-                createdByRunId: actor.runId ?? null,
+                createdByRunId: await resolveVerifiedRunId(tx, actor.runId),
               });
             }
           }
@@ -10136,7 +10259,8 @@ export function issueRoutes(
         baseRevisionId: req.body.baseRevisionId ?? null,
         createdByAgentId: actor.agentId ?? null,
         createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-        createdByRunId: actor.runId ?? null,
+        // Fleet carry: never let a malformed/stale X-Paperclip-Run-Id 500 the write.
+        createdByRunId: await resolveVerifiedRunId(db, actor.runId),
         sourceTrust,
         lockedDocumentStrategy:
           req.actor.type === "agent" ? "create_new_document" : "conflict",
@@ -11043,7 +11167,7 @@ export function issueRoutes(
               },
             },
             sourceTrust: promotionTrust,
-            createdByRunId: actor.runId ?? null,
+            createdByRunId: await resolveVerifiedRunId(tx, actor.runId),
           })
           .returning()
           .then((rows) => rows[0] ?? null);
@@ -11821,6 +11945,7 @@ export function issueRoutes(
         actorRunId: actor.runId,
         actorResponsibleUserId: authenticatedActorResponsibleUserId(req),
         trustExplicitResponsibleUserId: actor.actorType === "user",
+        trustExplicitApprovalKind: actor.actorType === "user",
         watchdogActorRunId: actor.runId,
         onDeduplicated: (reason: "idempotency_key" | "recent_open_title") => {
           deduplicationReason = reason;
@@ -11895,6 +12020,12 @@ export function issueRoutes(
               }
             : {}),
           ...buildCreateIssueActivityStatusDetails(issue, res),
+          // Fleet carry: helper-runner trigger filters discriminate on these
+          // without a follow-up GET.
+          projectId: issue.projectId ?? null,
+          parentId: issue.parentId ?? null,
+          originKind: issue.originKind ?? "manual",
+          assigneeAgentId: issue.assigneeAgentId ?? null,
           ...(Array.isArray(req.body.blockedByIssueIds)
             ? { blockedByIssueIds: req.body.blockedByIssueIds }
             : {}),
@@ -12173,6 +12304,7 @@ export function issueRoutes(
         actorRunId: actor.runId,
         actorResponsibleUserId: authenticatedActorResponsibleUserId(req),
         trustExplicitResponsibleUserId: actor.actorType === "user",
+        trustExplicitApprovalKind: actor.actorType === "user",
         actorAgentId: actor.agentId,
         actorUserId: actor.actorType === "user" ? actor.actorId : null,
         watchdogActorRunId: actor.runId,
@@ -12387,6 +12519,7 @@ export function issueRoutes(
           actorRunId: actor.runId,
           actorResponsibleUserId: authenticatedActorResponsibleUserId(req),
           trustExplicitResponsibleUserId: actor.actorType === "user",
+          trustExplicitApprovalKind: actor.actorType === "user",
           actorAgentId: actor.agentId,
           actorUserId: actor.actorType === "user" ? actor.actorId : null,
         });
@@ -12818,8 +12951,16 @@ export function issueRoutes(
         deferWakeForGoal,
         hiddenAt: hiddenAtRaw,
         onBehalfOfUserId: _requestedOnBehalfOfUserId,
+        // Fleet carry (#37): CAS fields, read from req.body below; never part of
+        // the svc.update patch or the activity details.
+        expectedExecutionStageId: _expectedExecutionStageIdRaw,
+        expectedLastDecisionToken: _expectedLastDecisionTokenRaw,
         ...updateFields
       } = req.body;
+      const expectedExecutionStageId =
+        typeof req.body.expectedExecutionStageId === "string" ? req.body.expectedExecutionStageId : undefined;
+      const expectedLastDecisionToken =
+        typeof req.body.expectedLastDecisionToken === "string" ? req.body.expectedLastDecisionToken : undefined;
       if (existing.conversationAgentId && req.actor.type === "board" && commentBody) {
         throw unprocessable("Send conversation messages through the comments endpoint with a clientRequestId");
       }
@@ -13171,6 +13312,8 @@ export function issueRoutes(
         reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
         monitorExplicitlyUpdated:
           req.body.executionPolicy !== undefined && monitorChanged,
+        expectedExecutionStageId,
+        expectedLastDecisionToken,
       });
       const decisionId = transition.decision ? randomUUID() : null;
       if (decisionId) {
@@ -13655,6 +13798,13 @@ export function issueRoutes(
       try {
         if (shouldUseTransactionalIssueUpdate) {
           issue = await db.transaction(async (tx) => {
+            // Fleet carry (#37): row-locked CAS re-verification first.
+            if (decision) {
+              await assertExecutionStageStillPendingForUpdate(tx, existing.id, expectedExecutionStageId, {
+                executionPolicy: existing.executionPolicy,
+                executionState: existing.executionState,
+              });
+            }
             if (
               reviewPolicySensitiveMutationRequested &&
               !(await assertLockedReviewPolicyAllowsMutation(tx))
@@ -13696,7 +13846,7 @@ export function issueRoutes(
                 actorUserId: actor.actorType === "user" ? actor.actorId : null,
                 outcome: decision.outcome,
                 body: decision.body,
-                createdByRunId: actor.runId ?? null,
+                createdByRunId: await resolveVerifiedRunId(tx, actor.runId),
               });
             }
 
@@ -14267,6 +14417,11 @@ export function issueRoutes(
         attachmentComment;
       let goalCommentSteered = false;
       let lostReviewPathRef: string | null = null;
+      // Fleet carry (#35): interactions this request's comment superseded; their
+      // own continuation wakes are merged into the wake map below.
+      let commentSupersededInteractions: Awaited<
+        ReturnType<ReturnType<typeof issueThreadInteractionService>["expireRequestConfirmationsSupersededByComment"]>
+      > = [];
       if (commentBody) {
         const commentReferenceSummaryBefore =
           updateReferenceSummaryAfter ??
@@ -14413,6 +14568,7 @@ export function issueRoutes(
           actor,
           source: "issue.comment",
         });
+        commentSupersededInteractions = expiredInteractions;
         if (issue.status === "in_review" && expiredInteractions.length > 0) {
           const reviewAttention = await svc
             .listReviewAttention(issue.companyId, [issue])
@@ -14468,6 +14624,12 @@ export function issueRoutes(
         interruptedRunId,
         requestedByActorType: actor.actorType,
         requestedByActorId: actor.actorId,
+      });
+      publishExecutionStagePendingEventIfChanged({
+        issue,
+        previousState: previousExecutionState,
+        nextState: nextExecutionState,
+        actor: { actorType: actor.actorType, actorId: actor.actorId },
       });
 
       // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
@@ -14743,6 +14905,40 @@ export function issueRoutes(
           }
         }
 
+        // Fleet carry (#35): the interaction-specific supersede wake (richer
+        // context: interactionId/kind/result) must beat a generic comment or
+        // mention wake for the same agent+issue key (addWakeup here is
+        // last-write-wins) — but never clobber an assignment/status wake, the
+        // primary mutation of this request.
+        const GENERIC_COMMENT_WAKE_REASONS = new Set([
+          "issue_commented",
+          "issue_reopened_via_comment",
+          "issue_comment_mentioned",
+        ]);
+        for (const expired of commentSupersededInteractions) {
+          const built = await buildResolvedInteractionContinuationWakeup({
+            db,
+            heartbeat,
+            issue,
+            interaction: expired,
+            actor,
+            source: "issue.comment",
+          }).catch((err) => {
+            logger.warn({ err, issueId: issue.id, interactionId: expired.id }, "failed to build comment-superseded interaction wake");
+            return null;
+          });
+          if (!built?.agentId) continue;
+          // Generic wakes key on the route param, which stays the raw identifier
+          // when router.param's identifier lookup misses — check both forms.
+          const keys = [...new Set([`${built.agentId}:${issue.id}`, `${built.agentId}:${id}`])];
+          const primaryWake = keys
+            .map((key) => wakeups.get(key))
+            .find((wake) => wake && !GENERIC_COMMENT_WAKE_REASONS.has(wake.wakeup.reason ?? ""));
+          if (primaryWake) continue;
+          for (const key of keys) wakeups.delete(key);
+          wakeups.set(keys[0]!, { agentId: built.agentId, wakeup: built.wakeup });
+        }
+
         const becameDone =
           existing.status !== "done" && issue.status === "done";
         if (becameDone) {
@@ -14946,10 +15142,18 @@ export function issueRoutes(
           updatedAt: issueResponse.updatedAt,
           changes,
           comment,
+          ...(expectedExecutionStageId !== undefined ? { executionStageDecisionRecorded: decisionId !== null } : {}),
         });
         return;
       }
-      res.json({ ...issueResponse, changes, comment });
+      // Fleet carry (#37): a stage-decision caller must not trust "200 means
+      // decided" — say whether a decision was actually recorded.
+      res.json({
+        ...issueResponse,
+        changes,
+        comment,
+        ...(expectedExecutionStageId !== undefined ? { executionStageDecisionRecorded: decisionId !== null } : {}),
+      });
     },
   );
 
@@ -17076,7 +17280,8 @@ export function issueRoutes(
         deletedByType: actor.actorType,
         deletedByAgentId: actor.actorType === "agent" ? actor.agentId : null,
         deletedByUserId: actor.actorType === "user" ? actor.actorId : null,
-        deletedByRunId: actor.runId,
+        // The comment's own persisted (verified) value, not the raw header.
+        deletedByRunId: deleted.deletedByRunId,
         deletedAt: deleted.deletedAt,
         deletedAnnotationCommentIds: annotationCleanup.deletedCommentIds,
         resolvedAnnotationThreadIds: annotationCleanup.resolvedThreadIds,
@@ -17690,7 +17895,7 @@ export function issueRoutes(
                 actorUserId: actor.actorType === "user" ? actor.actorId : null,
                 outcome: transition.decision.outcome,
                 body: transition.decision.body,
-                createdByRunId: actor.runId ?? null,
+                createdByRunId: await resolveVerifiedRunId(tx, actor.runId),
               });
             }
 
@@ -17729,13 +17934,20 @@ export function issueRoutes(
             },
           });
         }
+        const commentDecisionNextExecutionState = parseIssueExecutionState(currentIssue.executionState);
         commentDecisionStageWakeup = buildExecutionStageWakeup({
           issueId: currentIssue.id,
           previousState: currentExecutionState,
-          nextState: parseIssueExecutionState(currentIssue.executionState),
+          nextState: commentDecisionNextExecutionState,
           interruptedRunId,
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
+        });
+        publishExecutionStagePendingEventIfChanged({
+          issue: currentIssue,
+          previousState: currentExecutionState,
+          nextState: commentDecisionNextExecutionState,
+          actor: { actorType: actor.actorType, actorId: actor.actorId },
         });
       } else {
         const commentOptions = {
@@ -18012,6 +18224,25 @@ export function issueRoutes(
             commentDecisionStageWakeup.agentId,
             commentDecisionStageWakeup.wakeup,
           );
+        }
+
+        // Fleet carry (#35): the interaction-specific wake (interactionId/kind/
+        // result) must claim the agent+issue key before the generic
+        // issue_commented wake below — this addWakeup is first-write-wins. Source
+        // stays "issue.comment" so an active subtree pause hold still admits it.
+        for (const expired of expiredInteractions) {
+          const built = await buildResolvedInteractionContinuationWakeup({
+            db,
+            heartbeat,
+            issue: currentIssue,
+            interaction: expired,
+            actor,
+            source: "issue.comment",
+          }).catch((err) => {
+            logger.warn({ err, issueId: currentIssue.id, interactionId: expired.id }, "failed to build comment-superseded interaction wake");
+            return null;
+          });
+          if (built?.agentId) addWakeup(built.agentId, built.wakeup);
         }
 
         // Re-fetch immediately before deciding whether to wake anyone: outside

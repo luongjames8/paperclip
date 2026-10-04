@@ -480,6 +480,7 @@ export type IssueBlockedInboxReason =
   | "blocked_chain_stalled"
   | "invalid_review_participant"
   | "in_review_without_action_path"
+  | "stale_assigned_backlog_issue"
   | "missing_successful_run_disposition"
   | "pending_board_decision"
   | "pending_user_decision"
@@ -811,6 +812,10 @@ export interface Issue {
   billingCode: string | null;
   assigneeAdapterOverrides: IssueAssigneeAdapterOverrides | null;
   executionPolicy?: IssueExecutionPolicy | null;
+  // Config-carried approval routing tag, stamped from the originating routine
+  // (or inherited from parentId) at creation — never accepted as direct agent
+  // input. See docs on approvalKindSchema / resolveApprovalKindForIssueCreate.
+  approvalKind?: string | null;
   executionState?: IssueExecutionState | null;
   monitorNextCheckAt?: Date | null;
   monitorLastTriggeredAt?: Date | null;

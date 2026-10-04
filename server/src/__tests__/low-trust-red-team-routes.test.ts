@@ -2189,3 +2189,66 @@ describeEmbeddedPostgres(
     });
   },
 );
+
+describeEmbeddedPostgres("stale X-Paperclip-Run-Id never 500s the comment route (fleet carry)", () => {
+  // 2026-07-11 live incident: an agent-key caller's stale run-id header reached
+  // a run foreign key and 500'd the whole mutation; it must resolve like an
+  // unknown run instead — never a bare 500.
+  let db!: Db;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-run-id-comment-route-");
+    db = createDb(tempDb.connectionString);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+    await db.delete(issueComments);
+    await db.delete(issues);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  // (A malformed header is dropped in actorMiddleware — agent-auth-middleware.test.ts.)
+  it.each([
+    ["a well-formed but unknown", "11111111-1111-4111-8111-111111111111"],
+  ])("%s X-Paperclip-Run-Id header does not 500 a comment POST", async (_label, runId) => {
+    const [company] = await db.insert(companies).values({
+      name: "Ordinary comment-route company",
+      issuePrefix: `OR${randomUUID().replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+    }).returning();
+    const [agent] = await db.insert(agents).values({
+      companyId: company!.id,
+      name: "Ordinary Agent",
+      role: "engineer",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    }).returning();
+    const [issue] = await db.insert(issues).values({
+      companyId: company!.id,
+      title: "Ordinary issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agent!.id,
+    }).returning();
+    const app = createApp(db, {
+      type: "agent",
+      agentId: agent!.id,
+      companyId: company!.id,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/issues/${issue!.id}/comments`)
+      .send({ body: "comment via an unverifiable run id header" });
+    expect(res.status, JSON.stringify(res.body)).toBeLessThan(500);
+  });
+});

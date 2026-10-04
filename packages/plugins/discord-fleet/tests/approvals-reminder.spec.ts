@@ -1,0 +1,551 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import manifest from "../src/manifest.js";
+import type { CompanyConfig, DiscordFleetConfig } from "../src/config/schema.js";
+import type { PaperclipApproval, PaperclipClient } from "../src/api/paperclip.js";
+import type { Client } from "discord.js";
+
+vi.mock("../src/discord/rest.js", () => ({
+  postToChannel: vi.fn().mockResolvedValue("msg-id-123"),
+  postEmbedToChannel: vi.fn().mockResolvedValue("msg-id-456"),
+  postEmbedsToChannel: vi.fn().mockResolvedValue("msg-id-457"),
+  postToThread: vi.fn().mockResolvedValue("msg-id-789"),
+  postEmbedToThread: vi.fn().mockResolvedValue("msg-id-abc"),
+}));
+
+const NOW = new Date("2026-06-12T12:00:00.000Z");
+
+function makeCompanyConfig(): CompanyConfig {
+  return {
+    companyId: "company-1",
+    guildId: "guild-1",
+    channels: { digest: "channel-digest", errors: "channel-errors", orphan: "channel-orphan" },
+    projectRouting: {},
+    digest: { cronExpression: "0 7 * * *", timezone: "Asia/Taipei" },
+    stuckIssueThresholdHours: 6,
+    paperclipApiKeySecretRef: { type: "secret_ref", secretId: "paperclip/api-key" },
+    paperclipApiUrl: "http://localhost:3000",
+    companyPrefix: "tc1",
+  };
+}
+
+function makeFleetConfig(company: CompanyConfig): DiscordFleetConfig {
+  return {
+    botTokenSecretRef: { type: "secret_ref", secretId: "paperclip-discord/bot-token" },
+    approvalsChannelsByType: {
+      "company-1": [["content batch", "channel-batch"]],
+    },
+    companies: [company],
+  } as DiscordFleetConfig;
+}
+
+function approval(overrides: Partial<PaperclipApproval>): PaperclipApproval {
+  return {
+    id: "approval-1",
+    type: "request_board_approval",
+    status: "pending",
+    createdAt: new Date(NOW.getTime() - 3 * 3600_000).toISOString(),
+    payload: { title: "Review weekly content batch" },
+    ...overrides,
+  };
+}
+
+function makePaperclip(pending: PaperclipApproval[], approvalIssues: Array<{ id: string }> = []): PaperclipClient {
+  return {
+    getPendingApprovals: vi.fn().mockResolvedValue(pending),
+    getApprovalIssues: vi.fn().mockResolvedValue(approvalIssues),
+  } as unknown as PaperclipClient;
+}
+
+describe("runApprovalsReminder", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("re-posts a card for a pending approval older than the remind threshold", async () => {
+    const { runApprovalsReminder, APPROVAL_REMINDERS_KEY } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company), makePaperclip([approval({})]), NOW,
+    );
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+    const [, channelId, embed] = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("channel-batch");
+    expect(embed.title).toContain("Still pending (3h)");
+    expect(embed.title).toContain("Review weekly content batch");
+
+    const reminders = await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "company-1", stateKey: APPROVAL_REMINDERS_KEY,
+    }) as Record<string, string>;
+    expect(reminders["approval-1"]).toBe(NOW.toISOString());
+  });
+
+  it("routes the reminder on payload.approvalType when the title misses every regex (mirrors handleApprovalCreated)", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const fleetConfig = makeFleetConfig(company);
+    fleetConfig.approvalsChannelsByType!["company-1"] = [
+      ["^content_batch_approval$", "channel-batch"],
+      ["content batch", "channel-batch"],
+    ];
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, fleetConfig,
+      makePaperclip([
+        approval({
+          payload: {
+            title: "Totally Reworded Weekly Posts Card",
+            approvalType: "content_batch_approval",
+          },
+        }),
+      ]),
+      NOW,
+    );
+
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+    const [, channelId] = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    // Without the discriminator candidate this would have fallen to the
+    // orphan/work-thread path while the ORIGINAL card sat in channel-batch.
+    expect(channelId).toBe("channel-batch");
+  });
+
+  it("skips approvals younger than the remind threshold", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const fresh = approval({ createdAt: new Date(NOW.getTime() - 10 * 60_000).toISOString() });
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company), makePaperclip([fresh]), NOW,
+    );
+
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+  });
+
+  it("does not re-remind within the per-approval interval, then reminds again after it", async () => {
+    const { runApprovalsReminder, APPROVAL_REMINDERS_KEY } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const fleet = makeFleetConfig(company);
+    const stateKey = { scopeKind: "company" as const, scopeId: "company-1", stateKey: APPROVAL_REMINDERS_KEY };
+
+    await harness.ctx.state.set(stateKey, {
+      "approval-1": new Date(NOW.getTime() - 2 * 3600_000).toISOString(),
+    });
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, fleet, makePaperclip([approval({})]), NOW,
+    );
+    expect(postEmbedToChannel).not.toHaveBeenCalled();
+
+    await harness.ctx.state.set(stateKey, {
+      "approval-1": new Date(NOW.getTime() - 7 * 3600_000).toISOString(),
+    });
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, fleet, makePaperclip([approval({})]), NOW,
+    );
+    expect(postEmbedToChannel).toHaveBeenCalledTimes(1);
+  });
+
+  it("prunes decided approvals from reminder state", async () => {
+    const { runApprovalsReminder, APPROVAL_REMINDERS_KEY } = await import("../src/jobs/approvals-reminder.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const stateKey = { scopeKind: "company" as const, scopeId: "company-1", stateKey: APPROVAL_REMINDERS_KEY };
+    await harness.ctx.state.set(stateKey, { "decided-old": NOW.toISOString() });
+
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company), makePaperclip([]), NOW,
+    );
+
+    const reminders = await harness.ctx.state.get(stateKey) as Record<string, string>;
+    expect(reminders).toEqual({});
+  });
+
+  it("falls back to the orphan channel when no route matches", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const unrouted = approval({ payload: { title: "Some unrelated approval" } });
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company), makePaperclip([unrouted]), NOW,
+    );
+
+    const [, channelId] = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("channel-orphan");
+  });
+
+  it("reminds into the linked issue's work thread when no type route matches", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { setThreadForIssue } = await import("../src/routing/thread-state.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await setThreadForIssue(harness.ctx, "company-1", "issue-9", {
+      threadId: "thread-9",
+      channelId: "thread-9",
+      createdAt: NOW.toISOString(),
+    });
+    const unrouted = approval({ payload: { title: "Some unrelated approval" } });
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company),
+      makePaperclip([unrouted], [{ id: "issue-9" }]), NOW,
+    );
+
+    const [, channelId] = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("thread-9");
+  });
+
+  it("does not mark an approval reminded when the Discord post fails", async () => {
+    const { runApprovalsReminder, APPROVAL_REMINDERS_KEY } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+    (postEmbedToChannel as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("discord 500"));
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company), makePaperclip([approval({})]), NOW,
+    );
+
+    const reminders = await harness.ctx.state.get({
+      scopeKind: "company", scopeId: "company-1", stateKey: APPROVAL_REMINDERS_KEY,
+    }) as Record<string, string>;
+    expect(reminders["approval-1"]).toBeUndefined();
+  });
+});
+
+// ─── postsBatch structured render contract (GH #501) ─────────────────────────
+// Mirrors handleApprovalCreated's detection: same contract, same
+// degrade-to-plaintext-on-miss semantics — see handler-approval-created.spec.ts.
+
+function validPostsBatch() {
+  return {
+    version: 1,
+    weekOf: "2026-07-13",
+    items: [
+      {
+        slug: "tokyo-trifecta",
+        day: "Mon",
+        postTime: "Mon 2026-07-13 12:00 Taipei",
+        imageUrl: "https://hinomaru.one/images/tours/trifecta-card.avif",
+        hook: "Three neighborhoods, three completely different Tokyos.",
+        platforms: { threads: "Three neighborhoods..." },
+      },
+    ],
+  };
+}
+
+// This block's fixtures (title: "Weekly posts batch") don't match
+// makeFleetConfig's default "content batch" route, so without an explicit
+// route they hit the loud-unrouted-fallback warning (fleet issue #687) and
+// its extra postToChannel call pollutes the content-focused assertions
+// below. Adds a route for this block's own title, alongside (not replacing)
+// the shared default.
+function routedFleetConfig(company: CompanyConfig): DiscordFleetConfig {
+  const config = makeFleetConfig(company);
+  config.approvalsChannelsByType = {
+    "company-1": [...(config.approvalsChannelsByType?.["company-1"] ?? []), ["Weekly posts batch", "channel-batch"]],
+  };
+  return config;
+}
+
+describe("runApprovalsReminder — postsBatch structured render (GH #501)", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // clearAllMocks resets call history but NOT a mockRejectedValue set by an
+    // earlier test — restore rest.js mocks to their module-level defaults so
+    // e.g. the "total delivery failure" test's postEmbedsToChannel rejection
+    // can't leak into a later test in this describe block.
+    const { postToChannel, postEmbedToChannel, postEmbedsToChannel } = await import("../src/discord/rest.js");
+    (postToChannel as any).mockResolvedValue("msg-id-123");
+    (postEmbedToChannel as any).mockResolvedValue("msg-id-456");
+    (postEmbedsToChannel as any).mockResolvedValue("msg-id-457");
+  });
+
+  it("structured postsBatch on the stored approval → posts embeds via postEmbedsToChannel, not plaintext", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "prose fallback, should NOT post", postsBatch: validPostsBatch() } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  it("malformed postsBatch degrades to the plaintext path — reviewableContent still posts", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "## plaintext body", postsBatch: { version: 2 } } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
+
+  it("absent postsBatch (legacy card) degrades to the plaintext path unchanged", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "legacy prose artifact" } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
+
+  // codex P2 (mirrors handleApprovalCreated's fix): a total structured-render
+  // delivery failure must fall back to the plaintext path, not leave the
+  // reminder header-only.
+  it("total postsBatch delivery failure (every embed group post fails) falls back to the plaintext path", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("discord 400: invalid image url"));
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "plaintext fallback content", postsBatch: validPostsBatch() } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).toHaveBeenCalled();
+    expect(postToChannel).toHaveBeenCalled();
+  });
+
+  // DELIVERY-COMPLETENESS (codex P2, round 6): mirrors handleApprovalCreated's
+  // fix — a group failing after an earlier group succeeded must not be
+  // silently absorbed by a boolean that only tracks "did ANYTHING deliver."
+  // 3 large-hook items pack into 2 groups (same packing math as the
+  // handler-approval-created.spec.ts sibling test); group 1 succeeds, group 2
+  // fails on both its initial attempt and its retry.
+  function threeItemPostsBatch() {
+    return {
+      version: 1 as const,
+      weekOf: "2026-07-13",
+      items: [
+        { slug: "a", day: "Mon", postTime: null, imageUrl: "https://x.example.com/a.jpg", hook: "h".repeat(2000), platforms: {} },
+        { slug: "b", day: "Tue", postTime: null, imageUrl: "https://x.example.com/b.jpg", hook: "h".repeat(2000), platforms: {} },
+        { slug: "c", day: "Wed", postTime: null, imageUrl: "https://x.example.com/c.jpg", hook: "h".repeat(2000), platforms: {} },
+      ],
+    };
+  }
+
+  it("PARTIAL postsBatch delivery in the reminder path — posts the unsuppressable warning naming the missing slugs, does NOT fall back to full plaintext", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+    (postEmbedsToChannel as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce("msg-1")
+      .mockRejectedValueOnce(new Error("discord 5xx transient"))
+      .mockRejectedValueOnce(new Error("discord 5xx transient (retry)"));
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "plaintext fallback content, should NOT post — this is a PARTIAL failure", postsBatch: threeItemPostsBatch() } })]),
+      NOW,
+    );
+
+    // 2 groups + 1 retry of the failed group = 3 calls.
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(3);
+    // Residual failure after retry → the loud, unsuppressable warning fires...
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const warningCall = (postToChannel as any).mock.calls[0];
+    expect(warningCall[2]).toContain("failed to deliver");
+    expect(warningCall[2]).toContain("c");
+    // ...but the full proposedComment plaintext fallback must NOT also fire.
+    expect(warningCall[2]).not.toContain("plaintext fallback content");
+  });
+
+  it("postsBatch with an EMPTY items array in the reminder path is not a partial-failure case — falls through to plaintext unchanged", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", proposedComment: "plaintext fallback content — SHOULD post since postsBatch.items is empty", postsBatch: { version: 1, items: [] } } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).not.toHaveBeenCalled();
+    const calls = (postToChannel as any).mock.calls.map((c: any[]) => c[2]);
+    expect(calls.some((body: string) => body.includes("plaintext fallback content"))).toBe(true);
+    expect(calls.some((body: string) => body.includes("failed to deliver"))).toBe(false);
+  });
+
+  // codex P2: summary/recommendedAction/risks must reach Discord alongside
+  // postsBatch embeds in the reminder path too.
+  it("summary/recommendedAction/risks post via postToChannel ALONGSIDE the postsBatch embeds (not swallowed)", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
+      makePaperclip([approval({
+        payload: {
+          title: "Weekly posts batch",
+          summary: "Weekly posts batch for 2026-07-13",
+          recommendedAction: "Approve all 13 posts",
+          risks: ["One image URL is a placeholder"],
+          postsBatch: validPostsBatch(),
+        },
+      })]),
+      NOW,
+    );
+
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const guidanceCall = (postToChannel as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
+    expect(guidanceCall).toContain("Weekly posts batch for 2026-07-13");
+    expect(guidanceCall).toContain("Approve all 13 posts");
+    expect(guidanceCall).toContain("One image URL is a placeholder");
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+  });
+
+  it("no guidance fields set → postToChannel is not called for postsBatch (unchanged from before)", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", postsBatch: validPostsBatch() } })]),
+      NOW,
+    );
+
+    expect(postToChannel).not.toHaveBeenCalled();
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+  });
+
+  // codex P2: mirrors handleApprovalCreated's overflow fix.
+  it("platform copy >1024 chars posts a plaintext follow-up with the FULL text", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedsToChannel, postToChannel } = await import("../src/discord/rest.js");
+
+    const longCopy = "Long-form Facebook copy. ".repeat(60);
+    const batchWithLongCopy = {
+      version: 1,
+      items: [{
+        slug: "tokyo-trifecta", day: "Mon", postTime: null,
+        imageUrl: "https://hinomaru.one/images/tours/trifecta-card.avif",
+        hook: "Three neighborhoods.",
+        platforms: { facebook: longCopy },
+      }],
+    };
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, routedFleetConfig(company),
+      makePaperclip([approval({ payload: { title: "Weekly posts batch", postsBatch: batchWithLongCopy } })]),
+      NOW,
+    );
+
+    expect(postEmbedsToChannel).toHaveBeenCalledTimes(1);
+    expect(postToChannel).toHaveBeenCalledTimes(1);
+    const overflowCall = (postToChannel as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
+    expect(overflowCall).toContain("tokyo-trifecta");
+    expect(overflowCall).toContain("Facebook");
+    expect(overflowCall).toContain(longCopy);
+  });
+});
+
+// ─── approvalKind routing (fleet issue #687) ─────────────────────────────────
+//
+// Mirrors handleApprovalCreated's routing tiers so a reminder never lands
+// somewhere different from the original card — and gets the same loud
+// unrouted-fallback warning, since a reminder IS the backstop for a card the
+// operator missed.
+
+describe("runApprovalsReminder — approvalKind routing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("routes via approvalKindChannels when approval.approvalKind is set, ahead of the legacy ladder", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postEmbedToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const fleetConfig = makeFleetConfig(company); // has approvalsChannelsByType: content batch -> channel-batch
+    fleetConfig.approvalKindChannels = { "company-1": { content_batch_approval: "kind-channel" } };
+
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, fleetConfig,
+      makePaperclip([approval({ approvalKind: "content_batch_approval", payload: { title: "Review weekly content batch" } })]),
+      NOW,
+    );
+
+    const [, channelId] = (postEmbedToChannel as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(channelId).toBe("kind-channel");
+  });
+
+  it("posts the unrouted warning when the approval's kind has no map entry and nothing else matches", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    const fleetConfig = makeFleetConfig(company);
+    fleetConfig.approvalsChannelsByType = { "company-1": [] }; // no legacy match either
+
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, fleetConfig,
+      makePaperclip([approval({ approvalKind: "totally_unmapped_kind", payload: { title: "Some unrelated approval" } })]),
+      NOW,
+    );
+
+    expect(postToChannel).toHaveBeenCalledWith(
+      {},
+      "channel-orphan",
+      expect.stringContaining("unrouted approvalKind: totally_unmapped_kind"),
+    );
+  });
+
+  it("a reminder routed via the legacy ladder (no approvalKind) does NOT get the unrouted warning", async () => {
+    const { runApprovalsReminder } = await import("../src/jobs/approvals-reminder.js");
+    const { postToChannel } = await import("../src/discord/rest.js");
+
+    const harness = createTestHarness({ manifest });
+    const company = makeCompanyConfig();
+    await runApprovalsReminder(
+      harness.ctx, "company-1", {} as Client, company, makeFleetConfig(company), makePaperclip([approval({})]), NOW,
+    );
+
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+});

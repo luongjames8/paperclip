@@ -38,6 +38,7 @@ import {
   syncAgentAdapterEnvBindings,
 } from "./agent-secret-bindings.js";
 import { logActivity } from "./activity-log.js";
+import { ensureGatewayDeviceKey } from "./agent-device-keys.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import {
@@ -753,10 +754,16 @@ export function agentService(db: Db) {
       Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig") &&
       isPlainRecord(normalizedPatch.adapterConfig)
     ) {
-      const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
-        existing.companyId,
-        normalizedPatch.adapterConfig,
-        { adapterType: (normalizedPatch.adapterType ?? existing.adapterType) as string },
+      const effectiveAdapterType = (normalizedPatch.adapterType ?? existing.adapterType) as string;
+      // Fleet carry (#33): mint a device key for openclaw_gateway agents at the
+      // SERVICE layer so every caller (routes, company import) inherits it.
+      const normalizedAdapterConfig = ensureGatewayDeviceKey(
+        effectiveAdapterType,
+        await secretsSvc.normalizeAdapterConfigForPersistence(
+          existing.companyId,
+          normalizedPatch.adapterConfig,
+          { adapterType: effectiveAdapterType },
+        ),
       );
       normalizedPatch.adapterConfig = normalizePaperclipRunnerAdapterConfig(
         (normalizedPatch.adapterType ?? existing.adapterType) as string,
@@ -894,7 +901,11 @@ export function agentService(db: Db) {
       const rawAdapterConfig = isPlainRecord(data.adapterConfig)
         ? await secretsSvc.normalizeAdapterConfigForPersistence(companyId, data.adapterConfig, { adapterType })
         : {};
-      const adapterConfig = normalizePaperclipRunnerAdapterConfig(adapterType, rawAdapterConfig);
+      // Fleet carry (#33): imported gateway agents land with device keys.
+      const adapterConfig = ensureGatewayDeviceKey(
+        adapterType,
+        normalizePaperclipRunnerAdapterConfig(adapterType, rawAdapterConfig),
+      );
       // Run the server-enforced binding invariant after generic normalization
       // and before any database write. A create has no prior config.
       const bindingDecision = assertClaudeOAuthBindingInvariant({

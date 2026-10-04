@@ -140,6 +140,7 @@ import {
   resolveIssueGoalId,
   resolveNextIssueGoalId,
 } from "./issue-goal-fallback.js";
+import { resolveVerifiedRunId } from "./run-id-trust.js";
 import { getRunLogStore } from "./run-log-store.js";
 import { getDefaultCompanyGoal } from "./goals.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
@@ -445,6 +446,54 @@ async function resolveResponsibleUserIdForIssueCreate(
   }
 
   return input.createdByUserId ?? null;
+}
+
+// Config-carried approval routing tag (fleet issue #687): declared once on the
+// routine template, stamped onto the routine-execution root issue, then
+// inherited one level at a time down the subissue chain — every descendant
+// already carries what IT was stamped with, so a single parentId lookup here
+// propagates the value the whole way down without a recursive walk. This is
+// the ONLY place issues.approvalKind is computed; every create-issue call
+// path (general create, createChild, accepted-plan decomposition — all of
+// which funnel through issueService(db).create) routes through it, so an
+// agent-supplied value can never take effect by construction — it is only
+// ever honored when trustExplicitApprovalKind is set (routine dispatch, or a
+// human-user actor at the route layer).
+async function resolveApprovalKindForIssueCreate(
+  reader: DbReader,
+  companyId: string,
+  input: {
+    // undefined = no explicit declaration was made (fall through to
+    // inheritance); null = explicitly declared "no kind"; string = explicitly
+    // declared this kind. Callers must NOT collapse undefined to null before
+    // passing this in (see the ?? null bug this fixed, codex-adversarial P0).
+    explicitApprovalKind?: string | null;
+    parentId?: string | null;
+    trustExplicitApprovalKind?: boolean;
+  },
+): Promise<string | null> {
+  if (input.trustExplicitApprovalKind === true && input.explicitApprovalKind !== undefined) {
+    // A trusted, EXPLICIT declaration is final — including "no kind"
+    // (explicitApprovalKind === null). It must short-circuit here rather than
+    // fall through to parentId inheritance: dispatchRoutineRun passes both a
+    // trusted approvalKind (possibly null, when the routine declares none)
+    // AND parentId = the routine's own optional epic parent (an unrelated
+    // issue tree). Without this short-circuit, a routine with no approvalKind
+    // would silently inherit whatever kind that unrelated epic happens to
+    // carry — the exact bug this comment used to describe as already fixed.
+    return readStringFromRecord(input, "explicitApprovalKind");
+  }
+
+  if (input.parentId) {
+    const parent = await reader
+      .select({ approvalKind: issues.approvalKind })
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.id, input.parentId)))
+      .then((rows) => rows[0] ?? null);
+    if (parent?.approvalKind) return parent.approvalKind;
+  }
+
+  return null;
 }
 
 function buildReusedExecutionWorkspaceConfigPatchFromIssueSettings(
@@ -1882,6 +1931,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   idempotencyKey?: string | null;
   allowDuplicate?: boolean;
   onDeduplicated?: (reason: "idempotency_key" | "recent_open_title") => void;
+  trustExplicitApprovalKind?: boolean;
 };
 type IssueChildCreateInput = IssueCreateInput & {
   acceptanceCriteria?: string[];
@@ -4833,6 +4883,7 @@ const issueListSelect = {
   originFingerprint: issues.originFingerprint,
   requestDepth: issues.requestDepth,
   billingCode: issues.billingCode,
+  approvalKind: issues.approvalKind,
   assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
   executionPolicy: sql<null>`null`,
   executionState: sql<null>`null`,
@@ -5731,6 +5782,7 @@ async function listIssueBlockedInboxAttentionMap(
       executionState: issue.executionState,
       monitorNextCheckAt: issue.monitorNextCheckAt,
       monitorAttemptCount: issue.monitorAttemptCount,
+      updatedAt: issue.updatedAt,
     })),
     relations: graphRelations,
     agents: companyAgents,
@@ -5986,7 +6038,8 @@ async function listIssueBlockedInboxAttentionMap(
           reason: finding.state as IssueBlockedInboxAttention["reason"],
           severity:
             finding.state === "blocked_by_assigned_backlog_issue" ||
-            finding.state === "in_review_without_action_path"
+            finding.state === "in_review_without_action_path" ||
+            finding.state === "stale_assigned_backlog_issue"
               ? "high"
               : finding.severity === "critical"
                 ? "critical"
@@ -6017,6 +6070,8 @@ async function listIssueBlockedInboxAttentionMap(
                   return "Repair review participant";
                 case "in_review_without_action_path":
                   return "Choose review path";
+                case "stale_assigned_backlog_issue":
+                  return "Move to todo";
               }
             })(),
             detail: finding.recommendedAction,
@@ -9218,6 +9273,7 @@ export function issueService(db: Db) {
         actorResponsibleUserId: issueData.actorResponsibleUserId ?? null,
         trustExplicitResponsibleUserId:
           issueData.trustExplicitResponsibleUserId === true,
+        trustExplicitApprovalKind: issueData.trustExplicitApprovalKind === true,
         requestDepth: clampIssueRequestDepth(
           Math.max(
             clampIssueRequestDepth(parent.requestDepth) + 1,
@@ -9650,6 +9706,7 @@ export function issueService(db: Db) {
         idempotencyKey: rawIdempotencyKey,
         allowDuplicate,
         onDeduplicated,
+        trustExplicitApprovalKind,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (
@@ -10021,11 +10078,21 @@ export function issueService(db: Db) {
               trustExplicitResponsibleUserId === true,
           },
         );
+        // Fleet carry (#687): config-carried approvalKind — trusted explicit
+        // declaration (routine dispatch / human actor) or parentId inheritance.
+        // Deliberately NOT `?? null` on explicitApprovalKind: undefined means
+        // "inherit", null means "trusted declaration: no kind".
+        const approvalKind = await resolveApprovalKindForIssueCreate(tx, companyId, {
+          explicitApprovalKind: issueData.approvalKind,
+          parentId: issueData.parentId ?? null,
+          trustExplicitApprovalKind: trustExplicitApprovalKind === true,
+        });
 
         const values = {
           ...issueData,
           originRunId: issueData.originRunId ?? actorRunId ?? null,
           responsibleUserId,
+          approvalKind,
           requestDepth: clampIssueRequestDepth(issueData.requestDepth),
           originKind: issueData.originKind ?? "manual",
           goalId: resolveIssueGoalId({
@@ -10514,6 +10581,9 @@ export function issueService(db: Db) {
         actorAgentId,
         actorUserId,
         companyGuard,
+        // Fleet carry (#687): approvalKind is immutable after creation; strip it at
+        // the one choke point every update routes through (plugin SDK included).
+        approvalKind: _discardedApprovalKind,
         ...issueData
       } = data;
       if (
@@ -11945,6 +12015,7 @@ export function issueService(db: Db) {
 
       return db.transaction(async (tx) => {
         const now = new Date();
+        const verifiedRunId = await resolveVerifiedRunId(tx, actor.runId);
         const [comment] = await tx
           .update(issueComments)
           .set({
@@ -11957,7 +12028,7 @@ export function issueService(db: Db) {
               actor.actorType === "agent" ? (actor.agentId ?? null) : null,
             deletedByUserId:
               actor.actorType === "user" ? (actor.userId ?? null) : null,
-            deletedByRunId: actor.runId ?? null,
+            deletedByRunId: verifiedRunId,
             updatedAt: now,
           })
           .where(

@@ -47,6 +47,7 @@ export function approvalService(db: Db) {
     targetStatus: "approved" | "rejected",
     decidedByUserId: string,
     decisionNote: string | null | undefined,
+    expectedUpdatedAt?: string,
   ): Promise<ResolutionResult> {
     const existing = await getExistingApproval(id);
     if (!canResolveStatuses.has(existing.status)) {
@@ -68,7 +69,17 @@ export function approvalService(db: Db) {
         decidedAt: now,
         updatedAt: now,
       })
-      .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
+      .where(
+        and(
+          eq(approvals.id, id),
+          inArray(approvals.status, resolvableStatuses),
+          // Sub-millisecond tolerance: the caller's value went through a JS
+          // Date (ms) while the column may hold microseconds (defaultNow()).
+          expectedUpdatedAt
+            ? sql`abs(extract(epoch from (${approvals.updatedAt} - ${expectedUpdatedAt}::timestamptz))) < 0.001`
+            : undefined,
+        ),
+      )
       .returning()
       .then((rows) => rows[0] ?? null);
 
@@ -79,6 +90,9 @@ export function approvalService(db: Db) {
     const latest = await getExistingApproval(id);
     if (latest.status === targetStatus) {
       return { approval: latest, applied: false };
+    }
+    if (expectedUpdatedAt && canResolveStatuses.has(latest.status)) {
+      throw unprocessable("Approval changed since it was read (expectedUpdatedAt mismatch)");
     }
 
     throw unprocessable(
@@ -141,12 +155,18 @@ export function approvalService(db: Db) {
       return updated;
     },
 
-    approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
+    approve: async (
+      id: string,
+      decidedByUserId: string,
+      decisionNote?: string | null,
+      expectedUpdatedAt?: string,
+    ) => {
       const { approval: updated, applied } = await resolveApproval(
         id,
         "approved",
         decidedByUserId,
         decisionNote,
+        expectedUpdatedAt,
       );
 
       let hireApprovedAgentId: string | null = null;
@@ -212,12 +232,18 @@ export function approvalService(db: Db) {
       return { approval: updated, applied };
     },
 
-    reject: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
+    reject: async (
+      id: string,
+      decidedByUserId: string,
+      decisionNote?: string | null,
+      expectedUpdatedAt?: string,
+    ) => {
       const { approval: updated, applied } = await resolveApproval(
         id,
         "rejected",
         decidedByUserId,
         decisionNote,
+        expectedUpdatedAt,
       );
 
       if (applied && updated.type === "hire_agent") {
@@ -237,8 +263,10 @@ export function approvalService(db: Db) {
         throw unprocessable("Only pending approvals can request revision");
       }
 
+      // Conditional on still-pending (fleet carry): of two overlapping requests only
+      // one applies, so the route's activity + requester wake fire exactly once.
       const now = new Date();
-      return db
+      const updated = await db
         .update(approvals)
         .set({
           status: "revision_requested",
@@ -247,9 +275,11 @@ export function approvalService(db: Db) {
           decidedAt: now,
           updatedAt: now,
         })
-        .where(eq(approvals.id, id))
+        .where(and(eq(approvals.id, id), eq(approvals.status, "pending")))
         .returning()
-        .then((rows) => rows[0]);
+        .then((rows) => rows[0] ?? null);
+      if (!updated) throw unprocessable("Only pending approvals can request revision");
+      return updated;
     },
 
     resubmit: async (id: string, payload?: Record<string, unknown>) => {

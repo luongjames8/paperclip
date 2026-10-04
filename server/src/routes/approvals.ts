@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
-import { eq } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
+import { and, eq, inArray } from "drizzle-orm";
+import { heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
@@ -10,7 +10,9 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
+import { unprocessable } from "../errors.js";
 import {
+  agentService,
   approvalService,
   accessService,
   heartbeatService,
@@ -23,6 +25,54 @@ import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { issueService } from "../services/issues.js";
 import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "../services/recovery/review-path-recovery.js";
+
+// Fleet carry (#687): approvalKind is NEVER accepted as approval-creation input.
+// The server derives it from the linked issues, each of which carries the value
+// stamped/inherited at issue-create time (services/issues.ts
+// resolveApprovalKindForIssueCreate). Conflicting kinds, or a missing /
+// cross-company issue, is a loud 422 before any write.
+async function resolveApprovalKindFromLinkedIssues(
+  db: Db,
+  companyId: string,
+  issueIds: string[],
+): Promise<string | null> {
+  if (issueIds.length === 0) return null;
+  const rows = await db
+    .select({ id: issues.id, approvalKind: issues.approvalKind })
+    .from(issues)
+    .where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds)));
+  if (rows.length !== issueIds.length) {
+    const foundIds = new Set(rows.map((row) => row.id));
+    throw unprocessable("One or more linked issues do not exist in this company", {
+      missingIssueIds: issueIds.filter((id) => !foundIds.has(id)),
+    });
+  }
+  const kinds = new Set(
+    rows.map((row) => row.approvalKind).filter((kind): kind is string => Boolean(kind)),
+  );
+  if (kinds.size > 1) {
+    throw unprocessable("Linked issues carry conflicting approvalKind values", { kinds: [...kinds] });
+  }
+  return kinds.size === 1 ? [...kinds][0]! : null;
+}
+
+function readPayloadString(payload: unknown, key: string): string | null {
+  const value = (payload as Record<string, unknown> | null | undefined)?.[key];
+  return typeof value === "string" ? value : null;
+}
+
+// Fleet carry: the wake anchor must be a linked issue that is NOT terminal and
+// IS owned by the agent being woken — a terminal anchor gets the queued run
+// cancelled (issue_terminal_status, live 2026-07-02) and a foreign-owned anchor
+// is cancelled as stale. With no such issue the wake is agent-level.
+function pickNonTerminalAnchorIssueId(
+  linkedIssues: Array<{ id: string; status: string; assigneeAgentId?: string | null }>,
+  wakeAgentId: string,
+): string | null {
+  return linkedIssues.find(
+    (issue) => issue.status !== "done" && issue.status !== "cancelled" && issue.assigneeAgentId === wakeAgentId,
+  )?.id ?? null;
+}
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -52,6 +102,97 @@ export function approvalRoutes(
   });
   const issueApprovalsSvc = issueApprovalService(db);
   const issuesSvc = issueService(db);
+  const agentSvc = agentService(db);
+
+  // Fleet carry (codex P1 on fork #18): never wake a requester outside the
+  // approval's company.
+  async function resolveRequesterAgent(agentId: string, companyId: string) {
+    const agent = await agentSvc.getById(agentId);
+    if (!agent || agent.companyId !== companyId) {
+      logger.warn(
+        { requestedByAgentId: agentId, companyId },
+        "skipping wakeup: requestedByAgentId does not belong to approval company",
+      );
+      return null;
+    }
+    return agent;
+  }
+
+  // Fleet carry: reject and request-revision wake the card creator (with the
+  // decision note) so the reject / request-changes -> resubmit cycle self-drives;
+  // upstream only wakes on approve.
+  async function wakeRequesterForDecision(input: {
+    approval: { id: string; companyId: string; status: string; requestedByAgentId: string | null };
+    wakeReason: "approval_rejected" | "approval_revision_requested";
+    decisionNote: string | null;
+    linkedIssues: Awaited<ReturnType<typeof issueApprovalsSvc.listIssuesForApproval>>;
+    requestedByUserId: string;
+  }) {
+    const { approval, wakeReason, decisionNote, linkedIssues, requestedByUserId } = input;
+    if (!approval.requestedByAgentId) return;
+    if (!(await resolveRequesterAgent(approval.requestedByAgentId, approval.companyId))) return;
+    const linkedIssueIds = linkedIssues.map((issue) => issue.id);
+    const primaryIssueId = pickNonTerminalAnchorIssueId(linkedIssues, approval.requestedByAgentId);
+    const source = wakeReason === "approval_rejected" ? "approval.rejected" : "approval.revision_requested";
+    try {
+      const wakeRun = await heartbeat.wakeup(approval.requestedByAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: wakeReason,
+        payload: {
+          approvalId: approval.id,
+          approvalStatus: approval.status,
+          decisionNote,
+          issueId: primaryIssueId,
+          issueIds: linkedIssueIds,
+        },
+        requestedByActorType: "user",
+        requestedByActorId: requestedByUserId,
+        contextSnapshot: {
+          source,
+          approvalId: approval.id,
+          approvalStatus: approval.status,
+          decisionNote,
+          issueId: primaryIssueId,
+          issueIds: linkedIssueIds,
+          taskId: primaryIssueId,
+          wakeReason,
+        },
+      });
+      await logActivity(db, {
+        companyId: approval.companyId,
+        actorType: "user",
+        actorId: requestedByUserId,
+        action: "approval.requester_wakeup_queued",
+        entityType: "approval",
+        entityId: approval.id,
+        details: {
+          requesterAgentId: approval.requestedByAgentId,
+          wakeRunId: wakeRun?.id ?? null,
+          linkedIssueIds,
+          wakeReason,
+        },
+      });
+    } catch (err) {
+      logger.warn(
+        { err, approvalId: approval.id, requestedByAgentId: approval.requestedByAgentId, wakeReason },
+        "failed to queue requester wakeup after approval decision",
+      );
+      await logActivity(db, {
+        companyId: approval.companyId,
+        actorType: "user",
+        actorId: requestedByUserId,
+        action: "approval.requester_wakeup_failed",
+        entityType: "approval",
+        entityId: approval.id,
+        details: {
+          requesterAgentId: approval.requestedByAgentId,
+          linkedIssueIds,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
+    }
+  }
   const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
@@ -230,6 +371,7 @@ export function approvalRoutes(
       : [];
     const uniqueIssueIds = Array.from(new Set(issueIds));
     const { issueIds: _issueIds, ...approvalInput } = req.body;
+    const approvalKind = await resolveApprovalKindFromLinkedIssues(db, companyId, uniqueIssueIds);
     const normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
@@ -246,6 +388,7 @@ export function approvalRoutes(
       requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
       requestedByAgentId:
         approvalInput.requestedByAgentId ?? (actor.actorType === "agent" ? actor.actorId : null),
+      approvalKind,
       status: "pending",
       decisionNote: null,
       decidedByUserId: null,
@@ -268,7 +411,17 @@ export function approvalRoutes(
       action: "approval.created",
       entityType: "approval",
       entityId: approval.id,
-      details: { type: approval.type, issueIds: uniqueIssueIds },
+      // Fleet carry: discord-fleet routes on THESE details (the plugin event
+      // payload), never a follow-up GET — approvalKind (#687), the stable
+      // payload.approvalType discriminator, and title/proposedComment.
+      details: {
+        type: approval.type,
+        issueIds: uniqueIssueIds,
+        approvalKind,
+        title: readPayloadString(normalizedPayload, "title"),
+        proposedComment: readPayloadString(normalizedPayload, "proposedComment"),
+        approvalType: readPayloadString(normalizedPayload, "approvalType"),
+      },
     });
 
     res.status(201).json(redactApprovalPayload(approval));
@@ -291,12 +444,12 @@ export function approvalRoutes(
       return;
     }
     const decidedByUserId = req.actor.userId ?? "board";
-    const { approval, applied } = await svc.approve(id, decidedByUserId, req.body.decisionNote);
+    const { approval, applied } = await svc.approve(id, decidedByUserId, req.body.decisionNote, req.body.expectedUpdatedAt);
 
     if (applied) {
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
-      const primaryIssueId = linkedIssueIds[0] ?? null;
+      const primaryIssueId = pickNonTerminalAnchorIssueId(linkedIssues, approval.requestedByAgentId ?? "");
       const lostReviewIssueIds = await lostReviewPathIssueIds(approval.companyId, linkedIssues);
       const primaryReviewPathContext = primaryIssueId && lostReviewIssueIds.has(primaryIssueId)
         ? approvalReviewPathContext(approval.id)
@@ -317,7 +470,10 @@ export function approvalRoutes(
       });
 
       let primaryReviewPathWakeCovered = false;
-      if (approval.requestedByAgentId) {
+      if (
+        approval.requestedByAgentId &&
+        (await resolveRequesterAgent(approval.requestedByAgentId, approval.companyId))
+      ) {
         try {
           const wakeRun = await heartbeat.wakeup(approval.requestedByAgentId, {
             source: "automation",
@@ -407,7 +563,7 @@ export function approvalRoutes(
       return;
     }
     const decidedByUserId = req.actor.userId ?? "board";
-    const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote);
+    const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote, req.body.expectedUpdatedAt);
 
     if (applied) {
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
@@ -419,7 +575,18 @@ export function approvalRoutes(
         action: "approval.rejected",
         entityType: "approval",
         entityId: approval.id,
-        details: { type: approval.type },
+        details: {
+          type: approval.type,
+          requestedByAgentId: approval.requestedByAgentId,
+          linkedIssueIds: linkedIssues.map((issue) => issue.id),
+        },
+      });
+      await wakeRequesterForDecision({
+        approval,
+        wakeReason: "approval_rejected",
+        decisionNote: req.body.decisionNote ?? null,
+        linkedIssues,
+        requestedByUserId: req.actor.userId ?? "board",
       });
       await queueAdditionalApprovalReviewPathWakes({
         approvalId: approval.id,
@@ -446,6 +613,7 @@ export function approvalRoutes(
       }
       const decidedByUserId = req.actor.userId ?? "board";
       const approval = await svc.requestRevision(id, decidedByUserId, req.body.decisionNote);
+      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
 
       await logActivity(db, {
         companyId: approval.companyId,
@@ -454,7 +622,18 @@ export function approvalRoutes(
         action: "approval.revision_requested",
         entityType: "approval",
         entityId: approval.id,
-        details: { type: approval.type },
+        details: {
+          type: approval.type,
+          requestedByAgentId: approval.requestedByAgentId,
+          linkedIssueIds: linkedIssues.map((issue) => issue.id),
+        },
+      });
+      await wakeRequesterForDecision({
+        approval,
+        wakeReason: "approval_revision_requested",
+        decisionNote: req.body.decisionNote ?? null,
+        linkedIssues,
+        requestedByUserId: req.actor.userId ?? "board",
       });
 
       res.json(redactApprovalPayload(approval));

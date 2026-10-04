@@ -5491,6 +5491,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       }
 
       const resultAgents: CompanyPortabilityImportResult["agents"] = [];
+      const pendingSteps: CompanyPortabilityImportResult["pendingSteps"] = [];
       const resultProjects: CompanyPortabilityImportResult["projects"] = [];
       const resultRoutines: CompanyPortabilityImportResult["routines"] = [];
       const importedSlugToAgentId = new Map<string, string>();
@@ -5618,6 +5619,18 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
               }
             : {};
 
+          const recordPendingSteps = (agentId: string) => {
+            if (normalizedAdapter.adapterType !== "openclaw_gateway") return;
+            // "pair" is host-side by physics (the claimed-key file lives inside the
+            // gateway container); "heartbeat-enable" because imports deliberately
+            // disable timer heartbeats. Machine-consumable by fleet.sh pair/cattle-CI.
+            pendingSteps.push({
+              agentId,
+              agentSlug: planAgent.slug,
+              needs: ["pair", "heartbeat-enable"],
+            });
+          };
+
           if (planAgent.action === "update" && planAgent.existingAgentId) {
             let updated = await agents.update(planAgent.existingAgentId, {
               ...patch,
@@ -5655,6 +5668,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
               { targetType: "agent", targetId: updated.id },
               isPlainRecord(updated.adapterConfig) ? updated.adapterConfig.env : undefined,
             );
+            recordPendingSteps(updated.id);
             importedSlugToAgentId.set(planAgent.slug, updated.id);
             existingSlugToAgentId.set(normalizeAgentUrlKey(updated.name) ?? updated.id, updated.id);
             resultAgents.push({
@@ -5702,6 +5716,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             { targetType: "agent", targetId: created.id },
             isPlainRecord(created.adapterConfig) ? created.adapterConfig.env : undefined,
           );
+          recordPendingSteps(created.id);
           importedSlugToAgentId.set(planAgent.slug, created.id);
           existingSlugToAgentId.set(normalizeAgentUrlKey(created.name) ?? created.id, created.id);
           resultAgents.push({
@@ -6424,6 +6439,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           action: result.action,
           reason: result.reason,
         })),
+        pendingSteps,
         projects: resultProjects,
         routines: resultRoutines,
         envInputs: sourceManifest.envInputs ?? [],

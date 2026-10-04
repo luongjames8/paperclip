@@ -126,7 +126,7 @@ request_json() {
       curl -sS -X "$method" -w '%{http_code}' -o "$response_file" \
         "$url" \
         -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
-        -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" \
+        ${run_header[@]+"${run_header[@]}"} \
         -H 'Content-Type: application/json' \
         --data-binary "$body"
     )"
@@ -135,7 +135,7 @@ request_json() {
       curl -sS -X "$method" -w '%{http_code}' -o "$response_file" \
         "$url" \
         -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
-        -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID"
+        ${run_header[@]+"${run_header[@]}"}
     )"
   fi
 
@@ -168,7 +168,7 @@ upload_file() {
     curl -sS -X POST -w '%{http_code}' -o "$response_file" \
       "$url" \
       -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
-      -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" \
+      ${run_header[@]+"${run_header[@]}"} \
       -F "file=@\"${escaped_path}\";type=${content_type}"
   )" || curl_status=$?
 
@@ -398,10 +398,21 @@ if [[ "$dry_run" == "1" ]]; then
   exit 0
 fi
 
-if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" || -z "${PAPERCLIP_RUN_ID:-}" ]]; then
-  printf 'Missing PAPERCLIP_API_URL, PAPERCLIP_API_KEY, or PAPERCLIP_RUN_ID.\n' >&2
+if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" ]]; then
+  printf 'Missing PAPERCLIP_API_URL or PAPERCLIP_API_KEY.\n' >&2
   exit 1
 fi
+
+# PAPERCLIP_RUN_ID is set by paperclip's heartbeat runner, but chat/Discord and
+# manual wakes don't have one. Without a real run, send NO run attribution
+# (header, attachment lookup, work product) — the server ignores/rejects a
+# synthetic id — and key the local operation lock on a per-invocation id.
+run_id="${PAPERCLIP_RUN_ID:-}"
+run_header=()
+if [[ -n "$run_id" ]]; then
+  run_header=(-H "X-Paperclip-Run-Id: $run_id")
+fi
+operation_run="${run_id:-manual-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 if [[ -z "$issue_id" || -z "$company_id" ]]; then
   printf 'Missing issue or company id. Pass --issue-id/--company-id or set PAPERCLIP_TASK_ID/PAPERCLIP_COMPANY_ID.\n' >&2
@@ -416,7 +427,7 @@ esac
 file_sha256="$(sha256_file "$file_path")"
 original_filename="$(basename "$file_path")"
 operation_key="$(
-  sha256_text "$api_base|$company_id|$issue_id|$PAPERCLIP_RUN_ID|$original_filename|$file_sha256|$content_type"
+  sha256_text "$api_base|$company_id|$issue_id|$operation_run|$original_filename|$file_sha256|$content_type"
 )"
 acquire_operation_lock "$operation_key"
 trap release_operation_lock EXIT
@@ -433,14 +444,14 @@ for ((lookup_attempt = 1; lookup_attempt <= lookup_attempts; lookup_attempt++));
   attachment="$(
     jq -nc \
       --argjson attachments "$existing_attachments" \
-      --arg runId "$PAPERCLIP_RUN_ID" \
+      --arg runId "$run_id" \
       --arg sha256 "$file_sha256" \
       --arg originalFilename "$original_filename" \
       --arg contentType "$content_type" \
       'first(
         $attachments[]
         | select(
-            .originatingRunId == $runId
+            .originatingRunId == (if $runId == "" then null else $runId end)
             and ((.sha256 // "") | ascii_downcase) == ($sha256 | ascii_downcase)
             and (.originalFilename // "") == $originalFilename
             and ((.contentType // "") | ascii_downcase) == ($contentType | ascii_downcase)
@@ -503,7 +514,7 @@ if [[ "$create_work_product" == "1" ]]; then
       --arg title "$title" \
       --arg summary "$summary" \
       --arg status "$status" \
-      --arg runId "$PAPERCLIP_RUN_ID" \
+      --arg runId "$run_id" \
       --arg attachmentId "$attachment_id" \
       --arg contentType "$content_type" \
       --argjson byteSize "$byte_size" \
@@ -521,7 +532,7 @@ if [[ "$create_work_product" == "1" ]]; then
         isPrimary: $isPrimary,
         healthStatus: "unknown",
         summary: (if $summary == "" then null else $summary end),
-        createdByRunId: $runId,
+        createdByRunId: (if $runId == "" then null else $runId end),
         metadata: {
           attachmentId: $attachmentId,
           contentType: $contentType,

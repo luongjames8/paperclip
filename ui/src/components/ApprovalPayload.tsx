@@ -1,5 +1,6 @@
-import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck } from "lucide-react";
+import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, ChevronRight } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "./ui/collapsible";
 import { formatCents } from "../lib/utils";
 
 export const typeLabel: Record<string, string> = {
@@ -170,6 +171,11 @@ function stripLeadingListMarker(value: string): string {
   return value.replace(/^(?:[-*•]|\d+[.)])\s+/, "");
 }
 
+const KNOWN_BOARD_APPROVAL_KEYS = new Set([
+  "title", "summary", "recommendedAction", "nextActionOnApproval",
+  "risks", "proposedComment", "details", "description", "body",
+]);
+
 function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unknown> }) {
   const risks = Array.isArray(payload.risks)
     ? payload.risks
@@ -182,6 +188,20 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
   const recommendedAction = firstNonEmptyString(payload.recommendedAction);
   const nextActionOnApproval = firstNonEmptyString(payload.nextActionOnApproval);
   const proposedComment = firstNonEmptyString(payload.proposedComment);
+  // Fleet carry (#22): agent-composed cards put their reviewable content in
+  // details / description / body — render it instead of dropping it, and
+  // surface any other payload keys rather than hiding them.
+  const details = firstNonEmptyString(payload.details);
+  const description = firstNonEmptyString(payload.description);
+  const body = firstNonEmptyString(payload.body);
+  const showDetails = details !== null && details !== proposedComment && details !== summary;
+  const showDescription =
+    description !== null && description !== details && description !== proposedComment && description !== summary;
+  const showBody =
+    body !== null && body !== proposedComment && body !== summary && body !== details && body !== description;
+  const extraEntries = Object.entries(payload).filter(
+    ([key, value]) => !KNOWN_BOARD_APPROVAL_KEYS.has(key) && value !== undefined,
+  );
 
   return (
     <div className="mt-4 space-y-3.5 text-sm">
@@ -229,10 +249,39 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
           <p className="text-(length:--text-micro) font-medium uppercase tracking-(--tracking-label) text-muted-foreground">
             Proposed comment
           </p>
-          <pre className="max-h-48 overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-muted-foreground whitespace-pre-wrap">
-            {proposedComment}
-          </pre>
+          <MarkdownBody className="text-sm">{proposedComment}</MarkdownBody>
         </div>
+      )}
+      {showBody && (
+        <div className="space-y-1.5">
+          <p className="text-(length:--text-micro) font-medium uppercase tracking-(--tracking-label) text-muted-foreground">Body</p>
+          <MarkdownBody className="text-sm">{body}</MarkdownBody>
+        </div>
+      )}
+      {showDetails && (
+        <div className="space-y-1.5">
+          <p className="text-(length:--text-micro) font-medium uppercase tracking-(--tracking-label) text-muted-foreground">Details</p>
+          <MarkdownBody className="text-sm">{details}</MarkdownBody>
+        </div>
+      )}
+      {showDescription && (
+        <div className="space-y-1.5">
+          <p className="text-(length:--text-micro) font-medium uppercase tracking-(--tracking-label) text-muted-foreground">Description</p>
+          <MarkdownBody className="text-sm">{description}</MarkdownBody>
+        </div>
+      )}
+      {extraEntries.length > 0 && (
+        <Collapsible>
+          <CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors group">
+            <ChevronRight className="h-3 w-3 transition-transform group-data-[state=open]:rotate-90" />
+            Additional fields
+          </CollapsibleTrigger>
+          <CollapsibleContent className="pt-2">
+            <pre className="max-h-48 overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-muted-foreground whitespace-pre-wrap">
+              {JSON.stringify(Object.fromEntries(extraEntries), null, 2)}
+            </pre>
+          </CollapsibleContent>
+        </Collapsible>
       )}
     </div>
   );

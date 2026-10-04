@@ -33,6 +33,7 @@ vi.mock("../services/plugin-lifecycle.js", () => ({
 
 vi.mock("../services/activity-log.js", () => ({
   logActivity: vi.fn(),
+  publishPluginDomainEvent: vi.fn(),
 }));
 
 vi.mock("../services/secrets.js", () => ({
