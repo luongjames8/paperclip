@@ -3,8 +3,6 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
-// PR #13470 uses the code-owner-reviewed default branch for this first-party workflow.
-const ordinaryPrTrustedWorkflowRevision = "master";
 const fullStackTestNeeds =
   /needs:\s*\[\s*authorize,\s*target_lock,\s*catalog,\s*daytona_image,\s*build_runner_artifacts,\s*build_remote_provider_pack,?\s*\]/u;
 const buildRunnerNeeds =
@@ -15,7 +13,7 @@ const everydayOracleImage =
   "python@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285";
 
 describe("public repository paid workflow security", () => {
-  it("uses the reviewed master branch for the first-party trusted PR workflow", async () => {
+  it("uses the fork's protected live branch for the first-party trusted PR workflow", async () => {
     const ordinaryPrWorkflow = await readFile(
       path.join(repositoryRoot, ".github/workflows/pr.yml"),
       "utf8",
@@ -28,13 +26,11 @@ describe("public repository paid workflow security", () => {
 
     expect(trustedWorkflowCalls).toHaveLength(1);
     const [, caller, revision] = trustedWorkflowCalls[0] ?? [];
-    if (caller?.startsWith("luongjames8/")) {
-      // Fork carry: the fork's live, protected rebase-* branch — never a PR copy.
-      expect(revision).toMatch(/^rebase-[0-9]+$/u);
-    } else {
-      expect(caller).toBe("paperclipai/paperclip/.github/workflows/pr-trusted.yml");
-      expect(revision).toBe(ordinaryPrTrustedWorkflowRevision);
-    }
+    // Fork carry (luongjames8/paperclip): ONLY the fork's own trusted workflow
+    // on its live, protected rebase-* branch — a rebase that restores
+    // upstream's caller would silently drop the fork's lockfile policy.
+    expect(caller).toBe("luongjames8/paperclip/.github/workflows/pr-trusted.yml");
+    expect(revision).toMatch(/^rebase-[0-9]+$/u);
   });
 
   it("keeps pnpm bootstrap registry telemetry out of trusted workflow setup", async () => {
