@@ -443,8 +443,12 @@ export class PaperclipClient {
     await this.resolveApproval(approvalId, "approve", decisionNote);
   }
 
-  async rejectApproval(approvalId: string, decisionNote?: string): Promise<void> {
-    await this.resolveApproval(approvalId, "reject", decisionNote);
+  /**
+   * expectedUpdatedAt: reject only if the approval is still the generation
+   * that was read (server answers 422 otherwise — e.g. it was resubmitted).
+   */
+  async rejectApproval(approvalId: string, decisionNote?: string, expectedUpdatedAt?: string): Promise<void> {
+    await this.resolveApproval(approvalId, "reject", decisionNote, expectedUpdatedAt);
   }
 
   async requestRevisionApproval(approvalId: string, decisionNote?: string): Promise<void> {
@@ -487,9 +491,10 @@ export class PaperclipClient {
     approvalId: string,
     action: "approve" | "reject" | "request-revision",
     decisionNote?: string,
+    expectedUpdatedAt?: string,
   ): Promise<void> {
     const url = `${this.baseUrl}/api/approvals/${approvalId}/${action}`;
-    const body = decisionNote ? JSON.stringify({ decisionNote }) : "{}";
+    const body = JSON.stringify({ decisionNote: decisionNote || undefined, expectedUpdatedAt });
     const res = await this.ctx.http.fetch(url, {
       method: "POST",
       headers: {

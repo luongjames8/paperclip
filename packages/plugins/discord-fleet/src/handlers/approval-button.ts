@@ -8,7 +8,7 @@ import {
   APPROVAL_REVISION_MODAL_PREFIX,
   APPROVAL_REVISION_NOTE_FIELD,
 } from "../render/embeds.js";
-import { PENDING_APPROVALS_KEY } from "./approval-created.js";
+import { updatePendingApprovals } from "./approval-created.js";
 import { resolveSecret } from "../config/secrets.js";
 
 export type ApprovalAction = "approve" | "reject" | "revision";
@@ -179,12 +179,7 @@ async function removeFromPending(
   companyId: string,
   approvalId: string,
 ): Promise<void> {
-  const key = { scopeKind: "company" as const, scopeId: companyId, stateKey: PENDING_APPROVALS_KEY };
-  const current = ((await ctx.state.get(key)) as string[] | null) ?? [];
-  const next = current.filter((id) => id !== approvalId);
-  if (next.length !== current.length) {
-    await ctx.state.set(key, next);
-  }
+  await updatePendingApprovals(ctx, companyId, (ids) => ids.filter((id) => id !== approvalId));
 }
 
 function resolveCompany(config: DiscordFleetConfig, guildId: string | null): CompanyConfig | undefined {

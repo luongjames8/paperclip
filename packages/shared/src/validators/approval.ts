@@ -24,6 +24,11 @@ export type CreateApproval = z.infer<typeof createApprovalSchema>;
 
 export const resolveApprovalSchema = z.object({
   decisionNote: multilineTextSchema.optional().nullable(),
+  // Fleet carry: optional compare-and-set on the approval's generation. When
+  // set, the resolution only applies if the row's updatedAt still matches —
+  // so an automated decision taken from a read can't land on a later
+  // resubmission of the same approval (resubmit bumps updatedAt).
+  expectedUpdatedAt: z.string().datetime({ offset: true }).optional(),
 });
 
 export type ResolveApproval = z.infer<typeof resolveApprovalSchema>;

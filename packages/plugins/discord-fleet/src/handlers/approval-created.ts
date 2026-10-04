@@ -71,6 +71,34 @@ export const PENDING_APPROVALS_KEY = "pending-approvals";
 export const POSTED_MARKER_PREFIX = "approval-posted:";
 export const POSTING_MARKER_PREFIX = "approval-posting:";
 export const POSTING_STALE_MS = 2 * 60 * 1000;
+
+// The state API has no compare-and-swap, so every read-modify-write of the
+// shared PENDING list goes through this per-company in-process chain (one
+// worker process receives every delivery for this plugin). Without it, two
+// concurrent writers both read the same array and the last write drops the
+// other's change from the digest and /status.
+const pendingListChains = new Map<string, Promise<void>>();
+
+export async function updatePendingApprovals(
+  ctx: PluginContext,
+  companyId: string,
+  mutate: (ids: string[]) => string[],
+): Promise<void> {
+  const run = (pendingListChains.get(companyId) ?? Promise.resolve()).then(async () => {
+    const key = { scopeKind: "company" as const, scopeId: companyId, stateKey: PENDING_APPROVALS_KEY };
+    const raw = await ctx.state.get(key);
+    // Non-array state (corruption / old-version write) must not throw.
+    const ids = Array.isArray(raw) ? (raw as unknown[]).filter((x): x is string => typeof x === "string") : [];
+    await ctx.state.set(key, mutate(ids));
+  });
+  const tail = run.catch(() => {});
+  pendingListChains.set(companyId, tail);
+  try {
+    await run;
+  } finally {
+    if (pendingListChains.get(companyId) === tail) pendingListChains.delete(companyId);
+  }
+}
 const CONTENT_CHUNK_MAX = 1900;
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
@@ -712,15 +740,5 @@ async function handleApprovalCreatedOnce(
     }
   }
 
-  const pendingRaw = await ctx.state.get({
-    scopeKind: "company",
-    scopeId: companyId,
-    stateKey: PENDING_APPROVALS_KEY,
-  });
-  // Non-array state (corruption / old-version write) must not throw on push.
-  const pending = Array.isArray(pendingRaw)
-    ? (pendingRaw as unknown[]).filter((x): x is string => typeof x === "string")
-    : [];
-  pending.push(approvalId);
-  await ctx.state.set({ scopeKind: "company", scopeId: companyId, stateKey: PENDING_APPROVALS_KEY }, pending);
+  await updatePendingApprovals(ctx, companyId, (ids) => [...ids, approvalId]);
 }

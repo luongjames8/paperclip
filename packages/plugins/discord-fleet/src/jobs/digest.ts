@@ -6,8 +6,8 @@ import { postToChannel } from "../discord/rest.js";
 import { stripSecrets } from "../render/secrets.js";
 import { truncate } from "../render/plain.js";
 import CronParser from "cron-parser";
+import { PENDING_APPROVALS_KEY, updatePendingApprovals } from "../handlers/approval-created.js";
 
-const PENDING_APPROVALS_KEY = "pending-approvals";
 const LAST_DIGEST_FIRE_KEY = "last-digest-fire";
 
 // When last-fire is more than one cron interval ago (e.g. process was down for multiple days),
@@ -70,7 +70,10 @@ export async function runDigest(
     ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey: PENDING_APPROVALS_KEY }),
   ]);
 
-  const pending = (pendingRaw as string[] | null) ?? [];
+  // Non-array state (corruption / old-version write) must not throw below.
+  const pending = Array.isArray(pendingRaw)
+    ? (pendingRaw as unknown[]).filter((x): x is string => typeof x === "string")
+    : [];
 
   if (errors.length === 0 && pending.length === 0) {
     await postToChannel(client, config.channels.digest, "✅ All clear — no blocked issues or pending approvals in the last 24h.");
@@ -96,8 +99,10 @@ export async function runDigest(
 
   await postToChannel(client, config.channels.digest, stripSecrets(truncate(lines.join("\n"))));
 
-  // Clear pending approvals after digest
-  await ctx.state.set({ scopeKind: "company", scopeId: companyId, stateKey: PENDING_APPROVALS_KEY }, []);
+  // Clear the approvals this digest reported — only those, so an id added
+  // while the digest was posting survives to the next one.
+  const reported = new Set(pending);
+  await updatePendingApprovals(ctx, companyId, (ids) => ids.filter((id) => !reported.has(id)));
 
   await markDigestFired(ctx, config, scheduledSlot);
 }
